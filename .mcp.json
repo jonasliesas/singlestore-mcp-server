@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "singlestore": {
+      "command": "uv",
+      "args": ["run", "--directory", ".", "singlestore-mcp-server"],
+      "env": {
+        "SINGLESTORE_HOST": "${SINGLESTORE_HOST}",
+        "SINGLESTORE_USER": "${SINGLESTORE_USER}",
+        "SINGLESTORE_PASSWORD": "${SINGLESTORE_PASSWORD}",
+        "SINGLESTORE_DATABASE": "${SINGLESTORE_DATABASE:-}",
+        "SINGLESTORE_SSL_DISABLED": "${SINGLESTORE_SSL_DISABLED:-false}"
+      }
+    }
+  }
+}

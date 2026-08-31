@@ -1,0 +1,22 @@
+{
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "singlestore-password",
+      "description": "SingleStore password",
+      "password": true
+    }
+  ],
+  "servers": {
+    "singlestore": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "--directory", "${workspaceFolder}", "singlestore-mcp-server"],
+      "env": {
+        "SINGLESTORE_HOST": "10.104.80.126",
+        "SINGLESTORE_USER": "admin",
+        "SINGLESTORE_PASSWORD": "${input:singlestore-password}"
+      }
+    }
+  }
+}
