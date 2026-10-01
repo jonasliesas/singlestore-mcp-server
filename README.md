@@ -6,10 +6,13 @@ driver code:
 
 - [`mcp`](https://github.com/modelcontextprotocol/python-sdk) — the official
   Model Context Protocol Python SDK. It handles the stdio transport, JSON-RPC
-  framing and tool-schema generation (`FastMCP`).
+  framing, tool-schema generation (`MCPServer`) and the MCP Apps extension.
 - [`singlestoredb`](https://github.com/singlestore-labs/singlestoredb-python)
   — SingleStore's own official Python client. It handles the actual database
   connection.
+- [`@modelcontextprotocol/ext-apps`](https://github.com/modelcontextprotocol/ext-apps)
+  — the official MCP Apps browser client, vendored and inlined into the
+  interactive UIs (see [MCP Apps](#mcp-apps)).
 
 Everything in [`src/singlestore_mcp`](src/singlestore_mcp) is glue: a
 connection wrapper ([`db.py`](src/singlestore_mcp/db.py)) and a set of MCP
@@ -35,6 +38,67 @@ Pipelines:
   syntax varies too much by source/format to model as parameters)
 - `start_pipeline` (background or `FOREGROUND`, with optional batch limit)
 - `stop_pipeline`, `drop_pipeline`, `test_pipeline`
+
+Interactive apps (see below): `pipeline_monitor`, `query_grid`, `schema_explorer`.
+
+## MCP Apps
+
+In hosts that support [MCP Apps](https://modelcontextprotocol.io/seps/1865-mcp-apps-interactive-user-interfaces-for-mcp)
+(e.g. Claude), three tools render an interactive UI inline in the chat
+instead of plain text. In other hosts they still return a normal text result.
+
+| Tool | What it shows |
+|---|---|
+| `pipeline_monitor(database?)` | Every pipeline's state, source → target table, latest batch, batch history and recent errors. Start / Stop (with confirmation), Test, error drill-down, "Ask Claude" to diagnose an error, optional 10 s auto-refresh. |
+| `query_grid(sql, database?, max_rows=1000)` | Read-only query results as a sortable, filterable, paginated grid with CSV export. The SQL can be edited and re-run from the grid. Only SELECT / WITH / SHOW / DESCRIBE / EXPLAIN are accepted; writes are rejected before reaching the database. |
+| `schema_explorer(database?, table?)` | Databases → tables tree with row counts and sizes, and per-table columns, DDL (shard/sort keys) and a row preview. "Ask Claude" and "Query in grid" hand the table back to the chat. |
+
+The model gets a compact text summary (e.g. the first 20 rows); the full data
+goes to the UI only, via `structuredContent`, which the MCP Apps spec keeps
+out of the model's context. Helper tools the UIs call for refreshes and
+drill-downs are marked app-only, so they don't clutter the model's tool list.
+
+Layout: [`src/singlestore_mcp/apps/`](src/singlestore_mcp/apps) — one
+`<name>.py` (tools) + `<name>.html` (UI) per app, shared `shared.js` /
+`shared.css` helpers, and the official ext-apps client in `vendor/`, inlined
+at startup so the apps need no CDN or internet access.
+
+Each app has a **⤢ Full screen** button (Esc to exit) when the host offers
+fullscreen display mode; the grid and explorer then use the full height.
+
+**↗ Open in browser** reopens the current view (same database, query or
+table) full-window in your normal browser, for when the chat column is too
+narrow. Each app's result also carries this link (`browser_url`), which
+Claude posts under the app, and the `browser_link` tool creates one on
+request. If the host won't open links itself, the button shows the link with
+Copy / "Put link in chat". The server starts a small web server on `127.0.0.1` on first use and
+gives each run a secret link; it only accepts calls from its own page and
+only runs the apps' tools plus start/stop/test pipeline. Links stop working
+when the MCP server restarts. Actions taken there (e.g. Start/Stop) don't go
+through Claude's approval prompt — the apps' own confirmations still apply —
+and "Ask Claude" is only available inside Claude.
+
+Notes:
+- `TEST PIPELINE` loads no data, but a failed test is recorded in the
+  pipeline's batch history and error log like a real batch.
+- Each button that calls a tool goes through the host, which may ask you to
+  approve app-initiated tool calls.
+
+### Developing apps
+
+`scripts/dev_host.py` is a local stand-in for Claude: it starts the real
+server over stdio, renders an app in a sandboxed iframe and speaks the MCP
+Apps protocol to it, against your real cluster.
+
+```bash
+uv run python scripts/dev_host.py --port 8765
+```
+
+Open http://127.0.0.1:8765, pick a tool, give JSON arguments, Run. Each run
+starts a fresh server, so Python and HTML edits show up on reload. The right
+panel shows the protocol log and anything the app sends to the chat. Add
+`&debug=1` to the URL to give the iframe same-origin access (`appDoc()` in
+the console returns the app's document) for scripted testing.
 
 ## Setup
 

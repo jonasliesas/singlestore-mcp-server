@@ -25,10 +25,25 @@ import re
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
 
+from .apps import apps
+from .apps._core import set_browser_url_factory, surface_errors
+from .apps.browser_view import BrowserView
 from .db import InvalidIdentifierError, db, quote_identifier
 
-mcp = MCPServer("singlestore")
+mcp = MCPServer("singlestore", extensions=[apps])
+
+
+def tool(**kwargs: Any):
+    """``mcp.tool`` that reports SQL/validation errors to the model verbatim."""
+
+    def decorator(fn):
+        mcp.tool(**kwargs)(surface_errors(fn))
+        return fn
+
+    return decorator
+
 
 _CREATE_PIPELINE_RE = re.compile(r"^\s*CREATE\s+(OR\s+REPLACE\s+)?PIPELINE\b", re.IGNORECASE)
 _ALTER_PIPELINE_RE = re.compile(r"^\s*ALTER\s+PIPELINE\b", re.IGNORECASE)
@@ -56,7 +71,7 @@ def _pipeline_name_clause(pipeline_name: str) -> str:
 # --------------------------------------------------------------------------
 
 
-@mcp.tool()
+@tool()
 def run_sql(sql: str, database: str | None = None, max_rows: int = _DEFAULT_MAX_ROWS) -> dict[str, Any]:
     """Run one arbitrary SQL statement against SingleStore and return the results.
 
@@ -79,13 +94,13 @@ def run_sql(sql: str, database: str | None = None, max_rows: int = _DEFAULT_MAX_
     return result
 
 
-@mcp.tool()
+@tool()
 def list_databases() -> dict[str, Any]:
     """List all databases visible to the connected user."""
     return _exec("SHOW DATABASES")
 
 
-@mcp.tool()
+@tool()
 def list_tables(database: str | None = None) -> dict[str, Any]:
     """List tables (and views) in a database.
 
@@ -96,7 +111,7 @@ def list_tables(database: str | None = None) -> dict[str, Any]:
     return _exec("SHOW TABLES", database=database)
 
 
-@mcp.tool()
+@tool()
 def describe_table(table: str, database: str | None = None) -> dict[str, Any]:
     """Show column definitions for a table.
 
@@ -113,7 +128,7 @@ def describe_table(table: str, database: str | None = None) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
-@mcp.tool()
+@tool()
 def list_pipelines(database: str | None = None) -> dict[str, Any]:
     """List all pipelines in a database and their current state (Running/Stopped/Error).
 
@@ -124,7 +139,7 @@ def list_pipelines(database: str | None = None) -> dict[str, Any]:
     return _exec("SHOW PIPELINES", database=database)
 
 
-@mcp.tool()
+@tool()
 def pipeline_status(pipeline_name: str, database: str | None = None) -> dict[str, Any]:
     """Get the current state of one pipeline by name.
 
@@ -145,7 +160,7 @@ def pipeline_status(pipeline_name: str, database: str | None = None) -> dict[str
     return result
 
 
-@mcp.tool()
+@tool()
 def get_pipeline_ddl(pipeline_name: str, database: str | None = None) -> dict[str, Any]:
     """Get the full CREATE PIPELINE statement that reproduces an existing pipeline.
 
@@ -158,7 +173,7 @@ def get_pipeline_ddl(pipeline_name: str, database: str | None = None) -> dict[st
     return _exec(f"SHOW CREATE PIPELINE {clause}", database=database)
 
 
-@mcp.tool()
+@tool()
 def create_pipeline(create_pipeline_sql: str, database: str | None = None) -> dict[str, Any]:
     """Create a new pipeline from a full CREATE PIPELINE statement.
 
@@ -191,7 +206,7 @@ def create_pipeline(create_pipeline_sql: str, database: str | None = None) -> di
     return _exec(create_pipeline_sql, database=database, fetch=False)
 
 
-@mcp.tool()
+@tool()
 def alter_pipeline(alter_pipeline_sql: str, database: str | None = None) -> dict[str, Any]:
     """Alter an existing pipeline from a full ALTER PIPELINE statement.
 
@@ -212,7 +227,7 @@ def alter_pipeline(alter_pipeline_sql: str, database: str | None = None) -> dict
     return _exec(alter_pipeline_sql, database=database, fetch=False)
 
 
-@mcp.tool()
+@tool()
 def start_pipeline(
     pipeline_name: str,
     database: str | None = None,
@@ -248,7 +263,7 @@ def start_pipeline(
     return _exec(sql, database=database, fetch=foreground)
 
 
-@mcp.tool()
+@tool()
 def stop_pipeline(pipeline_name: str, database: str | None = None) -> dict[str, Any]:
     """Stop a running pipeline.
 
@@ -261,7 +276,7 @@ def stop_pipeline(pipeline_name: str, database: str | None = None) -> dict[str, 
     return _exec(f"STOP PIPELINE {clause}", database=database, fetch=False)
 
 
-@mcp.tool()
+@tool()
 def drop_pipeline(pipeline_name: str, database: str | None = None, if_exists: bool = True) -> dict[str, Any]:
     """Delete a pipeline. Running pipelines are stopped automatically before being dropped.
 
@@ -280,7 +295,7 @@ def drop_pipeline(pipeline_name: str, database: str | None = None, if_exists: bo
     return _exec(sql, database=database, fetch=False)
 
 
-@mcp.tool()
+@tool()
 def test_pipeline(pipeline_name: str, database: str | None = None, limit: int | None = None) -> dict[str, Any]:
     """Test an existing pipeline: extract and transform data without loading it into the table.
 
@@ -301,6 +316,27 @@ def test_pipeline(pipeline_name: str, database: str | None = None, limit: int | 
     if limit is not None:
         sql += f" LIMIT {int(limit)}"
     return _exec(sql, database=database)
+
+
+browser_view = BrowserView(mcp)
+set_browser_url_factory(browser_view.url)
+
+
+@tool(annotations=ToolAnnotations(readOnlyHint=True))
+def browser_link(tool: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Get a link that opens one of the interactive apps full-window in the user's web browser.
+
+    Use this when the user wants an app bigger than the chat allows or in
+    their browser. Give the user the returned URL as a clickable link. It
+    works on this machine only, until the MCP server restarts.
+
+    Args:
+        tool: The app tool: pipeline_monitor, query_grid or schema_explorer.
+        arguments: That tool's arguments, e.g. {"sql": "...", "database": "SASDP"}
+            for query_grid or {"database": "SASDP", "table": "CARS"} for
+            schema_explorer.
+    """
+    return {"url": browser_view.url(tool, arguments or {})}
 
 
 def main() -> None:

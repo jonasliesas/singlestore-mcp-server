@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Query Results</title>
+<!--S2:HEAD-->
+<style>
+.qg-head { margin-bottom: 8px; }
+.qg-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.qg-meta .s2-subtitle { white-space: nowrap; }
+.qg-sql { margin-bottom: 8px; padding: 8px; background: var(--s2-bg-2); border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); }
+.qg-sql[hidden] { display: none; }
+.qg-sql textarea {
+  display: block; width: 100%; min-height: 64px; max-height: 260px; resize: vertical;
+  font-family: var(--s2-mono); font-size: var(--s2-fs-xs); line-height: 1.5;
+  border: 1px solid var(--s2-border); border-radius: var(--s2-radius-sm);
+  background: var(--s2-bg); padding: 6px 8px; tab-size: 2;
+}
+.qg-sql textarea:focus { outline: 2px solid var(--s2-ring); outline-offset: -1px; }
+.qg-sql .s2-toolbar { margin-top: 6px; }
+.qg-sql .s2-error { margin-top: 6px; font-family: var(--s2-mono); font-size: var(--s2-fs-xs); }
+.qg-sql label { display: inline-flex; align-items: center; gap: 4px; color: var(--s2-text-2); font-size: var(--s2-fs-xs); }
+.qg-db { width: 150px; }
+.qg-limit { width: 76px; }
+.qg-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.qg-filter { width: 220px; font-size: var(--s2-fs-xs); }
+.qg-count { color: var(--s2-text-2); font-size: var(--s2-fs-xs); white-space: nowrap; }
+.qg-pager { display: flex; align-items: center; gap: 4px; font-size: var(--s2-fs-xs); color: var(--s2-text-2); }
+.qg-pager .s2-btn { padding: 2px 7px; }
+.qg-pager select { border: 1px solid var(--s2-border); background: var(--s2-bg); border-radius: var(--s2-radius-sm); padding: 1px 4px; font-size: var(--s2-fs-xs); }
+.qg-grid { max-height: 460px; }
+html[data-display-mode="fullscreen"] .qg-grid { max-height: calc(100vh - 150px); }
+.qg-grid .s2-table { width: max-content; min-width: 100%; }
+.qg-grid .s2-table td { max-width: 320px; }
+.qg-grid .s2-table th { max-width: 320px; }
+.qg-grid .s2-table th:focus-visible { outline: 2px solid var(--s2-ring); outline-offset: -2px; }
+.qg-grid .s2-table th.qg-rn, .qg-grid .s2-table td.qg-rn {
+  color: var(--s2-text-3); text-align: right; font-variant-numeric: tabular-nums; padding-right: 6px; width: 1%;
+  font-family: var(--s2-font);
+}
+.qg-grid .s2-table td.qg-none { text-align: center; color: var(--s2-text-2); padding: 18px; font-family: var(--s2-font); }
+.qg-warn { color: var(--s2-warn); font-size: var(--s2-fs-xs); margin-bottom: 6px; }
+.s2-btn .s2-spinner { width: 10px; height: 10px; }
+</style>
+</head>
+<body>
+<div id="root"><div class="s2-empty"><span class="s2-spinner"></span> Waiting for query…</div></div>
+<script type="module">
+const { h } = S2;
+const root = document.getElementById("root");
+const PAGE_SIZES = [50, 100, 250, 500];
+const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
+const state = {
+  args: { sql: "", database: null, max_rows: 1000 }, // what the panel edits / re-runs
+  data: null,          // structuredContent of the last successful run
+  error: null,         // error of the initial tool call (no data yet)
+  running: false,
+  runError: null,      // error of a re-run (shown in the SQL panel, old data stays)
+  sqlOpen: false,
+  sortCol: null, sortDir: 1,
+  filter: "",
+  page: 0, pageSize: 100,
+  view: [],            // row indices after filter + sort
+};
+// Drop the SDK's "Error executing tool query_grid: " prefix for display.
+const cleanError = (e) => new Error(String(e?.message ?? e).replace(/^Error executing tool \w+:\s*/, ""));
+let numeric = {};      // column -> boolean
+let haystack = null;   // lowercased text per row, built on first filter
+
+// ---------- data handling ----------
+function setData(data) {
+  state.data = data;
+  state.error = null;
+  state.args = { sql: data.sql ?? state.args.sql, database: data.database ?? null, max_rows: data.max_rows ?? state.args.max_rows };
+  numeric = Object.fromEntries((data.columns ?? []).map((c) => [c, S2.isNumericColumn(data.rows ?? [], c)]));
+  haystack = null;
+  if (!data.columns?.includes(state.sortCol)) state.sortCol = null;
+  state.page = 0;
+  loadArgsIntoPanel();
+  recompute();
+  render();
+  describeForModel(true);
+}
+
+function rowText(row) {
+  let s = "";
+  for (const c of state.data.columns) s += S2.cellText(row[c]).toLowerCase() + "\u0001";
+  return s;
+}
+
+function compare(a, b) {
+  const col = state.sortCol;
+  const x = a[col], y = b[col];
+  if (x == null || y == null) return x == null && y == null ? 0 : x == null ? 1 : -1; // nulls last, both directions
+  if (numeric[col]) return (Number(x) - Number(y)) * state.sortDir;
+  return collator.compare(S2.cellText(x), S2.cellText(y)) * state.sortDir;
+}
+
+function recompute() {
+  const rows = state.data?.rows ?? [];
+  let idx = rows.map((_, i) => i);
+  const q = state.filter.trim().toLowerCase();
+  if (q) {
+    haystack ??= rows.map(rowText);
+    idx = idx.filter((i) => haystack[i].includes(q));
+  }
+  if (state.sortCol) idx.sort((i, j) => compare(rows[i], rows[j]) || i - j);
+  state.view = idx;
+  const pages = Math.max(1, Math.ceil(idx.length / state.pageSize));
+  state.page = Math.min(state.page, pages - 1);
+}
+
+// The tool result the model sees has no rows (just a summary and a
+// result_id); the rows are fetched separately so they stay out of the model's
+// context. If the server no longer has the result, re-run the query.
+async function withRows(data) {
+  if (data.rows || !data.has_result_set || !data.result_id) return data;
+  try {
+    return { ...data, rows: (await S2.callTool("query_grid_rows", { result_id: data.result_id })).rows };
+  } catch {
+    const fresh = await S2.callTool("query_grid", { sql: data.sql, database: data.database, max_rows: data.max_rows });
+    return { ...fresh, rows: (await S2.callTool("query_grid_rows", { result_id: fresh.result_id })).rows };
+  }
+}
+
+// ---------- running ----------
+async function run() {
+  const sql = sqlBox.value.trim();
+  if (!sql || state.running) return;
+  const database = dbBox.value.trim() || null;
+  const maxRows = Math.max(1, Math.min(10000, parseInt(limitBox.value, 10) || 1000));
+  state.args = { sql, database, max_rows: maxRows };
+  state.running = true;
+  state.runError = null;
+  renderSqlStatus();
+  try {
+    const data = await withRows(await S2.callTool("query_grid", { sql, database, max_rows: maxRows }));
+    state.running = false;
+    setData(data);
+  } catch (e) {
+    state.running = false;
+    state.runError = cleanError(e);
+    renderSqlStatus();
+  }
+}
+
+// ---------- model context ----------
+let ctxTimer = null;
+function describeForModel(now = false) {
+  clearTimeout(ctxTimer);
+  const send = () => {
+    const d = state.data;
+    if (!d) return;
+    const sql = d.sql.length > 600 ? d.sql.slice(0, 600) + "…" : d.sql;
+    let text = d.has_result_set
+      ? `The user is viewing ${d.row_count} row(s) x ${d.columns.length} column(s)${d.truncated ? ` (truncated at max_rows=${d.max_rows})` : ""} in the Query Results Grid`
+      : "The user ran a statement with no result set in the Query Results Grid";
+    text += `${d.database ? ` (database ${d.database})` : ""} for:\n${sql}`;
+    if (state.filter.trim()) text += `\nFiltered by "${state.filter.trim()}": ${state.view.length} matching row(s).`;
+    if (state.sortCol) text += `\nSorted by ${state.sortCol} ${state.sortDir > 0 ? "ascending" : "descending"}.`;
+    S2.updateModelContext(text);
+  };
+  if (now) send(); else ctxTimer = setTimeout(send, 1000);
+}
+
+// ---------- CSV ----------
+function csvField(v) {
+  if (v == null) return "";
+  const s = typeof v === "object" ? JSON.stringify(v) : String(v);
+  return /[",\r\n]|^\s|\s$/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+function exportCsv() {
+  const d = state.data;
+  const lines = [d.columns.map(csvField).join(",")];
+  for (const i of state.view) {
+    const row = d.rows[i];
+    lines.push(d.columns.map((c) => csvField(row[c])).join(","));
+  }
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
+  S2.download(`query-results-${stamp}.csv`, "﻿" + lines.join("\r\n") + "\r\n", "text/csv")
+    .then((ok) => ok && S2.toast(`Exported ${state.view.length.toLocaleString()} row(s)`, "ok"));
+}
+
+// ---------- persistent SQL panel elements ----------
+const sqlBox = h("textarea", {
+  spellcheck: false, "aria-label": "SQL query",
+  onkeydown: (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); run(); } },
+});
+const dbBox = h("input", { class: "s2-input qg-db s2-small", placeholder: "default", "aria-label": "Database" });
+const limitBox = h("input", { class: "s2-input qg-limit s2-small", type: "number", min: 1, max: 10000, step: 1, "aria-label": "Max rows" });
+const runBtn = h("button", { class: "s2-btn primary", onclick: run, title: "Run (Ctrl+Enter)" }, "Run");
+const sqlStatus = h("div");
+const sqlPanel = h("div", { class: "qg-sql" },
+  sqlBox,
+  h("div", { class: "s2-toolbar" },
+    runBtn,
+    h("label", {}, "Database", dbBox),
+    h("label", {}, "Max rows", limitBox),
+    h("span", { class: "s2-faint s2-small" }, "Ctrl+Enter to run · read-only statements only")),
+  sqlStatus);
+
+// Only called when new args arrive, so toggling the panel keeps the user's edits.
+function loadArgsIntoPanel() {
+  sqlBox.value = state.args.sql ?? "";
+  dbBox.value = state.args.database ?? "";
+  limitBox.value = state.args.max_rows ?? 1000;
+}
+
+function renderSqlStatus() {
+  runBtn.disabled = state.running;
+  runBtn.replaceChildren(...(state.running ? [h("span", { class: "s2-spinner" }), "Running…"] : ["Run"]));
+  sqlStatus.replaceChildren(state.runError ? S2.errorBox(state.runError) : "");
+}
+
+// ---------- rendering ----------
+let tbody, headCells, pagerEl, countEl;
+
+function render() {
+  sqlPanel.hidden = !state.sqlOpen;
+  renderSqlStatus();
+  const d = state.data;
+  const parts = [renderHeader(), sqlPanel];
+  if (!d) {
+    parts.push(state.error ? S2.errorBox(state.error)
+      : h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Running query…"));
+  } else if (!d.has_result_set) {
+    parts.push(h("div", { class: "s2-empty" }, "The statement ran but returned no result set."));
+  } else {
+    for (const w of d.warnings ?? []) parts.push(h("div", { class: "qg-warn" }, "⚠ " + w));
+    parts.push(renderBar(), renderGrid());
+  }
+  root.replaceChildren(...parts);
+  if (d?.has_result_set) drawBody();
+}
+
+function renderHeader() {
+  const d = state.data;
+  const meta = [];
+  if (d?.has_result_set) {
+    meta.push(h("span", { class: "s2-badge info plain" }, `${S2.fmt.number(d.row_count)} row${d.row_count === 1 ? "" : "s"}`));
+    meta.push(h("span", { class: "s2-badge plain" }, `${d.columns.length} col${d.columns.length === 1 ? "" : "s"}`));
+    if (d.truncated) meta.push(h("span", {
+      class: "s2-badge warn", title: "More rows exist. Raise Max rows (up to 10,000) and re-run, or add a WHERE / LIMIT.",
+    }, `truncated at ${S2.fmt.number(d.max_rows)}`));
+  } else if (state.error) {
+    meta.push(h("span", { class: "s2-badge err" }, "failed"));
+  }
+  if (d) meta.push(h("span", { class: "s2-subtitle" }, S2.fmt.duration(d.elapsed_ms / 1000)));
+  const dbName = d ? d.database : state.args.database;
+  meta.push(h("span", { class: "s2-subtitle s2-mono" }, dbName ? `db: ${dbName}` : "default database"));
+  return h("div", { class: "s2-header qg-head" },
+    h("h1", { class: "s2-title" }, "Query results"),
+    h("div", { class: "qg-meta" }, meta),
+    h("span", { class: "s2-spacer" }),
+    h("div", { class: "s2-toolbar" },
+      h("button", {
+        class: "s2-btn", "aria-expanded": String(state.sqlOpen),
+        onclick: () => { state.sqlOpen = !state.sqlOpen; sqlPanel.hidden = !state.sqlOpen; render(); if (state.sqlOpen) sqlBox.focus(); },
+      }, state.sqlOpen ? "Hide SQL ▴" : "SQL ▾"),
+      h("button", { class: "s2-btn", disabled: !d?.has_result_set || !d.rows.length, onclick: exportCsv,
+        title: "Export the current (filtered + sorted) rows as CSV" }, "Export CSV"),
+      S2.openInBrowserButton("query_grid", () => state.args),
+      S2.fullscreenButton()));
+}
+
+let filterTimer = null;
+function renderBar() {
+  const input = h("input", {
+    class: "s2-input qg-filter", type: "search", placeholder: "Filter rows…", value: state.filter, "aria-label": "Filter rows",
+    oninput: (e) => {
+      clearTimeout(filterTimer);
+      filterTimer = setTimeout(() => { state.filter = e.target.value; state.page = 0; recompute(); drawBody(); describeForModel(); }, 120);
+    },
+  });
+  countEl = h("span", { class: "qg-count" });
+  pagerEl = h("div", { class: "qg-pager" });
+  return h("div", { class: "qg-bar" }, input, countEl, h("span", { class: "s2-spacer" }), pagerEl);
+}
+
+function renderGrid() {
+  const d = state.data;
+  headCells = d.columns.map((col) => h("th", {
+    class: `sortable${numeric[col] ? " num" : ""}`, title: `${col} — click to sort`, tabIndex: 0,
+    onclick: () => toggleSort(col),
+    onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleSort(col); } },
+  }, col, h("span", { class: "s2-sort" })));
+  tbody = h("tbody");
+  return h("div", { class: "s2-table-wrap qg-grid" },
+    h("table", { class: "s2-table" },
+      h("thead", {}, h("tr", {}, h("th", { class: "qg-rn" }, "#"), headCells)),
+      tbody));
+}
+
+function toggleSort(col) {
+  // asc -> desc -> unsorted
+  if (state.sortCol !== col) { state.sortCol = col; state.sortDir = 1; }
+  else if (state.sortDir === 1) state.sortDir = -1;
+  else state.sortCol = null;
+  state.page = 0;
+  recompute();
+  drawBody();
+  describeForModel();
+}
+
+function drawBody() {
+  const d = state.data;
+  const total = d.rows.length;
+  const n = state.view.length;
+  const start = state.page * state.pageSize;
+  const slice = state.view.slice(start, start + state.pageSize);
+
+  headCells.forEach((th, i) => {
+    const on = d.columns[i] === state.sortCol;
+    th.querySelector(".s2-sort").textContent = on ? (state.sortDir > 0 ? "▲" : "▼") : "";
+    th.setAttribute("aria-sort", on ? (state.sortDir > 0 ? "ascending" : "descending") : "none");
+  });
+
+  const cols = d.columns;
+  const frag = document.createDocumentFragment();
+  for (const i of slice) {
+    const row = d.rows[i];
+    const tr = document.createElement("tr");
+    const rn = document.createElement("td");
+    rn.className = "qg-rn";
+    rn.textContent = i + 1;
+    tr.append(rn);
+    for (const c of cols) {
+      const v = row[c];
+      const td = document.createElement("td");
+      const text = S2.cellText(v);
+      td.textContent = text;
+      if (v == null) td.className = numeric[c] ? "num null" : "null";
+      else if (numeric[c]) td.className = "num";
+      if (text.length > 24 || text.includes("\n")) td.title = text;
+      tr.append(td);
+    }
+    frag.append(tr);
+  }
+  if (!slice.length) {
+    frag.append(h("tr", {}, h("td", { class: "qg-none", colSpan: cols.length + 1 },
+      total ? `No rows match “${state.filter.trim()}”.` : "The query returned no rows.")));
+  }
+  tbody.replaceChildren(frag);
+  tbody.closest(".s2-table-wrap").scrollTop = 0;
+
+  countEl.textContent = state.filter.trim()
+    ? `${n.toLocaleString()} of ${total.toLocaleString()} rows match`
+    : "";
+
+  const pages = Math.max(1, Math.ceil(n / state.pageSize));
+  const go = (p) => { state.page = Math.max(0, Math.min(pages - 1, p)); drawBody(); };
+  const sizeSel = h("select", {
+    "aria-label": "Rows per page",
+    onchange: (e) => { state.pageSize = Number(e.target.value); state.page = 0; recompute(); drawBody(); },
+  }, PAGE_SIZES.map((s) => h("option", { value: s, selected: s === state.pageSize }, `${s} / page`)));
+  pagerEl.replaceChildren(
+    n ? `${(start + 1).toLocaleString()}–${Math.min(start + state.pageSize, n).toLocaleString()} of ${n.toLocaleString()}` : "0 rows",
+    h("button", { class: "s2-btn", disabled: state.page === 0, onclick: () => go(0), title: "First page", "aria-label": "First page" }, "«"),
+    h("button", { class: "s2-btn", disabled: state.page === 0, onclick: () => go(state.page - 1), title: "Previous page", "aria-label": "Previous page" }, "‹"),
+    h("span", {}, `${state.page + 1} / ${pages}`),
+    h("button", { class: "s2-btn", disabled: state.page >= pages - 1, onclick: () => go(state.page + 1), title: "Next page", "aria-label": "Next page" }, "›"),
+    h("button", { class: "s2-btn", disabled: state.page >= pages - 1, onclick: () => go(pages - 1), title: "Last page", "aria-label": "Last page" }, "»"),
+    sizeSel);
+}
+
+// ---------- host wiring ----------
+render();
+S2.onDisplayModeChange = render;
+await S2.connect({
+  name: "singlestore-query-grid",
+  onToolInput(args) {
+    if (state.data) return;
+    state.args = { sql: args.sql ?? "", database: args.database ?? null, max_rows: args.max_rows ?? 1000 };
+    loadArgsIntoPanel();
+    render();
+  },
+  async onToolResult(result) {
+    try {
+      setData(await withRows(S2.resultData(result)));
+    } catch (e) {
+      state.error = cleanError(e);
+      state.sqlOpen = true; // let the user fix and re-run
+      render();
+    }
+  },
+  onToolCancelled() {
+    if (state.data) return;
+    state.error = new Error("The query was cancelled.");
+    state.sqlOpen = true;
+    render();
+  },
+});
+</script>
+</body>
+</html>

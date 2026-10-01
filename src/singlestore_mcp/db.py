@@ -10,15 +10,11 @@ port, user and password.
 from __future__ import annotations
 
 import os
-import re
 import threading
 from dataclasses import dataclass, field
 from typing import Any
 
 import singlestoredb as s2
-
-_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_$]+$")
-
 
 class ConfigurationError(RuntimeError):
     """Raised when required connection settings are missing."""
@@ -29,19 +25,15 @@ class InvalidIdentifierError(ValueError):
 
 
 def quote_identifier(name: str) -> str:
-    """Backtick-quote a SQL identifier after validating its shape.
+    """Backtick-quote a SQL identifier, escaping embedded backticks.
 
-    SingleStore (like MySQL) does not support bind parameters for identifiers
-    (table/database/pipeline names), so callers that need to build a
-    statement dynamically must quote the identifier themselves. Restricting
-    the accepted character set is what keeps that safe.
+    SingleStore (like MySQL) has no bind parameters for identifiers, so names
+    are quoted with backticks and any backtick inside is doubled -- the
+    standard escaping rule, which makes any input a single inert identifier.
     """
-    if not name or not _IDENTIFIER_RE.match(name):
-        raise InvalidIdentifierError(
-            f"{name!r} is not a valid identifier "
-            "(letters, digits, underscore and $ only)"
-        )
-    return f"`{name}`"
+    if not name or "\x00" in name:
+        raise InvalidIdentifierError(f"{name!r} is not a valid identifier")
+    return "`" + name.replace("`", "``") + "`"
 
 
 @dataclass
@@ -99,15 +91,30 @@ class ConnectionSettings:
         return kwargs
 
 
+# MySQL client error codes for a connection that is gone or unreachable.
+_CONNECTION_LOST_CODES = {2003, 2006, 2013, 2055}
+
+
+def _is_connection_error(exc: BaseException) -> bool:
+    if isinstance(exc, (s2.InterfaceError, OSError)):
+        return True
+    if isinstance(exc, s2.OperationalError):
+        code = getattr(exc, "errno", None) or (exc.args[0] if exc.args else None)
+        return code in _CONNECTION_LOST_CODES
+    return False
+
+
 class Database:
     """Thread-safe, lazily-connecting wrapper around a singlestoredb connection."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._conn: Any | None = None
+        self._default_db: str | None = None
 
     def _connect(self) -> Any:
         settings = ConnectionSettings.from_env()
+        self._default_db = settings.database
         return s2.connect(**settings.connect_kwargs())
 
     def _get_conn(self) -> Any:
@@ -121,12 +128,21 @@ class Database:
         params: tuple[Any, ...] | None = None,
         database: str | None = None,
         fetch: bool = True,
+        max_rows: int | None = None,
     ) -> tuple[list[str], list[dict[str, Any]], int]:
         """Run one SQL statement.
 
         Returns (column_names, rows_as_dicts, rowcount). Reconnects once,
         transparently, if the cached connection has gone stale (idle
         timeout, cluster failover, etc).
+
+        The connection is shared, so a call without ``database`` switches
+        back to the configured default rather than inheriting whatever an
+        earlier call selected.
+
+        ``max_rows`` caps the rows a SELECT returns server-side (via the
+        session's sql_select_limit), so an unbounded query against a huge
+        table never streams the whole result to the client.
         """
         with self._lock:
             for attempt in range(2):
@@ -134,27 +150,31 @@ class Database:
                     conn = self._get_conn()
                     cur = conn.cursor()
                     try:
-                        if database:
-                            cur.execute(f"USE {quote_identifier(database)}")
-                        cur.execute(sql, params or ())
-                        rowcount = cur.rowcount
-                        if fetch and cur.description is not None:
-                            rows = cur.fetchall()
-                            columns = [d[0] for d in cur.description]
-                        else:
-                            rows = []
-                            columns = []
+                        target_db = database or self._default_db
+                        if target_db:
+                            cur.execute(f"USE {quote_identifier(target_db)}")
+                        if max_rows is not None:
+                            cur.execute(f"SET SESSION sql_select_limit = {max(0, int(max_rows))}")
+                        try:
+                            cur.execute(sql, params or ())
+                            rowcount = cur.rowcount
+                            if fetch and cur.description is not None:
+                                rows = cur.fetchall()
+                                columns = [d[0] for d in cur.description]
+                            else:
+                                rows = []
+                                columns = []
+                        finally:
+                            if max_rows is not None:
+                                cur.execute("SET SESSION sql_select_limit = DEFAULT")
                         conn.commit()
                         return columns, rows, rowcount
                     finally:
                         cur.close()
                 except (s2.Error, OSError) as exc:
-                    self._conn = None
-                    if attempt == 1:
+                    if attempt == 1 or not _is_connection_error(exc):
                         raise
-                    # First failure: assume a dead connection, retry once
-                    # after reconnecting. Re-raise anything past that.
-                    del exc
+                    self._conn = None
             raise AssertionError("unreachable")
 
     def close(self) -> None:

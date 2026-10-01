@@ -1,0 +1,583 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Schema Explorer</title>
+<!--S2:HEAD-->
+<style>
+  .se { display: grid; grid-template-columns: minmax(220px, 280px) minmax(0, 1fr); gap: 12px; height: 580px; }
+  .se-pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+  .se-left { border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); overflow: hidden; }
+  .se-left-tools { display: flex; flex-direction: column; gap: 6px; padding: 8px; border-bottom: 1px solid var(--s2-border-2); background: var(--s2-bg-2); }
+  .se-left-tools .s2-input { width: 100%; }
+  .se-toggle { display: flex; align-items: center; gap: 6px; font-size: var(--s2-fs-xs); color: var(--s2-text-2); cursor: pointer; user-select: none; }
+  .se-toggle input { margin: 0; }
+  .se-tree { overflow: auto; flex: 1; padding: 4px 0; }
+  .se-row {
+    display: flex; align-items: center; gap: 6px; width: 100%; padding: 3px 8px; border: 0; background: none;
+    text-align: left; cursor: pointer; font-size: var(--s2-fs-xs); color: var(--s2-text); border-radius: 0; min-height: 24px;
+  }
+  .se-row:hover { background: var(--s2-bg-2); }
+  .se-row:focus-visible { outline: 2px solid var(--s2-ring); outline-offset: -2px; }
+  .se-row.sel { background: var(--s2-info-bg); color: var(--s2-info); }
+  .se-row .se-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .se-row .se-count { color: var(--s2-text-3); font-variant-numeric: tabular-nums; }
+  .se-row.db { font-weight: var(--font-weight-medium, 500); }
+  .se-row.tbl { padding-left: 26px; }
+  .se-caret { width: 12px; color: var(--s2-text-3); flex: none; display: inline-block; transition: transform .12s; font-size: 10px; }
+  .se-caret.open { transform: rotate(90deg); }
+  .se-sub { padding: 3px 8px 3px 26px; font-size: var(--s2-fs-xs); color: var(--s2-text-3); display: flex; gap: 6px; align-items: center; }
+  .se-sub .s2-error { padding: 4px 8px; flex: 1; }
+  .se-ico {
+    flex: none; width: 18px; height: 16px; border-radius: 3px; font-size: 9px; font-weight: 700; line-height: 16px; text-align: center;
+    background: var(--s2-bg-3); color: var(--s2-text-2); letter-spacing: .02em;
+  }
+  .se-ico.col { background: var(--s2-info-bg); color: var(--s2-info); }
+  .se-ico.row { background: var(--s2-warn-bg); color: var(--s2-warn); }
+  .se-ico.view { background: var(--s2-ok-bg); color: var(--s2-ok); }
+  mark { background: var(--s2-warn-bg); color: inherit; border-radius: 2px; padding: 0; }
+
+  .se-right { overflow: auto; }
+  .se-head { display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+  .se-head h2 { margin: 0; font-size: var(--font-text-md-size, 14px); font-weight: var(--font-weight-semibold, 600); font-family: var(--s2-mono); overflow-wrap: anywhere; }
+  .se-head h2 .se-dbpart { color: var(--s2-text-2); font-weight: 400; }
+  .se-titlebox { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1 1 260px; }
+  .se-badges { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
+  .se-stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 6px; margin-bottom: 8px; }
+  .se-stat { background: var(--s2-bg-2); border-radius: var(--s2-radius-sm); padding: 5px 9px; min-width: 0; }
+  .se-stat .k { font-size: 11px; color: var(--s2-text-3); text-transform: uppercase; letter-spacing: .04em; }
+  .se-stat .v { font-weight: var(--font-weight-semibold, 600); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .se-keys { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; font-size: var(--s2-fs-xs); }
+  .se-key { display: flex; gap: 8px; align-items: baseline; }
+  .se-key .k { color: var(--s2-text-2); width: 72px; flex: none; }
+  .se-key code { font-family: var(--s2-mono); background: var(--s2-bg-2); padding: 1px 6px; border-radius: 4px; word-break: break-all; }
+  .se-key .note { color: var(--s2-text-3); }
+  .se-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--s2-border-2); margin-bottom: 8px; }
+  .se-tab {
+    border: 0; background: none; padding: 6px 10px; cursor: pointer; font-size: var(--s2-fs-xs); color: var(--s2-text-2);
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  .se-tab:hover { color: var(--s2-text); }
+  .se-tab.on { color: var(--s2-text); border-bottom-color: var(--s2-info); font-weight: var(--font-weight-semibold, 600); }
+  .se-tab:focus-visible { outline: 2px solid var(--s2-ring); outline-offset: -2px; }
+  .se-tabbar-extra { margin-left: auto; display: flex; gap: 6px; align-items: center; padding-bottom: 4px; }
+  .se-tag { font-size: 10px; padding: 0 5px; border-radius: 3px; margin-left: 5px; background: var(--s2-bg-3); color: var(--s2-text-2); font-weight: 600; }
+  .se-tag.shard { background: var(--s2-info-bg); color: var(--s2-info); }
+  .se-tag.sort { background: var(--s2-ok-bg); color: var(--s2-ok); }
+  .se-tag.pk { background: var(--s2-warn-bg); color: var(--s2-warn); }
+  .se-ddl { max-height: 360px; overflow: auto; white-space: pre; word-break: normal; }
+  html[data-display-mode="fullscreen"] .se { height: calc(100vh - 70px); }
+  html[data-display-mode="fullscreen"] .se-ddl { max-height: none; }
+  html[data-display-mode="fullscreen"] .se-right .s2-table-wrap { max-height: none !important; }
+  .se-ddl.wrap { white-space: pre-wrap; word-break: break-word; }
+  .se-ddl .hl { background: var(--s2-info-bg); color: var(--s2-info); display: inline-block; min-width: 100%; }
+  .se-banner { margin-bottom: 8px; }
+  .se-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; gap: 6px; color: var(--s2-text-2); text-align: center; padding: 24px; }
+  .se-placeholder .big { font-size: var(--font-text-md-size, 14px); color: var(--s2-text); font-weight: var(--font-weight-medium, 500); }
+
+  @media (max-width: 640px) {
+    .se { grid-template-columns: minmax(0, 1fr); height: auto; }
+    .se-left { max-height: 260px; }
+    .se-right { overflow: visible; }
+  }
+</style>
+</head>
+<body>
+<div id="root"><div class="s2-empty"><span class="s2-spinner"></span> Loading schema…</div></div>
+<script type="module">
+const { h, fmt } = S2;
+const root = document.getElementById("root");
+const SYSTEM = new Set(["information_schema", "cluster", "memsql"]);
+
+const state = {
+  dbs: null,                 // [{name, system, tables, views}]
+  tables: new Map(),         // db -> {status: "loading"|"ok"|"error", tables, error}
+  expanded: new Set(),
+  showSystem: false,
+  filter: "",
+  sel: null,                 // {db, table|null}
+  tab: "columns",
+  details: new Map(),        // key -> {status, data, error}
+  previews: new Map(),       // key -> {status, data, error}
+  banner: null,              // error from the initial tool call
+  pending: null,             // tool input args before the result arrives
+};
+const key = (db, t) => `${db}\u0000${t}`;
+const qi = (name) => "`" + String(name).replace(/`/g, "``") + "`";
+const fq = (db, t) => `${qi(db)}.${qi(t)}`;
+
+// ---------- formatting ----------
+const storageShort = (t) => t.type !== "BASE TABLE" ? ["V", "view", t.type] :
+  t.storage === "COLUMNSTORE" ? ["C", "col", "Columnstore" + (t.reference ? " reference" : "")] :
+  ["R", "row", (t.storage || "Rowstore").replace("INMEMORY_", "In-memory ").toLowerCase() + (t.reference ? " reference" : "")];
+const rowsText = (n) => n == null ? "–" : fmt.number(n);
+const compact = (n) => {
+  if (n == null) return "";
+  const v = Number(n);
+  if (v < 1000) return String(v);
+  const u = [["B", 1e9], ["M", 1e6], ["K", 1e3]].find(([, d]) => v >= d);
+  return (v / u[1]).toFixed(v / u[1] >= 100 ? 0 : 1).replace(/\.0$/, "") + u[0];
+};
+const highlight = (text, q) => {
+  if (!q) return text;
+  const i = text.toLowerCase().indexOf(q);
+  if (i < 0) return text;
+  return [text.slice(0, i), h("mark", {}, text.slice(i, i + q.length)), text.slice(i + q.length)];
+};
+const keyCols = (k) => !k ? null : k.columns.length ? k.columns.join(", ") : null;
+
+// ---------- data loading ----------
+// Server errors arrive as "Error executing tool <name>: <message>"; keep just the message.
+const cleanError = (e) => new Error(String(e?.message ?? e).replace(/^Error executing tool [^:]+:\s*/, ""));
+async function call(name, args) {
+  try { return await S2.callTool(name, args); }
+  catch (e) { throw cleanError(e); }
+}
+
+async function loadDatabases() {
+  try {
+    const data = await call("schema_explorer_databases", {});
+    state.dbs = data.databases;
+  } catch (e) { S2.toast(e.message, "err"); }
+  render();
+}
+
+async function loadTables(db, force = false) {
+  const cur = state.tables.get(db);
+  if (!force && cur && cur.status !== "error") return;
+  state.tables.set(db, { status: "loading" });
+  renderTree();
+  try {
+    const data = await call("schema_explorer_tables", { database: db });
+    state.tables.set(db, { status: "ok", tables: data.tables });
+  } catch (e) {
+    state.tables.set(db, { status: "error", error: e });
+  }
+  renderTree();
+  if (state.sel?.db === db && !state.sel.table) renderRight();
+}
+
+async function loadDetail(db, table, force = false) {
+  const k = key(db, table);
+  const cur = state.details.get(k);
+  if (!force && cur && cur.status !== "error") return cur;
+  state.details.set(k, { status: "loading" });
+  renderRight();
+  try {
+    const data = await call("schema_explorer_table", { database: db, table });
+    state.details.set(k, { status: "ok", data });
+  } catch (e) {
+    state.details.set(k, { status: "error", error: e });
+  }
+  if (state.sel?.db === db && state.sel?.table === table) { renderRight(); announce(); }
+  return state.details.get(k);
+}
+
+async function loadPreview(db, table, force = false) {
+  const k = key(db, table);
+  const cur = state.previews.get(k);
+  if (!force && cur && cur.status !== "error") return;
+  state.previews.set(k, { status: "loading" });
+  renderRight();
+  try {
+    const data = await call("schema_explorer_preview", { database: db, table });
+    state.previews.set(k, { status: "ok", data });
+  } catch (e) {
+    state.previews.set(k, { status: "error", error: e });
+  }
+  if (state.sel?.db === db && state.sel?.table === table) renderRight();
+}
+
+// ---------- actions ----------
+function toggleDb(db) {
+  if (state.expanded.has(db) && !(state.sel?.db === db && state.sel.table)) {
+    state.expanded.delete(db);
+    renderTree();
+    return;
+  }
+  state.expanded.add(db);
+  loadTables(db);
+  selectDb(db, false);
+}
+
+function selectDb(db, toggle = true) {
+  if (toggle && !state.expanded.has(db)) { state.expanded.add(db); loadTables(db); }
+  state.sel = { db, table: null };
+  state.banner = null;
+  renderTree();
+  renderRight();
+  S2.updateModelContext(`The user is browsing database ${db} in the Schema Explorer.`);
+}
+
+function selectTable(db, table) {
+  state.sel = { db, table };
+  state.banner = null;
+  if (state.tab === "preview") loadPreview(db, table);
+  renderTree();
+  renderRight();
+  const d = state.details.get(key(db, table));
+  if (d?.status === "ok") announce(); else loadDetail(db, table);
+}
+
+function announce() {
+  const { db, table } = state.sel ?? {};
+  const d = state.details.get(key(db, table));
+  if (!table || d?.status !== "ok") return;
+  const { info, columns, keys } = d.data;
+  const parts = [`The user is looking at ${fq(db, table)} in the Schema Explorer: ${info.type}`];
+  if (info.type === "BASE TABLE") {
+    parts[0] += `, ${info.storage}${info.reference ? " REFERENCE" : ""}, ${rowsText(info.rows)} rows`;
+    if (keys?.reference) parts.push("Reference table (replicated to every node)");
+    else if (keys) parts.push(`Shard key: ${keyCols(keys.shard) ?? "none/keyless"}; sort key: ${keyCols(keys.sort) ?? "none/unordered"}.`);
+  }
+  const cols = columns.slice(0, 60).map((c) => `${c.name} ${c.type}`).join(", ");
+  parts.push(`Columns (${columns.length}): ${cols}${columns.length > 60 ? ", …" : ""}`);
+  S2.updateModelContext(parts.join(". ").replace(/\.\./g, "."));
+}
+
+async function askClaude() {
+  const { db, table } = state.sel;
+  const d = state.details.get(key(db, table))?.data;
+  const what = d?.info?.type === "BASE TABLE" ? "table" : "view";
+  try {
+    await S2.sendPrompt(`Tell me about the SingleStore ${what} ${fq(db, table)}: what the data represents, how it is distributed and sorted (shard key / sort key), notable columns, and anything I should watch out for when querying it.`);
+  } catch (e) { S2.toast(`Couldn't send message: ${e.message}`, "err"); }
+}
+
+// In Claude: ask in the chat so the grid opens inline. In the browser view
+// (no chat), or if the host rejects the message, open the grid in the browser.
+async function queryInGrid() {
+  const { db, table } = state.sel;
+  const sql = `SELECT * FROM ${fq(db, table)} LIMIT 100`;
+  try {
+    if (!S2.inBrowserView() && (await S2.sendPrompt(`Show ${sql} in the query grid`, { quiet: true }))) return;
+    await S2.openAppInBrowser("query_grid", { sql, database: db });
+  } catch (e) { S2.toast(`Couldn't open the query grid: ${e.message}`, "err"); }
+}
+
+// ---------- left pane ----------
+let treeEl, filterEl;
+
+function visibleDbs() {
+  return (state.dbs ?? []).filter((d) => state.showSystem || !d.system || state.sel?.db === d.name);
+}
+
+function renderTree() {
+  if (!treeEl) return;
+  const q = state.filter.trim().toLowerCase();
+  const items = [];
+  let shown = 0;
+  for (const d of visibleDbs()) {
+    const t = state.tables.get(d.name);
+    const dbMatch = !q || d.name.toLowerCase().includes(q);
+    const tables = t?.status === "ok" ? t.tables : [];
+    const matchingTables = q ? tables.filter((x) => x.name.toLowerCase().includes(q)) : tables;
+    if (q && !dbMatch && !matchingTables.length) continue;
+    shown++;
+    const open = state.expanded.has(d.name) || (q && !dbMatch && matchingTables.length > 0);
+    const isSel = state.sel?.db === d.name && !state.sel.table;
+    const total = d.tables + d.views;
+    items.push(h("button", {
+      class: `se-row db${isSel ? " sel" : ""}`, title: d.name,
+      onclick: () => toggleDb(d.name),
+    }, h("span", { class: `se-caret${open ? " open" : ""}` }, "▶"),
+      h("span", { class: "se-name" }, highlight(d.name, q)),
+      h("span", { class: "se-count" }, q && open && t?.status === "ok" ? `${matchingTables.length}/${total}` : total)));
+    if (!open) continue;
+    if (!t || t.status === "loading") {
+      items.push(h("div", { class: "se-sub" }, h("span", { class: "s2-spinner" }), "Loading tables…"));
+    } else if (t.status === "error") {
+      items.push(h("div", { class: "se-sub" }, S2.errorBox(t.error),
+        h("button", { class: "s2-btn", onclick: () => loadTables(d.name, true) }, "Retry")));
+    } else if (!tables.length) {
+      items.push(h("div", { class: "se-sub" }, "No tables"));
+    } else if (!matchingTables.length) {
+      items.push(h("div", { class: "se-sub" }, "No matching tables"));
+    } else {
+      for (const tb of matchingTables) {
+        const [ico, cls, label] = storageShort(tb);
+        const isSelT = state.sel?.db === d.name && state.sel?.table === tb.name;
+        items.push(h("button", {
+          class: `se-row tbl${isSelT ? " sel" : ""}`,
+          title: `${tb.name}\n${label}${tb.rows != null ? ` · ${rowsText(tb.rows)} rows` : ""}`,
+          onclick: () => selectTable(d.name, tb.name),
+        }, h("span", { class: `se-ico ${cls}` }, ico),
+          h("span", { class: "se-name" }, highlight(tb.name, q)),
+          h("span", { class: "se-count" }, compact(tb.rows))));
+      }
+    }
+  }
+  if (!state.dbs) items.push(h("div", { class: "se-sub" }, h("span", { class: "s2-spinner" }), "Loading…"));
+  else if (!shown) items.push(h("div", { class: "s2-empty" }, q ? `Nothing matches “${state.filter}”` : "No databases"));
+  if (q && state.dbs) {
+    // Table names are only known for databases that have been loaded.
+    const unloaded = visibleDbs().filter((d) => !state.tables.has(d.name) && d.tables + d.views > 0);
+    if (unloaded.length) {
+      items.push(h("div", { class: "se-sub", style: { paddingLeft: "8px", flexWrap: "wrap" } },
+        `Tables in ${unloaded.length} unopened database${unloaded.length > 1 ? "s" : ""} aren't searched.`,
+        h("button", { class: "s2-btn", onclick: () => unloaded.forEach((d) => loadTables(d.name)) }, "Search all")));
+    }
+  }
+  const scroll = treeEl.scrollTop;
+  treeEl.replaceChildren(...items);
+  treeEl.scrollTop = scroll;
+}
+
+function buildLeft() {
+  filterEl = h("input", {
+    class: "s2-input", type: "search", placeholder: "Filter databases & tables…", value: state.filter,
+    "aria-label": "Filter databases and tables",
+    oninput: (e) => { state.filter = e.target.value; renderTree(); },
+  });
+  const sys = h("input", { type: "checkbox", checked: state.showSystem,
+    onchange: (e) => { state.showSystem = e.target.checked; renderTree(); } });
+  treeEl = h("div", { class: "se-tree", role: "tree" });
+  const nSys = (state.dbs ?? []).filter((d) => d.system).length;
+  const el = h("div", { class: "se-pane se-left" },
+    h("div", { class: "se-left-tools" }, filterEl,
+      h("label", { class: "se-toggle" }, sys, `Show system databases${nSys ? ` (${nSys})` : ""}`)),
+    treeEl);
+  renderTree();
+  return el;
+}
+
+// ---------- right pane ----------
+let rightEl;
+
+function placeholder(big, small) {
+  return h("div", { class: "se-placeholder" }, h("div", { class: "big" }, big), small && h("div", { class: "s2-small" }, small));
+}
+
+function renderDbOverview(db) {
+  const t = state.tables.get(db);
+  const meta = (state.dbs ?? []).find((d) => d.name === db);
+  const head = h("div", { class: "se-head" },
+    h("div", { class: "se-titlebox" }, h("h2", {}, db),
+      h("div", { class: "se-badges" },
+        meta?.system && h("span", { class: "s2-badge plain" }, "system"),
+        meta && h("span", { class: "s2-badge plain" }, `${meta.tables} tables`),
+        meta?.views ? h("span", { class: "s2-badge plain" }, `${meta.views} views`) : null)),
+    h("button", { class: "s2-btn", title: "Reload tables", onclick: () => loadTables(db, true) }, "↻ Refresh"));
+  if (!t || t.status === "loading") return [head, h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Loading tables…")];
+  if (t.status === "error") return [head, S2.errorBox(t.error)];
+  if (!t.tables.length) return [head, placeholder("This database has no tables")];
+  const totalRows = t.tables.reduce((a, x) => a + (Number(x.rows) || 0), 0);
+  const totalSize = t.tables.reduce((a, x) => a + (Number(x.size_bytes) || 0), 0);
+  const stats = h("div", { class: "se-stats" },
+    stat("Tables", fmt.number(t.tables.filter((x) => x.type === "BASE TABLE").length)),
+    stat("Views", fmt.number(t.tables.filter((x) => x.type !== "BASE TABLE").length)),
+    stat("Total rows", fmt.number(totalRows)),
+    stat("Total size", fmt.bytes(totalSize)));
+  const rows = t.tables.map((x) => ({
+    Name: x.name, Kind: storageShort(x)[2], Rows: x.rows, Size: x.size_bytes, Created: x.created,
+  }));
+  const table = S2.dataTable(["Name", "Kind", "Rows", "Size", "Created"], rows, {
+    maxHeight: "400px",
+    onRowClick: (r) => selectTable(db, r.Name),
+    render: { Rows: (v) => rowsText(v), Size: (v) => v == null ? "–" : fmt.bytes(v), Created: (v) => fmt.dateTime(v) },
+  });
+  return [head, stats, h("div", { class: "s2-small s2-faint", style: { marginBottom: "6px" } }, "Click a row to open the table."), table];
+}
+
+function stat(k, v, title) {
+  return h("div", { class: "se-stat", title: title ?? `${k}: ${v}` }, h("div", { class: "k" }, k), h("div", { class: "v" }, v));
+}
+
+function keyLine(label, k, emptyNote) {
+  if (!k) return h("div", { class: "se-key" }, h("span", { class: "k" }, label), h("span", { class: "note" }, "—"));
+  const cols = keyCols(k);
+  return h("div", { class: "se-key" }, h("span", { class: "k" }, label),
+    cols ? h("code", {}, `(${cols})`) : h("code", {}, "()"),
+    h("span", { class: "note" }, !cols ? emptyNote : k.implicit ? "from PRIMARY KEY" : (k.using ?? "")));
+}
+
+function renderTableDetail(db, table) {
+  const d = state.details.get(key(db, table));
+  const title = h("h2", {}, h("span", { class: "se-dbpart" }, db + "."), table);
+  if (!d || d.status === "loading") {
+    return [h("div", { class: "se-head" }, h("div", { class: "se-titlebox" }, title)),
+      h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Loading table…")];
+  }
+  if (d.status === "error") {
+    return [h("div", { class: "se-head" }, h("div", { class: "se-titlebox" }, title),
+      h("button", { class: "s2-btn", onclick: () => loadDetail(db, table, true) }, "Retry")), S2.errorBox(d.error)];
+  }
+  const { info, columns, keys, ddl, ddl_error } = d.data;
+  const isTable = info.type === "BASE TABLE";
+  const [, cls, kindLabel] = storageShort(info);
+  const badges = h("div", { class: "se-badges" },
+    h("span", { class: `s2-badge ${isTable ? "plain" : "ok"}` }, info.type),
+    isTable && h("span", { class: `s2-badge ${cls === "col" ? "info" : "warn"}` }, info.storage),
+    info.reference && h("span", { class: "s2-badge plain" }, "REFERENCE"));
+  const head = h("div", { class: "se-head" },
+    h("div", { class: "se-titlebox" }, title, badges),
+    h("div", { class: "s2-toolbar" },
+      h("button", { class: "s2-btn primary", onclick: askClaude, title: "Send a question about this table to Claude" }, `Ask Claude about this ${isTable ? "table" : "view"}`),
+      h("button", { class: "s2-btn", onclick: queryInGrid, title: "Ask Claude to open this table in the Query Grid" }, "Query in grid"),
+      h("button", { class: "s2-btn ghost", title: "Reload", "aria-label": "Reload table", onclick: () => {
+        state.previews.delete(key(db, table)); loadDetail(db, table, true);
+        if (state.tab === "preview") loadPreview(db, table, true);
+      } }, "↻")));
+  const stats = h("div", { class: "se-stats" },
+    isTable && stat("Rows", rowsText(info.rows)),
+    isTable && stat("Size", info.size_bytes == null ? "–" : fmt.bytes(info.size_bytes),
+      `On disk (compressed columnstore segments): ${info.disk_bytes == null ? "–" : fmt.bytes(info.disk_bytes)}\nIn memory: ${info.memory_bytes == null ? "–" : fmt.bytes(info.memory_bytes)}`),
+    stat("Columns", fmt.number(columns.length)),
+    stat("Created", fmt.dateTime(info.created), info.created ?? ""),
+    info.altered && stat("Altered", fmt.relTime(info.altered), fmt.dateTime(info.altered)),
+    info.owner && stat("Owner", info.owner));
+  const keysEl = isTable && keys ? h("div", { class: "se-keys" },
+    keys.reference
+      ? h("div", { class: "se-key" }, h("span", { class: "k" }, "Shard key"), h("span", { class: "note" }, "reference table — fully replicated to every node"))
+      : keyLine("Shard key", keys.shard, "keyless — rows are distributed randomly"),
+    info.storage === "COLUMNSTORE" ? keyLine("Sort key", keys.sort, "unordered") : null,
+    keys.primary ? keyLine("Primary", keys.primary, "") : null) : null;
+
+  const shardSet = new Set(keys?.shard?.columns?.map((c) => c.replace(/ DESC$/, "")) ?? []);
+  const sortSet = new Set(keys?.sort?.columns?.map((c) => c.replace(/ DESC$/, "")) ?? []);
+  const pkSet = new Set(keys?.primary?.columns ?? []);
+
+  const tabs = [["columns", `Columns (${columns.length})`], ["preview", "Preview"], ["ddl", isTable ? "DDL" : "Definition"]];
+  const tabBar = h("div", { class: "se-tabs", role: "tablist" },
+    tabs.map(([id, label]) => h("button", {
+      class: `se-tab${state.tab === id ? " on" : ""}`, role: "tab", "aria-selected": String(state.tab === id),
+      onclick: () => { state.tab = id; if (id === "preview") loadPreview(db, table); renderRight(); },
+    }, label)),
+    h("div", { class: "se-tabbar-extra" },
+      state.tab === "ddl" && ddl ? h("button", { class: "s2-btn", onclick: () => S2.download(`${db}.${table}.sql`, ddl + ";\n", "application/sql") }, "Download .sql") : null,
+      state.tab === "preview" ? h("button", { class: "s2-btn", onclick: () => loadPreview(db, table, true) }, "Reload") : null));
+
+  let body;
+  if (state.tab === "columns") {
+    const rows = columns.map((c) => ({
+      "#": c.position, Name: c.name, Type: c.type, Null: c.nullable ? "YES" : "NO", Key: c.key, Default: c.default, Extra: c.extra, Comment: c.comment,
+    }));
+    body = columns.length ? S2.dataTable(["#", "Name", "Type", "Null", "Key", "Default", "Extra", "Comment"], rows, {
+      maxHeight: "340px",
+      render: {
+        Name: (v) => [v,
+          pkSet.has(v) && h("span", { class: "se-tag pk", title: "Primary key" }, "PK"),
+          shardSet.has(v) && h("span", { class: "se-tag shard", title: "Shard key column" }, "SHARD"),
+          sortSet.has(v) && h("span", { class: "se-tag sort", title: "Sort key column" }, "SORT")],
+        Type: (v) => h("span", { class: "s2-mono" }, v),
+        Null: (v) => v === "YES" ? h("span", { class: "s2-faint" }, "yes") : "NOT NULL",
+        Key: (v) => v ?? "",
+        Extra: (v) => v ?? "",
+        Comment: (v) => v ?? "",
+      },
+    }) : placeholder("No columns visible");
+  } else if (state.tab === "preview") {
+    const p = state.previews.get(key(db, table));
+    if (!p || p.status === "loading") body = h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Fetching first 50 rows…");
+    else if (p.status === "error") body = S2.errorBox(p.error);
+    else if (!p.data.rows.length) body = placeholder("No rows", "The table is empty.");
+    else body = [S2.dataTable(p.data.columns, p.data.rows, { maxHeight: "320px" }),
+      h("div", { class: "s2-small s2-faint", style: { marginTop: "4px" } },
+        `First ${p.data.rows.length} row(s) · `, h("span", { class: "s2-mono" }, p.data.sql))];
+  } else {
+    if (ddl_error) body = S2.errorBox(new Error(ddl_error));
+    else if (!ddl) body = placeholder("No DDL available");
+    else body = h("pre", { class: `s2-pre se-ddl${isTable ? "" : " wrap"}` }, ddl.split("\n").map((line, i, arr) => {
+      const text = line + (i < arr.length - 1 ? "\n" : "");
+      return /^\s*,?\s*(SHARD|SORT)\s+KEY\b|USING CLUSTERED COLUMNSTORE/i.test(line) ? h("span", { class: "hl" }, text) : text;
+    }));
+  }
+  return [head, stats, keysEl, info.comment && h("div", { class: "s2-small s2-muted", style: { marginBottom: "8px" } }, info.comment), tabBar, body];
+}
+
+function renderRight() {
+  if (!rightEl) return;
+  const parts = [];
+  if (state.banner) parts.push(h("div", { class: "se-banner" }, S2.errorBox(state.banner)));
+  if (!state.sel) {
+    parts.push(placeholder("Select a database or table", "Expand a database on the left to browse its tables, columns, shard/sort keys, DDL and data."));
+  } else if (!state.sel.table) {
+    parts.push(...renderDbOverview(state.sel.db));
+  } else {
+    parts.push(...renderTableDetail(state.sel.db, state.sel.table));
+  }
+  const selKey = state.sel ? key(state.sel.db, state.sel.table ?? "") : "";
+  const scroll = selKey === lastRightSel ? rightEl.scrollTop : 0;
+  lastRightSel = selKey;
+  rightEl.replaceChildren(...parts.flat().filter(Boolean));
+  rightEl.scrollTop = scroll;
+}
+let lastRightSel = null;
+
+function render() {
+  const header = h("div", { class: "s2-header" },
+    h("h1", { class: "s2-title" }, "Schema Explorer"),
+    h("span", { class: "s2-subtitle" }, state.dbs ? `${state.dbs.filter((d) => !d.system).length} databases` : ""),
+    h("span", { class: "s2-spacer" }),
+    h("button", { class: "s2-btn ghost", title: "Reload database list", onclick: () => {
+      state.tables.clear(); state.details.clear(); state.previews.clear();
+      loadDatabases();
+      for (const db of state.expanded) loadTables(db, true);
+      if (state.sel?.table) loadDetail(state.sel.db, state.sel.table, true);
+    } }, "↻ Refresh"),
+    S2.openInBrowserButton("schema_explorer", () => ({ database: state.sel?.db, table: state.sel?.table })),
+    S2.fullscreenButton());
+  rightEl = h("div", { class: "se-pane se-right" });
+  const focused = document.activeElement === filterEl;
+  const caret = filterEl?.selectionStart;
+  const treeScroll = treeEl?.scrollTop ?? 0;
+  root.replaceChildren(header, h("div", { class: "se" }, buildLeft(), rightEl));
+  treeEl.scrollTop = treeScroll;
+  renderRight();
+  if (focused) { filterEl.focus(); try { filterEl.setSelectionRange(caret, caret); } catch {} }
+}
+
+// ---------- initial tool result ----------
+async function applyInitial(data) {
+  state.dbs = data.databases ?? [];
+  state.banner = data.error ? new Error(data.error) : null;
+  const db = data.database;
+  if (db && state.dbs.some((d) => d.name === db)) {
+    if (SYSTEM.has(db)) state.showSystem = true;
+    state.expanded.add(db);
+    if (data.tables) state.tables.set(db, { status: "ok", tables: data.tables });
+    state.sel = { db, table: null };
+    if (data.detail) {
+      state.details.set(key(db, data.detail.table), { status: "ok", data: data.detail });
+      state.sel = { db, table: data.detail.table };
+    }
+  }
+  render();
+  // The opening result leaves the table list out (it would bloat the model's
+  // context in hosts that show it structuredContent), so fetch it here.
+  if (db && state.expanded.has(db) && !state.tables.has(db)) await loadTables(db);
+  if (state.sel?.table) {
+    announce();
+    // Bring the selected table into view in the tree.
+    // (Not scrollIntoView: that can also scroll the host page around the iframe.)
+    const row = treeEl.querySelector(".se-row.tbl.sel");
+    if (row) treeEl.scrollTop = row.offsetTop - treeEl.offsetTop - treeEl.clientHeight / 2;
+  } else if (state.sel) {
+    S2.updateModelContext(`The user is browsing database ${state.sel.db} in the Schema Explorer.`);
+  }
+}
+
+S2.onDisplayModeChange = () => { if (state.dbs) render(); };
+await S2.connect({
+  name: "singlestore-schema-explorer",
+  onToolInput(args) {
+    state.pending = args;
+    if (!state.dbs && args?.database) {
+      root.replaceChildren(h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }),
+        ` Opening ${args.database}${args.table ? "." + args.table : ""}…`));
+    }
+  },
+  async onToolResult(result) {
+    try { await applyInitial(S2.resultData(result)); }
+    catch (e) {
+      // The opening call failed: still offer a browsable explorer.
+      state.banner = cleanError(e);
+      render();
+      loadDatabases();
+    }
+  },
+});
+</script>
+</body>
+</html>

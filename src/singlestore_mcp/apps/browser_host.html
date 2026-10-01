@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SingleStore</title>
+<style>
+  :root { color-scheme: light dark; }
+  html, body { margin: 0; height: 100%; background: light-dark(#ffffff, #1e1e1e); }
+  iframe { display: block; width: 100%; height: 100vh; border: 0; }
+  #status { font: 14px/1.5 system-ui, "Segoe UI", sans-serif; padding: 24px; color: light-dark(#555, #aaa); }
+</style>
+</head>
+<body>
+<div id="status">Loading…</div>
+<script type="module">
+// Minimal MCP Apps host: renders one app full-window and forwards its tool
+// calls to the SingleStore MCP server that served this page.
+const params = new URLSearchParams(location.search);
+const toolName = params.get("tool");
+const args = JSON.parse(params.get("args") || "{}");
+const darkQuery = matchMedia("(prefers-color-scheme: dark)");
+const theme = () => (darkQuery.matches ? "dark" : "light");
+const status = document.getElementById("status");
+let frame = null;
+
+async function callTool(name, toolArgs) {
+  try {
+    const res = await fetch("call", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name, arguments: toolArgs ?? {} }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (e) {
+    return { isError: true, content: [{ type: "text", text: `Lost connection to the SingleStore MCP server (${e.message}). Reopen the app from Claude.` }] };
+  }
+}
+
+const send = (msg) => frame.contentWindow.postMessage(msg, "*");
+const reply = (id, result) => send({ jsonrpc: "2.0", id, result });
+const replyError = (id, message, code = -32603) => send({ jsonrpc: "2.0", id, error: { code, message } });
+
+function download(contents) {
+  for (const item of contents ?? []) {
+    const r = item.resource ?? {};
+    const data = r.text ?? Uint8Array.from(atob(r.blob ?? ""), (c) => c.charCodeAt(0));
+    const a = Object.assign(document.createElement("a"), {
+      href: URL.createObjectURL(new Blob([data], { type: r.mimeType || "text/plain" })),
+      download: (r.uri || "download").split("/").pop(),
+    });
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  }
+}
+
+async function open() {
+  const toolRes = await fetch(`tool?name=${encodeURIComponent(toolName)}`);
+  if (!toolRes.ok) throw new Error("this link has expired");
+  const tool = await toolRes.json();
+  const html = await (await fetch(`resource?uri=${encodeURIComponent(tool._meta.ui.resourceUri)}`)).text();
+  document.title = `${tool.title || tool.name} · SingleStore`;
+
+  window.addEventListener("message", async (ev) => {
+    if (!frame || ev.source !== frame.contentWindow) return;
+    const { id, method, params: p, jsonrpc } = ev.data ?? {};
+    if (jsonrpc !== "2.0" || !method) return;
+    switch (method) {
+      case "ui/initialize":
+        return reply(id, {
+          protocolVersion: p.protocolVersion,
+          hostCapabilities: { openLinks: {}, downloadFile: {}, serverTools: {}, logging: {} },
+          hostInfo: { name: "singlestore-browser-view", version: "0.2.0" },
+          hostContext: {
+            theme: theme(), displayMode: "fullscreen", availableDisplayModes: ["fullscreen"],
+            containerDimensions: { width: innerWidth, height: innerHeight },
+            locale: navigator.language, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            platform: "web", toolInfo: { tool },
+          },
+        });
+      case "ui/notifications/initialized":
+        send({ jsonrpc: "2.0", method: "ui/notifications/tool-input", params: { arguments: args } });
+        return send({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: await callTool(toolName, args) });
+      case "tools/call": return reply(id, await callTool(p.name, p.arguments));
+      case "ui/message":
+      case "ui/update-model-context":
+        return replyError(id, "Only available inside Claude");
+      case "ui/download-file": download(p.contents); return reply(id, {});
+      case "ui/open-link": window.open(p.url, "_blank", "noopener"); return reply(id, {});
+      case "ui/request-display-mode": return reply(id, { mode: "fullscreen" });
+      case "ping": return reply(id, {});
+      default:
+        if (id !== undefined) replyError(id, `Method not found: ${method}`, -32601);
+    }
+  });
+
+  frame = Object.assign(document.createElement("iframe"), { sandbox: "allow-scripts allow-downloads", srcdoc: html });
+  status.replaceWith(frame);
+  darkQuery.addEventListener("change", () =>
+    send({ jsonrpc: "2.0", method: "ui/notifications/host-context-changed", params: { theme: theme() } }));
+}
+
+open().catch((e) => {
+  status.textContent = `Couldn't open the app: ${e.message}. Links stop working when the SingleStore MCP server restarts; open the app in the browser again from Claude.`;
+});
+</script>
+</body>
+</html>

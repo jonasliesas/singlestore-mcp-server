@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pipeline Monitor</title>
+<!--S2:HEAD-->
+<style>
+  .pm-summary { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .pm-summary .s2-badge { cursor: pointer; border: 1px solid transparent; }
+  .pm-summary .s2-badge[aria-pressed="true"] { border-color: currentColor; }
+  .pm-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .pm-controls .s2-input { flex: 1 1 180px; max-width: 280px; }
+  .pm-auto { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+  .pm-list { display: flex; flex-direction: column; gap: 8px; }
+  .pm-card { padding: 10px 12px; }
+  .pm-card.has-error { border-left: 3px solid var(--s2-err); }
+  .pm-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+  .pm-name { font-weight: var(--font-weight-semibold, 600); }
+  .pm-db { color: var(--s2-text-3); font-weight: normal; }
+  .pm-flow { margin-top: 4px; color: var(--s2-text-2); font-size: var(--s2-fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pm-flow .s2-mono { color: var(--s2-text); }
+  .pm-stats { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 6px; font-size: var(--s2-fs-xs); color: var(--s2-text-2); }
+  .pm-stats strong { color: var(--s2-text); font-weight: var(--font-weight-medium, 500); }
+  .pm-err { margin-top: 6px; display: flex; gap: 8px; align-items: flex-start; font-size: var(--s2-fs-xs); color: var(--s2-err); }
+  .pm-err-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .pm-details { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--s2-border-2); display: flex; flex-direction: column; gap: 12px; }
+  .pm-meta { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; font-size: var(--s2-fs-xs); }
+  .pm-meta dt { color: var(--s2-text-2); }
+  .pm-meta dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+  .pm-section-title { font-size: var(--s2-fs-xs); font-weight: var(--font-weight-semibold, 600); color: var(--s2-text-2); margin: 0 0 6px; display: flex; gap: 8px; align-items: center; }
+  .pm-spark { display: inline-flex; align-items: flex-end; gap: 2px; height: 22px; vertical-align: middle; }
+  .pm-spark span { width: 5px; min-height: 2px; border-radius: 1px; }
+  .pm-msg-cell { white-space: normal !important; max-width: 520px !important; min-width: 240px; }
+</style>
+</head>
+<body>
+<div id="root"><div class="s2-empty"><span class="s2-spinner"></span> Loading pipelines…</div></div>
+<script type="module">
+const { h, fmt } = S2;
+const root = document.getElementById("root");
+const AUTO_REFRESH_MS = 10000;
+
+const state = {
+  data: null,
+  database: null,
+  error: null,
+  loading: false,
+  filter: "",
+  stateFilter: null,
+  expanded: new Set(),
+  details: {},
+  busy: new Set(),
+  auto: false,
+  timer: null,
+};
+
+const keyOf = (p) => `${p.database}.${p.name}`;
+const STATE_BADGE = { Running: "ok", Stopped: "", Error: "err" };
+const BATCH_COLOR = {
+  Succeeded: "var(--s2-ok)", Failed: "var(--s2-err)", "In Progress": "var(--s2-info)",
+  Queued: "var(--s2-info)", "No Data": "var(--s2-border)",
+};
+
+// Newest batch: the batch history is more current than the summary table,
+// which only tracks the last batch that did work.
+function newestBatch(p) {
+  const hist = p.recent_batches.at(-1);
+  const sum = p.last_batch;
+  if (hist && (!sum || hist.batch_id >= sum.batch_id)) {
+    return { id: hist.batch_id, state: hist.state, unix: hist.start_unix, rows: hist.rows, seconds: hist.seconds,
+             rowsPerSec: sum && sum.batch_id === hist.batch_id ? sum.rows_per_sec : null };
+  }
+  if (sum) return { id: sum.batch_id, state: sum.state, unix: sum.start_unix, rows: sum.rows_inserted, seconds: sum.seconds, rowsPerSec: sum.rows_per_sec };
+  return null;
+}
+
+function sparkline(batches) {
+  if (!batches.length) return null;
+  const max = Math.max(1, ...batches.map((b) => b.rows || 0));
+  return h("span", { class: "pm-spark", title: `Last ${batches.length} batches (height = rows written)` },
+    batches.map((b) => h("span", {
+      title: `Batch ${b.batch_id}: ${b.state}, ${fmt.number(b.rows ?? 0)} rows, ${fmt.duration(b.seconds)}, ${fmt.dateTime(b.start_unix)}`,
+      style: { height: `${b.rows ? Math.max(4, Math.round((Math.log10(b.rows + 1) / Math.log10(max + 1)) * 22)) : 2}px`,
+               background: BATCH_COLOR[b.state] ?? "var(--s2-text-3)" },
+    })));
+}
+
+async function refresh({ silent = false } = {}) {
+  if (state.loading) return;
+  if (silent && document.querySelector(".s2-confirm")) return; // don't yank an open confirmation
+  state.loading = true;
+  if (!silent) render();
+  try {
+    state.data = await S2.callTool("pipeline_monitor_data", state.database ? { database: state.database } : {});
+    state.error = null;
+    reportContext();
+  } catch (e) {
+    state.error = e;
+  } finally {
+    state.loading = false;
+    render();
+  }
+}
+
+function setAuto(on) {
+  state.auto = on;
+  clearInterval(state.timer);
+  state.timer = on ? setInterval(() => { if (!document.hidden) refresh({ silent: true }); }, AUTO_REFRESH_MS) : null;
+  render();
+}
+
+async function runAction(p, tool, args, okMessage) {
+  const k = keyOf(p);
+  state.busy.add(k);
+  render();
+  try {
+    const result = await S2.callTool(tool, args);
+    S2.toast(okMessage, "ok");
+    return result;
+  } catch (e) {
+    S2.toast(`${p.name}: ${e.message}`, "err");
+    return null;
+  } finally {
+    state.busy.delete(k);
+    await refresh({ silent: true });
+  }
+}
+
+async function startPipeline(p, button) {
+  if (!(await S2.confirmInline(button, `Start ${p.name}?`, "Start"))) return;
+  await runAction(p, "start_pipeline", { pipeline_name: p.name, database: p.database }, `Started ${p.name}`);
+}
+
+async function stopPipeline(p, button) {
+  if (!(await S2.confirmInline(button, `Stop ${p.name}?`, "Stop"))) return;
+  await runAction(p, "stop_pipeline", { pipeline_name: p.name, database: p.database }, `Stopped ${p.name}`);
+}
+
+async function testPipeline(p) {
+  const k = keyOf(p);
+  const d = (state.details[k] ??= {});
+  state.expanded.add(k);
+  d.test = { loading: true };
+  render();
+  try {
+    d.test = { result: await S2.callTool("test_pipeline", { pipeline_name: p.name, database: p.database, limit: 10 }) };
+  } catch (e) {
+    d.test = { error: e };
+  }
+  render();
+}
+
+async function toggleDetails(p) {
+  const k = keyOf(p);
+  if (state.expanded.has(k)) { state.expanded.delete(k); render(); return; }
+  state.expanded.add(k);
+  const d = (state.details[k] ??= {});
+  if (p.error_count && !d.errors) {
+    d.errors = { loading: true };
+    render();
+    try {
+      d.errors = { rows: (await S2.callTool("pipeline_errors", { pipeline_name: p.name, database: p.database })).errors };
+    } catch (e) {
+      d.errors = { error: e };
+    }
+  }
+  render();
+}
+
+function askClaude(p) {
+  const err = p.last_error;
+  S2.sendPrompt(
+    `The SingleStore pipeline ${p.database}.${p.name} (${p.source_type} from ${p.source} into ${p.target_table}) ` +
+    `is ${p.state} and has ${p.error_count} recorded error(s). The latest (${fmt.dateTime(err.unix)}) is: "${err.message}". ` +
+    `Diagnose the likely cause and suggest how to fix it.`);
+}
+
+function reportContext() {
+  const ps = state.data?.pipelines ?? [];
+  const lines = ps.map((p) => `${p.database}.${p.name}: ${p.state}${p.error_count ? `, ${p.error_count} errors` : ""}`);
+  S2.updateModelContext(`User is viewing the Pipeline Monitor (${state.database ?? "all databases"}):\n${lines.join("\n")}`);
+}
+
+function header() {
+  const ps = state.data?.pipelines ?? [];
+  const counts = {};
+  for (const p of ps) counts[p.state] = (counts[p.state] ?? 0) + 1;
+  const updated = state.data ? `updated ${fmt.relTime(state.data.generated_at)}` : "";
+  return h("div", { class: "s2-header" },
+    h("div", {},
+      h("h1", { class: "s2-title" }, "Pipeline Monitor"),
+      h("div", { class: "s2-subtitle" }, `${state.database ?? "All databases"} · ${ps.length} pipeline${ps.length === 1 ? "" : "s"} · ${updated}`)),
+    h("span", { class: "s2-spacer" }),
+    h("div", { class: "pm-summary" }, Object.entries(counts).map(([s, n]) =>
+      h("span", {
+        class: `s2-badge ${STATE_BADGE[s] ?? "warn"}`, role: "button", tabindex: "0",
+        "aria-pressed": String(state.stateFilter === s), title: `Show only ${s}`,
+        onclick: () => { state.stateFilter = state.stateFilter === s ? null : s; render(); },
+      }, `${n} ${s}`))),
+    h("label", { class: "pm-auto s2-small s2-muted", title: `Refresh every ${AUTO_REFRESH_MS / 1000}s` },
+      h("input", { type: "checkbox", checked: state.auto, onchange: (e) => setAuto(e.target.checked) }), "Auto-refresh"),
+    h("button", { class: "s2-btn", onclick: () => refresh(), disabled: state.loading },
+      state.loading ? h("span", { class: "s2-spinner" }) : null, "Refresh"),
+    S2.openInBrowserButton("pipeline_monitor", () => ({ database: state.database })),
+    S2.fullscreenButton());
+}
+
+function card(p) {
+  const k = keyOf(p);
+  const busy = state.busy.has(k);
+  const open = state.expanded.has(k);
+  const nb = newestBatch(p);
+  const running = p.state === "Running";
+
+  const actions = h("div", { class: "s2-toolbar" },
+    busy ? h("span", { class: "s2-spinner", title: "Working…" }) : null,
+    running
+      ? h("button", { class: "s2-btn danger", disabled: busy, onclick: (e) => stopPipeline(p, e.currentTarget) }, "Stop")
+      : h("button", { class: "s2-btn", disabled: busy, onclick: (e) => startPipeline(p, e.currentTarget) }, "Start"),
+    h("button", {
+      class: "s2-btn", disabled: busy || running, onclick: () => testPipeline(p),
+      title: running ? "Stop the pipeline to test it"
+        : "Extract and transform a sample without loading it. A failed test is recorded in the pipeline's batch history and error log.",
+    }, "Test"),
+    h("button", { class: "s2-btn ghost", "aria-expanded": String(open), onclick: () => toggleDetails(p) }, open ? "Hide" : "Details"));
+
+  return h("div", { class: `s2-card pm-card${p.error_count && p.state !== "Stopped" ? " has-error" : ""}` },
+    h("div", { class: "pm-row" },
+      h("span", { class: "pm-name" }, state.database ? null : h("span", { class: "pm-db" }, `${p.database}.`), p.name),
+      h("span", { class: `s2-badge ${STATE_BADGE[p.state] ?? "warn"}` }, p.state),
+      h("span", { class: "s2-badge plain" }, p.source_type ?? "?"),
+      h("span", { class: "s2-spacer" }),
+      actions),
+    h("div", { class: "pm-flow", title: `${p.source} → ${p.target_table}` },
+      h("span", { class: "s2-mono" }, p.source ?? "?"), "  →  ", h("span", { class: "s2-mono" }, p.target_table ?? "?")),
+    h("div", { class: "pm-stats" },
+      nb
+        ? h("span", {}, "Last batch ", h("strong", {}, nb.state), ` ${fmt.relTime(nb.unix)} · `,
+            h("strong", {}, fmt.number(nb.rows ?? 0)), " rows · ", fmt.duration(nb.seconds))
+        : h("span", {}, "No batches yet"),
+      sparkline(p.recent_batches)),
+    p.error_count
+      ? h("div", { class: "pm-err" },
+          h("span", { class: "pm-err-text", title: p.last_error.message },
+            h("strong", {}, `${p.error_count} error${p.error_count === 1 ? "" : "s"}`), ` · ${fmt.relTime(p.last_error.unix)}: ${p.last_error.message}`),
+          h("button", { class: "s2-btn", onclick: () => askClaude(p) }, "Ask Claude"))
+      : null,
+    open ? details(p, nb) : null);
+}
+
+function details(p, nb) {
+  const d = state.details[keyOf(p)] ?? {};
+  const meta = [
+    ["Source", h("span", { class: "s2-mono" }, p.source ?? "–")],
+    ["Target table", h("span", { class: "s2-mono" }, p.target_table ?? "–")],
+    ["Created", fmt.dateTime(p.created_unix)],
+    ["Altered", p.altered_unix ? fmt.dateTime(p.altered_unix) : "–"],
+    ["Last batch", nb ? `#${nb.id} ${nb.state} at ${fmt.dateTime(nb.unix)}, ${fmt.number(nb.rows ?? 0)} rows in ${fmt.duration(nb.seconds)}${nb.rowsPerSec ? `, ${fmt.number(nb.rowsPerSec)} rows/s` : ""}` : "–"],
+  ];
+  const sections = [h("dl", { class: "pm-meta" }, meta.map(([k, v]) => [h("dt", {}, k), h("dd", {}, v)]))];
+
+  if (d.test) {
+    sections.push(h("div", {},
+      h("div", { class: "pm-section-title" }, "Test run (sample, nothing loaded)",
+        d.test.loading ? h("span", { class: "s2-spinner" }) : null),
+      d.test.error ? S2.errorBox(d.test.error)
+        : d.test.result ? (d.test.result.rows?.length
+            ? S2.dataTable(d.test.result.columns, d.test.result.rows, { maxHeight: "260px" })
+            : h("div", { class: "s2-muted s2-small" }, "Test returned no rows (nothing new in the source, or all data already loaded)."))
+        : null));
+  }
+
+  if (p.error_count) {
+    const e = d.errors ?? {};
+    sections.push(h("div", {},
+      h("div", { class: "pm-section-title" }, `Recent errors (${fmt.number(p.error_count)} total)`,
+        e.loading ? h("span", { class: "s2-spinner" }) : null),
+      e.error ? S2.errorBox(e.error)
+        : e.rows ? S2.dataTable(["When", "Type", "Message", "Batch"], e.rows.map((r) => ({
+            When: fmt.dateTime(r.ERROR_UNIX_TIMESTAMP), Type: r.ERROR_TYPE, Message: r.ERROR_MESSAGE, Batch: r.BATCH_ID,
+          })), { maxHeight: "260px", render: { Message: (v) => h("span", { class: "pm-msg-cell" }, v ?? "") } })
+        : null));
+  }
+  return h("div", { class: "pm-details" }, sections);
+}
+
+function render() {
+  if (!state.data) {
+    root.replaceChildren(state.error ? S2.errorBox(state.error)
+      : h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Loading pipelines…"));
+    return;
+  }
+  const all = state.data.pipelines;
+  const q = state.filter.trim().toLowerCase();
+  const shown = all.filter((p) =>
+    (!state.stateFilter || p.state === state.stateFilter) &&
+    (!q || [p.name, p.database, p.source, p.target_table, p.source_type].some((v) => String(v ?? "").toLowerCase().includes(q))));
+
+  const filterBox = h("input", {
+    class: "s2-input", type: "search", placeholder: "Filter pipelines…", value: state.filter,
+    oninput: (e) => { state.filter = e.target.value; render(); restoreFocus(); },
+  });
+  function restoreFocus() {
+    const box = root.querySelector('input[type="search"]');
+    box?.focus();
+    box?.setSelectionRange(box.value.length, box.value.length);
+  }
+
+  root.replaceChildren(...[
+    header(),
+    state.error ? h("div", { class: "s2-error", style: { marginBottom: "10px" } }, `Refresh failed: ${state.error.message}`) : null,
+    all.length > 4 ? h("div", { class: "pm-controls" }, filterBox) : null,
+    all.length === 0
+      ? h("div", { class: "s2-empty" }, `No pipelines in ${state.database ?? "any database"}.`)
+      : shown.length === 0
+        ? h("div", { class: "s2-empty" }, "No pipelines match the filter.")
+        : h("div", { class: "pm-list" }, shown.map(card)),
+  ].filter(Boolean));
+}
+
+S2.onDisplayModeChange = render;
+await S2.connect({
+  name: "singlestore-pipeline-monitor",
+  onToolInput(args) {
+    state.database = args.database ?? null;
+  },
+  onToolResult(result) {
+    try {
+      state.data = S2.resultData(result);
+      state.database = state.data.database ?? state.database;
+      state.error = null;
+      reportContext();
+    } catch (e) {
+      state.error = e;
+    }
+    render();
+  },
+  onToolCancelled() {
+    if (!state.data) root.replaceChildren(h("div", { class: "s2-empty" }, "Cancelled."));
+  },
+});
+setInterval(() => { if (state.data && !state.loading && !document.querySelector(".s2-confirm")) render(); }, 30000);
+</script>
+</body>
+</html>

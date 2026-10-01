@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MCP Apps Dev Host</title>
+<style>
+  :root { color-scheme: light dark; --bg: light-dark(#f4f5f7, #161616); --panel: light-dark(#fff, #202020);
+          --border: light-dark(#d8dce1, #353535); --muted: light-dark(#66707a, #9a9a9a); }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.4 system-ui, "Segoe UI", sans-serif; background: var(--bg); color: light-dark(#1f2328, #e6e6e6); }
+  header { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 14px; margin: 0 8px 0 0; }
+  select, textarea, button { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; }
+  textarea { font-family: ui-monospace, Consolas, monospace; width: min(420px, 100%); height: 30px; resize: vertical; }
+  button { cursor: pointer; }
+  button.primary { background: #0969da; border-color: #0969da; color: #fff; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; padding: 16px; align-items: start; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  #frame-box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; min-height: 80px; }
+  iframe { display: block; width: 100%; border: 0; height: 120px; }
+  #frame-box.fullscreen { position: fixed; inset: 0; z-index: 10; border-radius: 0; border: 0; }
+  aside { display: flex; flex-direction: column; gap: 12px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+  .panel h2 { font-size: 12px; margin: 0 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  #log { max-height: 420px; overflow: auto; font: 11px/1.35 ui-monospace, Consolas, monospace; }
+  #log div { padding: 2px 0; border-bottom: 1px solid var(--border); word-break: break-all; }
+  .in { color: light-dark(#0a6b2b, #4fc36d); } .out { color: light-dark(#0b57b5, #6aa8ff); } .err { color: #d1242f; }
+  #chat div, #ctx div { padding: 4px 0; border-bottom: 1px solid var(--border); white-space: pre-wrap; }
+  #status { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>MCP Apps Dev Host</h1>
+  <select id="tool"></select>
+  <textarea id="args" spellcheck="false">{}</textarea>
+  <select id="theme"><option>light</option><option>dark</option></select>
+  <button class="primary" id="run">Run</button>
+  <span id="status"></span>
+</header>
+<main>
+  <div id="frame-box"></div>
+  <aside>
+    <div class="panel"><h2>ui/message (sent to chat)</h2><div id="chat" class="muted">–</div></div>
+    <div class="panel"><h2>ui/update-model-context</h2><div id="ctx">–</div></div>
+    <div class="panel"><h2>Protocol log</h2><div id="log"></div></div>
+  </aside>
+</main>
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const status = (t) => ($("status").textContent = t);
+const api = async (op, body) => {
+  const res = await fetch(`/api/${op}`, body === undefined ? {} : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+};
+const log = (dir, msg) => {
+  const line = document.createElement("div");
+  line.className = dir === "←" ? "in" : dir === "→" ? "out" : "err";
+  const text = JSON.stringify(msg);
+  line.textContent = `${dir} ${text.length > 600 ? text.slice(0, 600) + "…" : text}`;
+  $("log").prepend(line);
+};
+
+let tools = [];
+let frame = null;
+let current = null;
+let fullscreen = false;
+let lastInlineHeight = "120px";
+const debugMode = new URLSearchParams(location.hash.slice(1)).get("debug") === "1";
+
+function send(msg) { log("→", msg); frame.contentWindow.postMessage(msg, "*"); }
+const reply = (id, result) => send({ jsonrpc: "2.0", id, result });
+const replyError = (id, message, code = -32603) => send({ jsonrpc: "2.0", id, error: { code, message } });
+
+async function callTool(name, args) {
+  try { return await api("call", { name, arguments: args }); }
+  catch (e) { return { isError: true, content: [{ type: "text", text: String(e.message || e) }] }; }
+}
+
+window.addEventListener("message", async (ev) => {
+  if (!frame || ev.source !== frame.contentWindow) return;
+  const msg = ev.data;
+  if (!msg || msg.jsonrpc !== "2.0") return;
+  log("←", msg);
+  const { id, method, params } = msg;
+  try {
+    switch (method) {
+      case "ui/initialize":
+        return reply(id, {
+          protocolVersion: params.protocolVersion,
+          hostCapabilities: { openLinks: {}, downloadFile: {}, serverTools: {}, serverResources: {}, logging: {},
+                              updateModelContext: { text: {} }, message: { text: {} } },
+          hostInfo: { name: "s2-dev-host", version: "0.1.0" },
+          hostContext: { theme: $("theme").value, displayMode: "inline", availableDisplayModes: ["inline", "fullscreen"],
+                         containerDimensions: { width: $("frame-box").clientWidth, maxHeight: 4000 },
+                         locale: navigator.language, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                         platform: "web", toolInfo: { tool: current.tool } },
+        });
+      case "ui/notifications/initialized": {
+        send({ jsonrpc: "2.0", method: "ui/notifications/tool-input", params: { arguments: current.args } });
+        status(`Running ${current.tool.name}…`);
+        const result = await callTool(current.tool.name, current.args);
+        status(result.isError ? `${current.tool.name} failed` : `${current.tool.name} done`);
+        return send({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: result });
+      }
+      case "tools/call": return reply(id, await callTool(params.name, params.arguments || {}));
+      case "resources/read": return reply(id, await api("resource", { uri: params.uri }));
+      case "ui/notifications/size-changed":
+        if (params?.height) lastInlineHeight = `${Math.ceil(params.height)}px`;
+        if (params?.height && !fullscreen) frame.style.height = lastInlineHeight;
+        return;
+      case "ui/message":
+        // nomessage=1 imitates hosts that reject messages to the chat.
+        if (new URLSearchParams(location.hash.slice(1)).get("nomessage") === "1") return replyError(id, "Messages are not allowed");
+        $("chat").textContent = (params.content || []).map((c) => c.text ?? JSON.stringify(c)).join("\n");
+        return reply(id, {});
+      case "ui/update-model-context":
+        $("ctx").textContent = (params.content || []).map((c) => c.text ?? JSON.stringify(c)).join("\n");
+        return reply(id, {});
+      case "ui/download-file": {
+        for (const item of params.contents || []) {
+          const r = item.resource || {};
+          const blob = new Blob([r.text ?? atob(r.blob || "")], { type: r.mimeType || "text/plain" });
+          const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: (r.uri || "download").split("/").pop() });
+          a.click();
+        }
+        return reply(id, {});
+      }
+      case "ui/open-link":
+        // nolinks=1 imitates hosts that refuse to open links.
+        if (new URLSearchParams(location.hash.slice(1)).get("nolinks") === "1") return replyError(id, "Opening links is not allowed");
+        window.open(params.url, "_blank", "noopener");
+        return reply(id, {});
+      case "ui/request-display-mode": {
+        fullscreen = params.mode === "fullscreen";
+        const box = $("frame-box");
+        box.classList.toggle("fullscreen", fullscreen);
+        frame.style.height = fullscreen ? "100%" : lastInlineHeight;
+        reply(id, { mode: fullscreen ? "fullscreen" : "inline" });
+        return send({ jsonrpc: "2.0", method: "ui/notifications/host-context-changed",
+                      params: { displayMode: fullscreen ? "fullscreen" : "inline",
+                                containerDimensions: { width: box.clientWidth, height: box.clientHeight } } });
+      }
+      case "ping": return reply(id, {});
+      default:
+        if (id !== undefined && method) return replyError(id, `Method not found: ${method}`, -32601);
+    }
+  } catch (e) {
+    log("✕", String(e));
+    if (id !== undefined && method) replyError(id, String(e.message || e));
+  }
+});
+
+async function run() {
+  const name = $("tool").value;
+  let args;
+  try { args = JSON.parse($("args").value || "{}"); } catch { return status("Arguments must be JSON"); }
+  const hash = { tool: name, args: JSON.stringify(args), theme: $("theme").value };
+  if (debugMode) hash.debug = "1";
+  const flags = new URLSearchParams(location.hash.slice(1));
+  for (const f of ["nolinks", "nomessage"]) if (flags.get(f) === "1") hash[f] = "1";
+  location.hash = new URLSearchParams(hash).toString();
+  status("Restarting server…");
+  $("log").replaceChildren();
+  await api("restart", {});
+  tools = await api("tools");
+  const tool = tools.find((t) => t.name === name);
+  if (!tool) return status(`Tool ${name} not found`);
+  current = { tool, args };
+  const uri = tool._meta?.ui?.resourceUri;
+  const res = await api("resource", { uri });
+  // debug=1 adds allow-same-origin so test scripts can reach into the app's DOM
+  // (browser automation can't click inside an opaque-origin iframe). Real hosts
+  // use an opaque origin, which is the default here.
+  const sandbox = debugMode ? "allow-scripts allow-downloads allow-same-origin" : "allow-scripts allow-downloads";
+  frame = Object.assign(document.createElement("iframe"), { sandbox, srcdoc: res.contents[0].text });
+  window.appDoc = () => frame.contentDocument;
+  fullscreen = false;
+  $("frame-box").classList.remove("fullscreen");
+  $("frame-box").replaceChildren(frame);
+  status("Loading app…");
+}
+
+$("run").onclick = () => run().catch((e) => status(`Error: ${e.message}`));
+$("theme").onchange = () => {
+  document.documentElement.style.colorScheme = $("theme").value;
+  if (frame) send({ jsonrpc: "2.0", method: "ui/notifications/host-context-changed", params: { theme: $("theme").value } });
+};
+
+(async () => {
+  status("Starting server…");
+  tools = await api("tools");
+  const uiTools = tools.filter((t) => t._meta?.ui?.resourceUri && !(t._meta.ui.visibility || ["model"]).every((v) => v === "app"));
+  $("tool").replaceChildren(...uiTools.map((t) => Object.assign(document.createElement("option"), { value: t.name, textContent: t.name })));
+  const saved = new URLSearchParams(location.hash.slice(1));
+  if (saved.get("tool")) {
+    $("tool").value = saved.get("tool");
+    $("args").value = saved.get("args") || "{}";
+    $("theme").value = saved.get("theme") || "light";
+    document.documentElement.style.colorScheme = $("theme").value;
+    run().catch((e) => status(`Error: ${e.message}`));
+  } else {
+    status(uiTools.length ? "Pick a tool and Run" : "No UI tools registered yet");
+  }
+})().catch((e) => status(`Error: ${e.message}`));
+</script>
+</body>
+</html>
