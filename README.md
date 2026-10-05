@@ -39,12 +39,13 @@ Pipelines:
 - `start_pipeline` (background or `FOREGROUND`, with optional batch limit)
 - `stop_pipeline`, `drop_pipeline`, `test_pipeline`
 
-Interactive apps (see below): `pipeline_monitor`, `query_grid`, `schema_explorer`.
+Interactive apps (see below): `pipeline_monitor`, `query_grid`, `schema_explorer`,
+`cluster_monitor`, `sql_editor`.
 
 ## MCP Apps
 
 In hosts that support [MCP Apps](https://modelcontextprotocol.io/seps/1865-mcp-apps-interactive-user-interfaces-for-mcp)
-(e.g. Claude), three tools render an interactive UI inline in the chat
+(e.g. Claude), these tools render an interactive UI inline in the chat
 instead of plain text. In other hosts they still return a normal text result.
 
 | Tool | What it shows |
@@ -52,6 +53,8 @@ instead of plain text. In other hosts they still return a normal text result.
 | `pipeline_monitor(database?)` | Every pipeline's state, source → target table, latest batch, batch history and recent errors. Start / Stop (with confirmation), Test, error drill-down, "Ask Claude" to diagnose an error, optional 10 s auto-refresh. |
 | `query_grid(sql, database?, max_rows=1000)` | Read-only query results as a sortable, filterable, paginated grid with CSV export. The SQL can be edited and re-run from the grid. Only SELECT / WITH / SHOW / DESCRIBE / EXPLAIN are accepted; writes are rejected before reaching the database. |
 | `schema_explorer(database?, table?)` | Databases → tables tree with row counts and sizes, and per-table columns, DDL (shard/sort keys) and a row preview. "Ask Claude" and "Query in grid" hand the table back to the chat. |
+| `cluster_monitor()` | Every node (aggregators and leaves) with SingleStore CPU (against the node's core limit, with a short history), memory against `max_memory`, and disk space and read/write throughput; plus the queries running right now (expand a row for the full SQL and "Ask Claude"). Auto-refreshes every 5 s. |
+| `sql_editor(database?, sql?)` | Schema tree, SQL editor (CodeMirror) and results pane, split top/bottom with a draggable divider. Autocomplete for SQL and SingleStore keywords, SingleStore built-in functions (with signatures), your functions/procedures, databases, tables and columns (other databases load as you type `db.`). Ctrl+Enter runs the statement at the cursor or the selection. Reads run immediately; statements that change data or schema ask for confirmation first. A **Chat with Claude** tab sends a question (with the editor's SQL and last result) into the Claude chat; Claude answers into the editor with `sql_editor_reply`, and each SQL block gets Replace / Insert / Copy buttons. (Relayed through the chat because Claude doesn't offer MCP sampling to apps or servers; not available in the browser view.) |
 
 The model gets a compact text summary (e.g. the first 20 rows); the full data
 goes to the UI only, via `structuredContent`, which the MCP Apps spec keeps
@@ -61,7 +64,10 @@ drill-downs are marked app-only, so they don't clutter the model's tool list.
 Layout: [`src/singlestore_mcp/apps/`](src/singlestore_mcp/apps) — one
 `<name>.py` (tools) + `<name>.html` (UI) per app, shared `shared.js` /
 `shared.css` helpers, and the official ext-apps client in `vendor/`, inlined
-at startup so the apps need no CDN or internet access.
+at startup so the apps need no CDN or internet access. The SQL Editor also
+inlines a CodeMirror bundle (`vendor/codemirror-bundle.js`, MIT) built by
+`scripts/build_codemirror` (`npm install && npm run build`) and a list of
+SingleStore built-in functions (`vendor/singlestore_functions.json`).
 
 Each app has a **⤢ Full screen** button (Esc to exit) when the host offers
 fullscreen display mode; the grid and explorer then use the full height.

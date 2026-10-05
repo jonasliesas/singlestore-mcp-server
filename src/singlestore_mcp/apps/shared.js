@@ -174,7 +174,6 @@ S2.sendPrompt = async function (text, { quiet = false } = {}) {
 S2.openAppInBrowser = async function (tool, args) {
   const clean = Object.fromEntries(Object.entries(args ?? {}).filter(([, v]) => v != null && v !== ""));
   const { url } = await S2.callTool("browser_link", { tool, arguments: clean });
-  if (!S2.inBrowserView()) S2.updateModelContext(`Browser link for the user's current ${tool} view: ${url}`);
   let opened = false;
   try { opened = !(await S2.app.openLink({ url }))?.isError; } catch { opened = false; }
   if (!opened) showLinkPanel(url);

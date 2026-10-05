@@ -29,6 +29,12 @@
   .pm-meta dt { color: var(--s2-text-2); }
   .pm-meta dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
   .pm-section-title { font-size: var(--s2-fs-xs); font-weight: var(--font-weight-semibold, 600); color: var(--s2-text-2); margin: 0 0 6px; display: flex; gap: 8px; align-items: center; }
+  .pm-progress { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 6px; font-size: var(--s2-fs-xs); color: var(--s2-text-2); }
+  .pm-progress strong { color: var(--s2-text); font-weight: var(--font-weight-medium, 500); }
+  .pm-bar { flex: 0 1 220px; min-width: 120px; height: 8px; border-radius: 4px; background: var(--s2-bg-3); overflow: hidden; }
+  .pm-bar > span { display: block; height: 100%; border-radius: 4px; background: var(--s2-info); transition: width .4s; }
+  .pm-bar.done > span { background: var(--s2-ok); }
+  .pm-bar.paused > span { background: var(--s2-text-3); }
   .pm-spark { display: inline-flex; align-items: flex-end; gap: 2px; height: 22px; vertical-align: middle; }
   .pm-spark span { width: 5px; min-height: 2px; border-radius: 1px; }
   .pm-msg-cell { white-space: normal !important; max-width: 520px !important; min-width: 240px; }
@@ -84,6 +90,39 @@ function sparkline(batches) {
       style: { height: `${b.rows ? Math.max(4, Math.round((Math.log10(b.rows + 1) / Math.log10(max + 1)) * 22)) : 2}px`,
                background: BATCH_COLOR[b.state] ?? "var(--s2-text-3)" },
     })));
+}
+
+// How far the pipeline is through its source.
+function progressLine(p) {
+  const prog = p.progress;
+  if (!prog) return null;
+  if (prog.kind === "kafka") {
+    const asOf = prog.updated_unix ? ` · as of ${fmt.relTime(prog.updated_unix)}` : "";
+    return h("div", { class: "pm-progress" },
+      prog.lag === 0
+        ? h("span", { class: "s2-badge ok" }, "Caught up")
+        : h("span", { class: "s2-badge warn" }, `${fmt.number(prog.lag)} messages behind`),
+      h("span", {}, `${prog.partitions} partition${prog.partitions === 1 ? "" : "s"}${asOf}`));
+  }
+  if (!prog.total) return h("div", { class: "pm-progress" }, h("span", { class: "s2-faint" }, "No source files found yet"));
+  const done = prog.pending === 0;
+  const pct = Math.round((prog.loaded / prog.total) * 100);
+  const running = p.state === "Running";
+  // A file can be "loaded" even though some of its rows failed.
+  const rowErrors = p.error_count > 0 && p.last_error?.type === "Error";
+  const status = done && !prog.skipped
+    ? (rowErrors
+        ? h("span", { class: "s2-badge warn", title: "Every file was processed, but some rows failed; see the errors below" }, "All files loaded · with errors")
+        : h("span", { class: "s2-badge ok" }, "All files loaded"))
+    : done
+      ? h("span", { class: "s2-badge warn" }, `${fmt.number(prog.skipped)} skipped`)
+      : h("span", { class: `s2-badge ${running ? "info" : ""}` }, running ? `Loading · ${pct}%` : `Paused at ${pct}%`);
+  return h("div", { class: "pm-progress", title: `${prog.loaded} loaded, ${prog.pending} waiting, ${prog.skipped} skipped` },
+    h("div", { class: `pm-bar${done ? " done" : running ? "" : " paused"}`, role: "progressbar",
+      "aria-valuemin": "0", "aria-valuemax": String(prog.total), "aria-valuenow": String(prog.loaded) },
+      h("span", { style: { width: `${Math.max(pct, prog.loaded ? 2 : 0)}%` } })),
+    h("span", {}, h("strong", {}, `${fmt.number(prog.loaded)} of ${fmt.number(prog.total)}`), ` files · ${fmt.bytes(prog.bytes_loaded)} of ${fmt.bytes(prog.bytes_total)}`),
+    status);
 }
 
 async function refresh({ silent = false } = {}) {
@@ -178,7 +217,13 @@ function askClaude(p) {
 
 function reportContext() {
   const ps = state.data?.pipelines ?? [];
-  const lines = ps.map((p) => `${p.database}.${p.name}: ${p.state}${p.error_count ? `, ${p.error_count} errors` : ""}`);
+  const progressText = (p) => {
+    const g = p.progress;
+    if (!g) return "";
+    if (g.kind === "kafka") return g.lag === 0 ? ", caught up" : `, ${g.lag} messages behind`;
+    return `, ${g.loaded}/${g.total} files loaded${g.skipped ? ` (${g.skipped} skipped)` : ""}`;
+  };
+  const lines = ps.map((p) => `${p.database}.${p.name}: ${p.state}${progressText(p)}${p.error_count ? `, ${p.error_count} errors` : ""}`);
   S2.updateModelContext(`User is viewing the Pipeline Monitor (${state.database ?? "all databases"}):\n${lines.join("\n")}`);
 }
 
@@ -234,6 +279,7 @@ function card(p) {
       actions),
     h("div", { class: "pm-flow", title: `${p.source} → ${p.target_table}` },
       h("span", { class: "s2-mono" }, p.source ?? "?"), "  →  ", h("span", { class: "s2-mono" }, p.target_table ?? "?")),
+    progressLine(p),
     h("div", { class: "pm-stats" },
       nb
         ? h("span", {}, "Last batch ", h("strong", {}, nb.state), ` ${fmt.relTime(nb.unix)} · `,

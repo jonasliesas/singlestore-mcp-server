@@ -1,0 +1,614 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SQL Editor</title>
+<!--S2:HEAD-->
+<!--S2:VENDOR:codemirror-bundle.js-->
+<!--S2:VENDOR:singlestore_functions.json-->
+<style>
+  body { padding: 10px 12px; }
+  .sq-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .sq-head select { max-width: 200px; }
+  .sq-body { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 10px; height: 640px; }
+  .sq-body.no-tree { grid-template-columns: minmax(0, 1fr); }
+  .sq-body.no-tree .sq-tree { display: none; }
+  html[data-display-mode="fullscreen"] .sq-body { height: calc(100vh - 70px); }
+  @media (max-width: 640px) { .sq-body { grid-template-columns: minmax(0, 1fr); } .sq-tree { display: none; } }
+
+  .sq-tree { display: flex; flex-direction: column; min-height: 0; border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); overflow: hidden; }
+  .sq-tree-top { padding: 6px; border-bottom: 1px solid var(--s2-border-2); display: flex; flex-direction: column; gap: 5px; }
+  .sq-tree-top .s2-input { width: 100%; }
+  .sq-tree-list { overflow: auto; flex: 1; padding: 3px 0; font-size: var(--s2-fs-xs); }
+  .sq-row { display: flex; align-items: center; gap: 5px; padding: 2px 8px; cursor: pointer; white-space: nowrap; min-height: 22px; }
+  .sq-row:hover { background: var(--s2-bg-2); }
+  .sq-row.cur { color: var(--s2-info); font-weight: var(--font-weight-semibold, 600); }
+  .sq-row .name { overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+  .sq-row .meta { color: var(--s2-text-3); font-size: 11px; }
+  .sq-row .act { display: none; font-size: 11px; padding: 0 6px; }
+  .sq-row:hover .act { display: inline-flex; }
+  .sq-row.tbl { padding-left: 22px; }
+  .sq-row.col { padding-left: 40px; cursor: copy; color: var(--s2-text-2); }
+  .sq-caret { width: 10px; color: var(--s2-text-3); font-size: 9px; transition: transform .12s; flex: none; }
+  .sq-caret.open { transform: rotate(90deg); }
+
+  .sq-main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+  .sq-editor { border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); overflow: hidden; min-height: 60px; }
+  .sq-editor .cm-editor { height: 100%; }
+  .sq-split { flex: none; height: 9px; cursor: row-resize; display: flex; align-items: center; justify-content: center; touch-action: none; }
+  .sq-split::before { content: ""; width: 44px; height: 3px; border-radius: 2px; background: var(--s2-border); }
+  .sq-split:hover::before, .sq-split.drag::before { background: var(--s2-info); }
+  .sq-results { flex: 1; min-height: 60px; display: flex; flex-direction: column; border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); overflow: hidden; }
+  .sq-status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 5px 8px; border-bottom: 1px solid var(--s2-border-2); font-size: var(--s2-fs-xs); color: var(--s2-text-2); min-height: 32px; }
+  .sq-out { flex: 1; overflow: auto; min-height: 0; }
+  .sq-tabs { display: flex; gap: 2px; padding: 0 6px; border-bottom: 1px solid var(--s2-border-2); background: var(--s2-bg-2); }
+  .sq-tab { border: 0; background: none; padding: 6px 10px; font-size: var(--s2-fs-xs); color: var(--s2-text-2); cursor: pointer;
+    border-bottom: 2px solid transparent; margin-bottom: -1px; display: inline-flex; align-items: center; gap: 6px; }
+  .sq-tab[aria-selected="true"] { color: var(--s2-text); border-bottom-color: var(--s2-info); font-weight: var(--font-weight-semibold, 600); }
+  .sq-tab .count { background: var(--s2-info); color: #fff; border-radius: 999px; font-size: 10px; padding: 0 6px; font-weight: 600; }
+  .sq-chat { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  .sq-chat[hidden], .sq-resultview[hidden] { display: none; }
+  .sq-resultview { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  .sq-msgs { flex: 1; overflow: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+  .sq-msg { max-width: 92%; font-size: var(--s2-fs-xs); line-height: 1.5; }
+  .sq-msg.you { align-self: flex-end; background: var(--s2-info-bg); border-radius: 10px 10px 2px 10px; padding: 6px 10px; white-space: pre-wrap; }
+  .sq-msg.claude { align-self: flex-start; background: var(--s2-bg-2); border-radius: 10px 10px 10px 2px; padding: 6px 10px; width: 92%; }
+  .sq-msg.note { align-self: center; color: var(--s2-text-3); font-style: italic; }
+  .sq-msg .who { font-size: 11px; color: var(--s2-text-3); margin-bottom: 2px; }
+  .sq-msg p { margin: 0 0 4px; white-space: pre-wrap; }
+  .sq-code { margin: 6px 0; border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius-sm); overflow: hidden; background: var(--s2-bg); }
+  .sq-code pre { margin: 0; padding: 7px 9px; font-family: var(--s2-mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; }
+  .sq-code .bar { display: flex; gap: 4px; padding: 4px 6px; border-top: 1px solid var(--s2-border-2); background: var(--s2-bg-2); }
+  .sq-ask { display: flex; gap: 6px; align-items: flex-end; padding: 6px 8px; border-top: 1px solid var(--s2-border-2); }
+  .sq-ask textarea { flex: 1; resize: none; min-height: 34px; max-height: 120px; font-size: var(--s2-fs-xs); }
+  .sq-ask-opts { font-size: 11px; color: var(--s2-text-3); padding: 0 8px 6px; display: flex; gap: 12px; align-items: center; }
+  .sq-out .s2-table-wrap { border: 0; border-radius: 0; overflow: visible; }
+  .sq-placeholder { padding: 18px; color: var(--s2-text-2); font-size: var(--s2-fs-xs); line-height: 1.6; }
+  .sq-placeholder kbd { font-family: var(--s2-mono); background: var(--s2-bg-2); border: 1px solid var(--s2-border-2); border-radius: 3px; padding: 0 4px; }
+  .sq-confirm { margin: 10px; padding: 10px 12px; border-radius: var(--s2-radius-sm); background: var(--s2-warn-bg); color: var(--s2-text); font-size: var(--s2-fs-xs); }
+  .sq-confirm strong { color: var(--s2-warn); }
+  .sq-confirm pre { margin: 8px 0; max-height: 120px; overflow: auto; }
+  .sq-out .s2-error { margin: 10px; }
+
+  /* CodeMirror autocomplete popup */
+  .cm-tooltip.cm-tooltip-autocomplete > ul { font-family: var(--s2-mono); max-height: 16em; }
+  .cm-completionDetail { color: var(--s2-text-3); margin-left: .6em; font-style: normal; }
+  .cm-tooltip.cm-completionInfo { max-width: 340px; padding: 6px 9px; font-family: var(--s2-font); font-size: var(--s2-fs-xs); white-space: normal; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="module">
+const { h, fmt } = S2;
+const CM = globalThis.CM;
+const FUNCTIONS = JSON.parse(document.getElementById("vendor-singlestore_functions")?.textContent || "[]");
+const SYSTEM = new Set(["information_schema", "cluster", "memsql"]);
+const MAX_ROWS = 1000;
+const SINGLESTORE_KEYWORDS = "pipeline pipelines extractor batch_interval shard sort columnstore rowstore reference link links stage aggregator aggregators leaf leaves partition partitions rebalance attach detach snapshot extension extensions resource_pool workload infer inferred offsets earliest latest skip parser vector autostats sparse unenforced global temporary";
+
+const state = {
+  databases: [], database: null,
+  schemas: new Map(),            // db -> {status: "loading"|"ok"|"error", data, error}
+  expanded: new Set(),           // db names and "db\u0000table" keys
+  showSystem: false, treeOpen: true, filter: "",
+  running: false, result: null, error: null, confirm: null,
+  history: [], editorFrac: 0.42,
+};
+
+const cleanError = (e) => new Error(String(e?.message ?? e).replace(/^Error executing tool [\w-]+:\s*/, ""));
+const ident = (name) => (/^[A-Za-z_][A-Za-z0-9_$]*$/.test(name) ? name : "`" + name.replace(/`/g, "``") + "`");
+
+// ---------------------------------------------------------------- layout
+const root = document.getElementById("root");
+const headEl = h("div", { class: "sq-head" });
+const treeList = h("div", { class: "sq-tree-list", role: "tree" });
+const treeFilter = h("input", { class: "s2-input", type: "search", placeholder: "Filter tables…", "aria-label": "Filter tables",
+  oninput: (e) => { state.filter = e.target.value; renderTree(); } });
+const treeEl = h("aside", { class: "sq-tree" },
+  h("div", { class: "sq-tree-top" }, treeFilter,
+    h("label", { class: "s2-small s2-muted" },
+      h("input", { type: "checkbox", onchange: (e) => { state.showSystem = e.target.checked; renderTree(); } }), " Show system databases")),
+  treeList);
+const editorBox = h("div", { class: "sq-editor" });
+const splitEl = h("div", { class: "sq-split", role: "separator", "aria-orientation": "horizontal", title: "Drag to resize" });
+const statusEl = h("div", { class: "sq-status" });
+const outEl = h("div", { class: "sq-out" });
+const resultView = h("div", { class: "sq-resultview", role: "tabpanel" }, statusEl, outEl);
+const msgsEl = h("div", { class: "sq-msgs", "aria-live": "polite" });
+const askBox = h("textarea", { class: "s2-input", rows: 2, placeholder: "Ask Claude about this SQL… (Enter to send, Shift+Enter for a new line)", "aria-label": "Question for Claude",
+  onkeydown: (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(); } } });
+const includeSql = h("input", { type: "checkbox", checked: true });
+const chatView = h("div", { class: "sq-chat", role: "tabpanel", hidden: true },
+  msgsEl,
+  h("div", { class: "sq-ask" }, askBox, h("button", { class: "s2-btn primary", onclick: () => ask() }, "Send")),
+  h("div", { class: "sq-ask-opts" },
+    h("label", {}, includeSql, " Include the editor's SQL and last result"),
+    h("span", {}, "Answers also appear in the Claude chat.")));
+const tabsEl = h("div", { class: "sq-tabs", role: "tablist" });
+const resultsEl = h("section", { class: "sq-results", "aria-label": "Results and chat" }, tabsEl, resultView, chatView);
+const mainEl = h("div", { class: "sq-main" }, editorBox, splitEl, resultsEl);
+const bodyEl = h("div", { class: "sq-body" }, treeEl, mainEl);
+root.replaceChildren(headEl, bodyEl);
+
+function applySplit() { editorBox.style.flex = `0 0 ${(state.editorFrac * 100).toFixed(1)}%`; }
+applySplit();
+splitEl.addEventListener("pointerdown", (e) => {
+  splitEl.setPointerCapture(e.pointerId);
+  splitEl.classList.add("drag");
+  const rect = mainEl.getBoundingClientRect();
+  const move = (ev) => {
+    state.editorFrac = Math.min(0.85, Math.max(0.12, (ev.clientY - rect.top) / rect.height));
+    applySplit();
+  };
+  const up = () => { splitEl.classList.remove("drag"); splitEl.removeEventListener("pointermove", move); splitEl.removeEventListener("pointerup", up); };
+  splitEl.addEventListener("pointermove", move);
+  splitEl.addEventListener("pointerup", up);
+});
+
+// ---------------------------------------------------------------- editor
+const dialect = CM.MySQL?.spec
+  ? CM.SQLDialect.define({ ...CM.MySQL.spec, keywords: `${CM.MySQL.spec.keywords} ${SINGLESTORE_KEYWORDS}` })
+  : CM.MySQL;
+
+const theme = CM.EditorView.theme({
+  "&": { height: "100%", fontSize: "13px", backgroundColor: "var(--s2-bg)", color: "var(--s2-text)" },
+  ".cm-scroller": { fontFamily: "var(--s2-mono)", lineHeight: "1.5" },
+  ".cm-content": { caretColor: "var(--s2-text)" },
+  ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--s2-text)" },
+  ".cm-gutters": { backgroundColor: "var(--s2-bg-2)", color: "var(--s2-text-3)", border: "none" },
+  ".cm-activeLine": { backgroundColor: "color-mix(in srgb, var(--s2-info) 7%, transparent)" },
+  ".cm-activeLineGutter": { backgroundColor: "color-mix(in srgb, var(--s2-info) 12%, transparent)", color: "var(--s2-text)" },
+  "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection": { backgroundColor: "color-mix(in srgb, var(--s2-info) 28%, transparent) !important" },
+  ".cm-matchingBracket": { backgroundColor: "color-mix(in srgb, var(--s2-ok) 25%, transparent)", outline: "none" },
+  ".cm-tooltip": { backgroundColor: "var(--s2-bg)", color: "var(--s2-text)", border: "1px solid var(--s2-border)", borderRadius: "6px" },
+  ".cm-tooltip-autocomplete > ul > li[aria-selected]": { backgroundColor: "var(--s2-info-bg)", color: "var(--s2-text)" },
+  ".cm-panels": { backgroundColor: "var(--s2-bg-2)", color: "var(--s2-text)" },
+});
+const highlight = CM.HighlightStyle.define([
+  { tag: CM.tags.keyword, color: "var(--s2-info)", fontWeight: "600" },
+  { tag: [CM.tags.string, CM.tags.special(CM.tags.string)], color: "var(--s2-ok)" },
+  { tag: [CM.tags.number, CM.tags.bool, CM.tags.null], color: "var(--s2-warn)" },
+  { tag: [CM.tags.lineComment, CM.tags.blockComment], color: "var(--s2-text-3)", fontStyle: "italic" },
+  { tag: [CM.tags.standard(CM.tags.name), CM.tags.typeName], color: "var(--s2-err)" },
+  { tag: CM.tags.special(CM.tags.name), color: "var(--s2-text-2)" },
+  { tag: CM.tags.operator, color: "var(--s2-text-2)" },
+]);
+
+// Type-suffixed vector variants (DOT_PRODUCT_F32 …) are for old binary-encoded
+// vectors and would crowd out the main functions.
+const LEGACY_VECTOR_VARIANT = /_(I8|I16|I32|I64|F32|F64)$/;
+
+function functionOptions() {
+  const options = FUNCTIONS.filter((f) => !LEGACY_VECTOR_VARIANT.test(f.name)).map((f) => ({
+    label: f.name, type: "function", detail: f.signature?.replace(/^[^(]*/, "") || "()",
+    info: [f.signature, f.description, f.category && `(${f.category})`].filter(Boolean).join("\n"), boost: -1,
+  }));
+  const s = state.schemas.get(state.database);
+  for (const r of s?.status === "ok" ? s.data.routines : []) {
+    options.push({ label: r.name, type: "function", detail: r.type === "PROCEDURE" ? "procedure" : "user function", info: `${r.type} in ${state.database}${r.returns ? `, returns ${r.returns}` : ""}` });
+  }
+  return options;
+}
+
+function schemaNamespace() {
+  const ns = {};
+  for (const db of state.databases) ns[db] = {};
+  for (const [db, s] of state.schemas) {
+    if (s.status !== "ok") continue;
+    const tables = {};
+    for (const t of s.data.tables) {
+      tables[t.name] = t.columns.map((c) => ({ label: c.name, type: "property", detail: c.type + (c.key === "PRI" ? " · key" : "") }));
+    }
+    ns[db] = tables;
+  }
+  return ns;
+}
+
+// After "name." only that object's members make sense, so keyword and function
+// suggestions are dropped there.
+const notAfterDot = (source) => (ctx) => (ctx.matchBefore(/\.[\w$]*$/) ? null : source(ctx));
+const notInQuotes = (source) => CM.ifNotIn(["QuotedIdentifier", "String", "LineComment", "BlockComment"], source);
+
+// Typing "otherdb." loads that database's tables, then reopens the suggestions.
+function lazyDatabaseSource(ctx) {
+  const m = ctx.matchBefore(/`?([\w$]+)`?\.[\w$]*$/);
+  const db = m && state.databases.find((d) => d === m.text.replace(/`/g, "").split(".")[0]);
+  if (db && !state.schemas.has(db)) loadSchema(db).then(() => CM.startCompletion(view));
+  return null;
+}
+
+const sqlCompartment = new CM.Compartment();
+function sqlExtension() {
+  const config = { dialect, schema: schemaNamespace(), defaultSchema: state.database ?? undefined, upperCaseKeywords: true };
+  const data = (source) => dialect.language.data.of({ autocomplete: source });
+  return [
+    dialect.language,
+    data(CM.schemaCompletionSource(config)),
+    data(notAfterDot(notInQuotes(CM.keywordCompletionSource(dialect, true)))),
+    data(notAfterDot(notInQuotes(CM.completeFromList(functionOptions())))),
+    data(lazyDatabaseSource),
+  ];
+}
+function refreshCompletion() { view.dispatch({ effects: sqlCompartment.reconfigure(sqlExtension()) }); }
+
+const view = new CM.EditorView({
+  parent: editorBox,
+  state: CM.EditorState.create({
+    doc: "",
+    extensions: [
+      CM.Prec.highest(CM.keymap.of([{ key: "Mod-Enter", run: () => { run(); return true; } }])),
+      CM.basicSetup,
+      CM.keymap.of([CM.indentWithTab]),
+      sqlCompartment.of(sqlExtension()),
+      theme,
+      CM.syntaxHighlighting(highlight),
+      CM.placeholder("Write SQL here. Ctrl+Enter runs the statement at the cursor (or the selection)."),
+    ],
+  }),
+});
+
+// Statement ranges, skipping semicolons inside strings, quoted names and comments.
+function statementRanges(text) {
+  const ranges = [];
+  let start = 0, i = 0, quote = null;
+  while (i < text.length) {
+    const ch = text[i], next = text[i + 1];
+    if (quote) {
+      if (ch === "\\" && quote !== "`") i++;
+      else if (ch === quote) quote = null;
+    } else if (ch === "'" || ch === '"' || ch === "`") quote = ch;
+    else if ((ch === "-" && next === "-") || ch === "#") { while (i < text.length && text[i] !== "\n") i++; }
+    else if (ch === "/" && next === "*") { const end = text.indexOf("*/", i + 2); i = end < 0 ? text.length : end + 1; }
+    else if (ch === ";") { ranges.push({ from: start, to: i }); start = i + 1; }
+    i++;
+  }
+  ranges.push({ from: start, to: text.length });
+  return ranges.filter((r) => text.slice(r.from, r.to).trim());
+}
+
+function statementAtCursor() {
+  const sel = view.state.selection.main;
+  if (!sel.empty) return view.state.sliceDoc(sel.from, sel.to).trim();
+  const text = view.state.doc.toString();
+  const ranges = statementRanges(text);
+  const hit = ranges.find((r) => sel.head >= r.from && sel.head <= r.to + 1)
+    ?? [...ranges].reverse().find((r) => r.from <= sel.head) ?? ranges[0];
+  return hit ? text.slice(hit.from, hit.to).trim() : "";
+}
+
+function insert(text) {
+  view.dispatch(view.state.replaceSelection(text));
+  view.focus();
+}
+function setSql(sql) {
+  view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: sql }, selection: { anchor: sql.length } });
+}
+
+// ---------------------------------------------------------------- schema
+async function loadSchema(db, force = false) {
+  if (!db) return;
+  const cur = state.schemas.get(db);
+  if (!force && cur && cur.status !== "error") return;
+  state.schemas.set(db, { status: "loading" });
+  renderTree();
+  try {
+    state.schemas.set(db, { status: "ok", data: await S2.callTool("sql_editor_schema", { database: db }) });
+  } catch (e) {
+    state.schemas.set(db, { status: "error", error: cleanError(e) });
+  }
+  renderTree();
+  refreshCompletion();
+}
+
+function chooseDatabase(db) {
+  state.database = db || null;
+  if (db) { state.expanded.add(db); loadSchema(db); }
+  renderHeader();
+  renderTree();
+  refreshCompletion();
+}
+
+function renderTree() {
+  const q = state.filter.trim().toLowerCase();
+  const rows = [];
+  for (const db of state.databases.filter((d) => state.showSystem || !SYSTEM.has(d))) {
+    const s = state.schemas.get(db);
+    const tables = s?.status === "ok" ? s.data.tables : [];
+    const matches = q ? tables.filter((t) => t.name.toLowerCase().includes(q)) : tables;
+    if (q && s?.status === "ok" && !matches.length && !db.toLowerCase().includes(q)) continue;
+    const open = state.expanded.has(db) || (q && matches.length > 0);
+    rows.push(h("div", { class: `sq-row${db === state.database ? " cur" : ""}`, role: "treeitem", "aria-expanded": String(open),
+      title: "Click to make this the current database",
+      onclick: () => { if (state.database === db && state.expanded.has(db)) { state.expanded.delete(db); renderTree(); } else chooseDatabase(db); } },
+      h("span", { class: `sq-caret${open ? " open" : ""}` }, "▶"),
+      h("span", { class: "name" }, db),
+      s?.status === "loading" ? h("span", { class: "s2-spinner" }) : s?.status === "ok" ? h("span", { class: "meta" }, tables.length) : null));
+    if (!open) continue;
+    if (s?.status === "error") rows.push(h("div", { class: "sq-row tbl" }, h("span", { class: "s2-error", style: { padding: "2px 6px" } }, s.error.message)));
+    for (const t of matches) {
+      const key = `${db}\u0000${t.name}`;
+      const topen = state.expanded.has(key);
+      rows.push(h("div", { class: "sq-row tbl", role: "treeitem", "aria-expanded": String(topen),
+        title: `${db}.${t.name}${t.view ? " (view)" : ""}\nClick: show columns · Double-click: insert name`,
+        onclick: () => { topen ? state.expanded.delete(key) : state.expanded.add(key); renderTree(); },
+        ondblclick: () => insert(db === state.database ? ident(t.name) : `${ident(db)}.${ident(t.name)}`) },
+        h("span", { class: `sq-caret${topen ? " open" : ""}` }, "▶"),
+        h("span", { class: "name" }, t.name),
+        t.view ? h("span", { class: "meta" }, "view") : null,
+        h("button", { class: "s2-btn ghost act", title: "Run SELECT * … LIMIT 100",
+          onclick: (e) => { e.stopPropagation(); setSql(`SELECT * FROM ${ident(db)}.${ident(t.name)} LIMIT 100;`); if (state.database !== db) chooseDatabase(db); run(); } }, "Top 100")));
+      if (topen) {
+        for (const c of t.columns) {
+          rows.push(h("div", { class: "sq-row col", title: `Click to insert ${c.name}`, onclick: () => insert(ident(c.name)) },
+            h("span", { class: "name" }, c.name), h("span", { class: "meta" }, c.type)));
+        }
+      }
+    }
+  }
+  treeList.replaceChildren(...(rows.length ? rows : [h("div", { class: "sq-placeholder" }, state.databases.length ? "No matches" : "Loading…")]));
+}
+
+// ---------------------------------------------------------------- running
+async function run() {
+  const sql = statementAtCursor();
+  if (!sql || state.running) return;
+  state.running = true; state.error = null; state.confirm = null;
+  if (chat.tab !== "results") { chat.tab = "results"; renderTabs(); }
+  renderResults(); renderHeader();
+  try {
+    const data = await S2.callTool("sql_editor_query", { sql, database: state.database, max_rows: MAX_ROWS });
+    if (data.needs_confirmation) state.confirm = { sql, database: state.database };
+    else accept(data);
+  } catch (e) {
+    state.error = cleanError(e); report(sql, state.error.message);
+  } finally {
+    state.running = false; renderResults(); renderHeader();
+  }
+}
+
+async function runConfirmed() {
+  const { sql, database } = state.confirm;
+  state.confirm = null; state.running = true; state.error = null;
+  renderResults(); renderHeader();
+  try {
+    accept(await S2.callTool("sql_editor_execute", { sql, database, max_rows: MAX_ROWS }));
+    if (/^\s*(create|drop|alter|rename|truncate)\b/i.test(sql) && database) loadSchema(database, true);
+  } catch (e) {
+    state.error = cleanError(e); report(sql, state.error.message);
+  } finally {
+    state.running = false; renderResults(); renderHeader();
+  }
+}
+
+function accept(data) {
+  state.result = data;
+  state.history = [data.sql, ...state.history.filter((s) => s !== data.sql)].slice(0, 25);
+  report(data.sql, data.kind === "write" && !data.has_result_set
+    ? `executed, ${data.affected_rows ?? "?"} row(s) affected`
+    : `${data.row_count} row(s) x ${data.columns.length} column(s)${data.truncated ? ` (truncated at ${data.max_rows})` : ""}`);
+}
+
+function report(sql, outcome) {
+  S2.updateModelContext(`SQL Editor ${editorId} (database ${state.database ?? "default"}; send SQL to it with sql_editor_reply). The user ran:\n${sql.slice(0, 1500)}\nResult: ${outcome}`);
+}
+
+function toCsv(columns, rows) {
+  const cell = (v) => {
+    const s = v == null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v);
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  return [columns.map(cell).join(","), ...rows.map((r) => columns.map((c) => cell(r[c])).join(","))].join("\r\n");
+}
+
+function renderResults() {
+  const r = state.result;
+  outEl.scrollTop = 0;
+  if (state.running) {
+    statusEl.replaceChildren(h("span", { class: "s2-spinner" }), " Running…");
+    return;
+  }
+  if (state.confirm) {
+    const verb = state.confirm.sql.trim().split(/\s+/)[0].toUpperCase();
+    statusEl.replaceChildren(h("span", { class: "s2-badge warn" }, "Confirmation needed"));
+    outEl.replaceChildren(h("div", { class: "sq-confirm", role: "alertdialog" },
+      h("strong", {}, `This ${verb} statement can change data or schema.`), ` It will run against ${state.confirm.database ?? "the default database"}.`,
+      h("pre", { class: "s2-pre" }, state.confirm.sql),
+      h("div", { class: "s2-toolbar" },
+        h("button", { class: "s2-btn", onclick: () => { state.confirm = null; renderResults(); view.focus(); } }, "Cancel"),
+        h("button", { class: "s2-btn danger", onclick: runConfirmed }, `Run ${verb}`))));
+    outEl.querySelector(".s2-btn")?.focus();
+    return;
+  }
+  if (state.error) {
+    statusEl.replaceChildren(h("span", { class: "s2-badge err" }, "Error"));
+    outEl.replaceChildren(S2.errorBox(state.error));
+    return;
+  }
+  if (!r) {
+    statusEl.replaceChildren(h("span", { class: "s2-faint" }, "No results yet"));
+    outEl.replaceChildren(h("div", { class: "sq-placeholder" },
+      "Press ", h("kbd", {}, "Ctrl"), "+", h("kbd", {}, "Enter"), " (", h("kbd", {}, "⌘"), "+", h("kbd", {}, "Enter"), " on Mac) to run the statement at the cursor, or the selected text. ",
+      "Autocomplete suggests keywords, SingleStore functions, databases, tables and columns as you type; ", h("kbd", {}, "Ctrl"), "+", h("kbd", {}, "Space"), " opens it on demand. ",
+      "Statements that change data or schema ask for confirmation first."));
+    return;
+  }
+  const parts = [];
+  if (r.kind === "write" && !r.has_result_set) {
+    parts.push(h("span", { class: "s2-badge ok" }, "Executed"), h("span", {}, `${fmt.number(r.affected_rows ?? 0)} row(s) affected`));
+  } else {
+    parts.push(h("span", { class: "s2-badge info plain" }, `${fmt.number(r.row_count)} rows`), h("span", {}, `${r.columns.length} columns`));
+    if (r.truncated) parts.push(h("span", { class: "s2-badge warn" }, `first ${fmt.number(r.max_rows)} shown`));
+  }
+  parts.push(h("span", { class: "s2-faint" }, `${fmt.number(r.elapsed_ms, 1)} ms`), h("span", { class: "s2-spacer" }));
+  if (r.has_result_set && r.rows.length) {
+    parts.push(h("button", { class: "s2-btn ghost", onclick: () => S2.download("query-result.csv", toCsv(r.columns, r.rows), "text/csv") }, "Export CSV"));
+  }
+  for (const w of r.warnings ?? []) parts.push(h("span", { class: "s2-badge warn", title: w }, "Warning"));
+  statusEl.replaceChildren(...parts);
+  outEl.replaceChildren(r.has_result_set
+    ? (r.rows.length ? S2.dataTable(r.columns, r.rows, { maxHeight: "none" }) : h("div", { class: "sq-placeholder" }, "The query returned no rows."))
+    : h("div", { class: "sq-placeholder" }, "The statement ran and returned no result set."));
+}
+
+function renderHeader() {
+  const dbSelect = h("select", { class: "s2-input", "aria-label": "Current database", title: "Current database",
+    onchange: (e) => chooseDatabase(e.target.value) },
+    h("option", { value: "", selected: !state.database }, "(default database)"),
+    state.databases.filter((d) => state.showSystem || !SYSTEM.has(d) || d === state.database)
+      .map((d) => h("option", { value: d, selected: d === state.database }, d)));
+  const historySelect = state.history.length
+    ? h("select", { class: "s2-input", "aria-label": "History", title: "Recently run statements",
+        onchange: (e) => { if (e.target.value !== "") setSql(state.history[+e.target.value]); e.target.value = ""; view.focus(); } },
+        h("option", { value: "" }, `History (${state.history.length})`),
+        state.history.map((s, i) => h("option", { value: String(i) }, s.replace(/\s+/g, " ").slice(0, 80))))
+    : null;
+  headEl.replaceChildren(...[
+    h("h1", { class: "s2-title" }, "SQL Editor"),
+    h("button", { class: "s2-btn ghost", "aria-pressed": String(state.treeOpen), title: "Show or hide the schema tree",
+      onclick: () => { state.treeOpen = !state.treeOpen; bodyEl.classList.toggle("no-tree", !state.treeOpen); renderHeader(); } }, state.treeOpen ? "◧ Hide schema" : "◧ Schema"),
+    dbSelect,
+    h("button", { class: "s2-btn primary", onclick: run, disabled: state.running, title: "Run the statement at the cursor or the selection (Ctrl+Enter)" },
+      state.running ? h("span", { class: "s2-spinner" }) : null, "▶ Run"),
+    historySelect,
+    h("span", { class: "s2-spacer" }),
+    S2.openInBrowserButton("sql_editor", () => ({ database: state.database, sql: view.state.doc.toString() })),
+    S2.fullscreenButton(),
+  ].filter(Boolean));
+}
+
+// ---------------------------------------------------------------- chat with Claude
+// Questions go to the Claude chat as a user message tagged with this editor's
+// id; Claude answers with the sql_editor_reply tool, which this editor polls.
+const editorId = "e-" + Array.from(crypto.getRandomValues(new Uint8Array(3)), (b) => b.toString(16).padStart(2, "0")).join("");
+const chat = { tab: "results", unread: 0, waiting: false, lastSeq: 0, messages: [] };
+
+function renderTabs() {
+  const tab = (key, label, extra) => h("button", { class: "sq-tab", role: "tab", "aria-selected": String(chat.tab === key),
+    onclick: () => {
+      chat.tab = key;
+      if (key === "chat") chat.unread = 0;
+      renderTabs();
+      if (key === "chat") { askBox.focus(); msgsEl.scrollTop = msgsEl.scrollHeight; }
+    } }, label, extra);
+  tabsEl.replaceChildren(
+    tab("results", "Results"),
+    tab("chat", "Chat with Claude", chat.waiting ? h("span", { class: "s2-spinner" }) : chat.unread ? h("span", { class: "count" }, chat.unread) : null));
+  resultView.hidden = chat.tab !== "results";
+  chatView.hidden = chat.tab !== "chat";
+}
+
+const textPart = (t) => (t.trim() ? h("p", {}, t.trim()) : null);
+function codePart(code) {
+  return h("div", { class: "sq-code" }, h("pre", {}, code),
+    h("div", { class: "bar" },
+      h("button", { class: "s2-btn", title: "Replace everything in the editor with this SQL",
+        onclick: () => { setSql(code); view.focus(); S2.toast("Editor replaced", "ok"); } }, "Replace editor"),
+      h("button", { class: "s2-btn", title: "Insert at the cursor (or over the selection)",
+        onclick: () => { insert(code); S2.toast("Inserted at cursor", "ok"); } }, "Insert at cursor"),
+      h("button", { class: "s2-btn ghost", onclick: async () => {
+        try { await navigator.clipboard.writeText(code); S2.toast("Copied", "ok"); } catch { S2.toast("Couldn't copy", "err"); }
+      } }, "Copy")));
+}
+// Plain text with ``` fenced code blocks (the format sql_editor_reply asks for).
+function messageBody(text) {
+  const parts = [];
+  const re = /```[\w-]*\n?([\s\S]*?)```/g;
+  let last = 0, m;
+  while ((m = re.exec(text))) {
+    parts.push(textPart(text.slice(last, m.index)), codePart(m[1].replace(/\s+$/, "")));
+    last = re.lastIndex;
+  }
+  parts.push(textPart(text.slice(last)));
+  return parts.filter(Boolean);
+}
+
+function renderChat() {
+  const items = chat.messages.map((msg) =>
+    msg.from === "you" ? h("div", { class: "sq-msg you" }, msg.text)
+    : msg.from === "note" ? h("div", { class: "sq-msg note" }, msg.text)
+    : h("div", { class: "sq-msg claude" }, h("div", { class: "who" }, "Claude"), messageBody(msg.text)));
+  if (!items.length) {
+    items.push(h("div", { class: "sq-msg note" }, "Ask about the SQL in the editor, e.g. “make this faster”, “add a filter for 2024” or “explain this query”."));
+  }
+  if (chat.waiting) items.push(h("div", { class: "sq-msg note" }, h("span", { class: "s2-spinner" }), " Waiting for Claude… (your question was sent to the Claude chat)"));
+  msgsEl.replaceChildren(...items);
+  msgsEl.scrollTop = msgsEl.scrollHeight;
+}
+
+async function ask() {
+  const question = askBox.value.trim();
+  if (!question) return;
+  if (S2.inBrowserView()) { S2.toast("Chatting with Claude only works inside Claude", "err"); return; }
+  const parts = [`[SQL Editor ${editorId} · database ${state.database ?? "default"}] ${question}`];
+  if (includeSql.checked) {
+    const sel = view.state.selection.main;
+    const sql = (sel.empty ? view.state.doc.toString() : view.state.sliceDoc(sel.from, sel.to)).trim();
+    if (sql) parts.push(`${sel.empty ? "Editor SQL" : "Selected SQL"}:\n\`\`\`sql\n${sql.slice(0, 8000)}\n\`\`\``);
+    const r = state.result;
+    if (state.error) parts.push(`Last run failed: ${state.error.message}`);
+    else if (r) {
+      const what = r.has_result_set ? `${r.row_count} row(s); columns ${r.columns.join(", ")}` : `${r.affected_rows ?? 0} row(s) affected`;
+      parts.push(`Last result: ${what}${r.sql ? `, for: ${r.sql.replace(/\s+/g, " ").slice(0, 300)}` : ""}`);
+    }
+  }
+  parts.push(`(Answer with sql_editor_reply, editor_id "${editorId}", so it appears in the editor.)`);
+  chat.messages.push({ from: "you", text: question });
+  askBox.value = "";
+  chat.waiting = true;
+  renderChat(); renderTabs();
+  if (!(await S2.sendPrompt(parts.join("\n\n"), { quiet: true }))) {
+    chat.waiting = false;
+    chat.messages.push({ from: "note", text: "Couldn't send the question to the Claude chat." });
+    renderChat(); renderTabs();
+  }
+}
+
+async function pollInbox() {
+  try {
+    const { messages } = await S2.callTool("sql_editor_inbox", { editor_id: editorId, after: chat.lastSeq });
+    if (!messages.length) return;
+    for (const m of messages) {
+      chat.messages.push({ from: "claude", text: m.text });
+      chat.lastSeq = Math.max(chat.lastSeq, m.seq);
+    }
+    chat.waiting = false;
+    if (chat.tab !== "chat") chat.unread += messages.length;
+    renderChat(); renderTabs();
+  } catch {
+    // Transient (host busy, server restarting); the next poll retries.
+  }
+}
+// Poll faster while waiting for an answer.
+(function schedulePoll() {
+  setTimeout(async () => {
+    if (S2.app && (chat.waiting || !document.hidden)) await pollInbox();
+    schedulePoll();
+  }, chat.waiting ? 2000 : 5000);
+})();
+
+// ---------------------------------------------------------------- host wiring
+renderHeader(); renderTree(); renderResults(); renderTabs(); renderChat();
+S2.onDisplayModeChange = () => renderHeader();
+await S2.connect({
+  name: "singlestore-sql-editor",
+  onToolInput(args) {
+    if (args.sql && !view.state.doc.length) setSql(args.sql);
+  },
+  onToolResult(result) {
+    try {
+      const data = S2.resultData(result);
+      state.databases = data.databases ?? [];
+      if (data.sql && !view.state.doc.length) setSql(data.sql);
+      chooseDatabase(data.database ?? state.databases.find((d) => !SYSTEM.has(d)) ?? null);
+      S2.updateModelContext(`SQL Editor ${editorId} is open on database ${state.database ?? "default"}. Send SQL or answers to it with sql_editor_reply (editor_id "${editorId}").`);
+    } catch (e) {
+      state.error = cleanError(e);
+      renderResults();
+    }
+    renderHeader();
+    view.focus();
+  },
+});</script>
+</body>
+</html>

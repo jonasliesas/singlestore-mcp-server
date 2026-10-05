@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cluster Monitor</title>
+<!--S2:HEAD-->
+<style>
+  .cm-auto { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+  .cm-section { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 14px 0 8px; }
+  .cm-section h2 { font-size: var(--font-text-md-size, 14px); font-weight: var(--font-weight-semibold, 600); margin: 0; }
+  .cm-nodes { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; }
+  .cm-node { padding: 10px 12px; }
+  .cm-node.down { border-color: var(--s2-err); }
+  .cm-node-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .cm-node-name { font-weight: var(--font-weight-semibold, 600); font-family: var(--s2-mono); font-size: var(--s2-fs-xs); }
+  .cm-node-meta { color: var(--s2-text-3); font-size: 11px; margin-top: 2px; }
+  .cm-meter { margin-top: 10px; }
+  .cm-meter-top { display: flex; justify-content: space-between; gap: 8px; font-size: var(--s2-fs-xs); color: var(--s2-text-2); }
+  .cm-meter-top strong { color: var(--s2-text); font-weight: var(--font-weight-medium, 500); font-variant-numeric: tabular-nums; }
+  .cm-track { height: 8px; border-radius: 4px; background: var(--s2-bg-3); overflow: hidden; margin-top: 4px; }
+  .cm-track > span { display: block; height: 100%; border-radius: 4px; background: var(--s2-ok); transition: width .5s; }
+  .cm-track.warn > span { background: var(--s2-warn); }
+  .cm-track.crit > span { background: var(--s2-err); }
+  .cm-sub { font-size: 11px; color: var(--s2-text-3); margin-top: 3px; font-variant-numeric: tabular-nums; }
+  /* Categorical series colors (validated light/dark steps), assigned per node in fixed order. */
+  :root {
+    --series-1: light-dark(#2a78d6, #3987e5);
+    --series-2: light-dark(#eb6834, #d95926);
+    --series-3: light-dark(#1baf7a, #199e70);
+    --series-4: light-dark(#eda100, #c98500);
+    --series-5: light-dark(#e87ba4, #d55181);
+    --series-6: light-dark(#008300, #008300);
+    --series-7: light-dark(#4a3aa7, #9085e9);
+    --series-8: light-dark(#e34948, #e66767);
+  }
+  .cm-key { display: inline-block; width: 12px; height: 3px; border-radius: 2px; flex: none; }
+  .cm-chart { padding: 10px 12px 6px; }
+  .cm-chart-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .cm-chart-head h2 { font-size: var(--font-text-md-size, 14px); font-weight: var(--font-weight-semibold, 600); margin: 0; }
+  .cm-seg { display: inline-flex; border: 1px solid var(--s2-border); border-radius: var(--s2-radius-sm); overflow: hidden; }
+  .cm-seg button { border: 0; background: transparent; padding: 3px 10px; font-size: var(--s2-fs-xs); cursor: pointer; color: var(--s2-text-2); }
+  .cm-seg button + button { border-left: 1px solid var(--s2-border); }
+  .cm-seg button[aria-pressed="true"] { background: var(--s2-bg-3); color: var(--s2-text); font-weight: var(--font-weight-semibold, 600); }
+  .cm-legend { display: flex; gap: 4px 12px; flex-wrap: wrap; margin: 8px 0 2px; }
+  .cm-legend button { display: inline-flex; align-items: center; gap: 6px; border: 0; background: none; padding: 2px 0; cursor: pointer;
+    font-size: var(--s2-fs-xs); color: var(--s2-text-2); font-family: var(--s2-mono); }
+  .cm-legend button[aria-pressed="false"] { color: var(--s2-text-3); text-decoration: line-through; }
+  .cm-legend button[aria-pressed="false"] .cm-key { opacity: .3; }
+  .cm-plot { position: relative; outline: none; touch-action: none; }
+  .cm-plot:focus-visible { box-shadow: 0 0 0 2px var(--s2-ring); border-radius: 4px; }
+  .cm-plot svg { display: block; width: 100%; overflow: visible; }
+  .cm-plot .grid { stroke: var(--s2-border-2); stroke-width: 1; shape-rendering: crispEdges; }
+  .cm-plot .base { stroke: var(--s2-border); stroke-width: 1; shape-rendering: crispEdges; }
+  .cm-plot .tick { fill: var(--s2-text-3); font-size: 11px; font-variant-numeric: tabular-nums; font-family: var(--s2-font); }
+  .cm-plot .series { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .cm-plot .label { fill: var(--s2-text-2); font-size: 11px; font-family: var(--s2-mono); }
+  .cm-plot .cross { stroke: var(--s2-text-3); stroke-width: 1; shape-rendering: crispEdges; }
+  .cm-plot .dot { stroke: var(--s2-bg); stroke-width: 2; }
+  .cm-tip { position: absolute; top: 4px; pointer-events: none; z-index: 2; min-width: 150px;
+    background: var(--s2-bg); border: 1px solid var(--s2-border); border-radius: var(--s2-radius-sm);
+    box-shadow: var(--shadow-md, 0 2px 8px rgba(0,0,0,.15)); padding: 6px 9px; font-size: var(--s2-fs-xs); }
+  .cm-tip .when { color: var(--s2-text-3); margin-bottom: 3px; font-variant-numeric: tabular-nums; }
+  .cm-tip .row { display: flex; align-items: center; gap: 7px; line-height: 1.6; }
+  .cm-tip .row strong { color: var(--s2-text); font-variant-numeric: tabular-nums; min-width: 42px; text-align: right; }
+  .cm-tip .row span:last-child { color: var(--s2-text-2); font-family: var(--s2-mono); }
+  .cm-chart-empty { padding: 30px 0; text-align: center; color: var(--s2-text-2); font-size: var(--s2-fs-xs); }
+  .cm-q { width: 100%; }
+  .cm-q td.sql { font-family: var(--s2-mono); max-width: 460px; }
+  .cm-q tr.open td.sql { white-space: pre-wrap; word-break: break-word; overflow: visible; text-overflow: clip; }
+  .cm-q td.long { color: var(--s2-warn); font-weight: var(--font-weight-semibold, 600); }
+  .cm-q td.verylong { color: var(--s2-err); font-weight: var(--font-weight-semibold, 600); }
+  .cm-q tbody tr { cursor: pointer; }
+  .cm-q-detail td { background: var(--s2-bg-2); white-space: normal !important; }
+  .cm-q-detail .row { display: flex; gap: 14px; flex-wrap: wrap; font-size: var(--s2-fs-xs); color: var(--s2-text-2); margin-bottom: 6px; }
+  html[data-display-mode="fullscreen"] .cm-q-wrap { max-height: calc(100vh - 420px) !important; }
+</style>
+</head>
+<body>
+<div id="root"><div class="s2-empty"><span class="s2-spinner"></span> Measuring the cluster…</div></div>
+<script type="module">
+const { h, fmt } = S2;
+const root = document.getElementById("root");
+const REFRESH_MS = 5000;
+
+const state = {
+  data: null, error: null, loading: false,
+  auto: true, timer: null,
+  includeInternal: false,
+  history: [],          // [{t, cpu: {nodeId: pct}}] from the server
+  chart: { group: "all", hidden: new Set(), hoverT: null },
+  open: new Set(),      // expanded query keys
+};
+
+const qkey = (q) => `${q.node_id}:${q.id}`;
+const level = (pct) => (pct >= 90 ? "crit" : pct >= 70 ? "warn" : "");
+
+function shortNames(nodes) {
+  // Drop the hostname prefix every node shares ("node-sas-singlestore-cluster-").
+  const names = nodes.map((n) => n.host);
+  let prefix = names[0] ?? "";
+  for (const n of names) while (prefix && !n.startsWith(prefix)) prefix = prefix.slice(0, -1);
+  prefix = prefix.slice(0, prefix.lastIndexOf("-") + 1);
+  return Object.fromEntries(nodes.map((n) => [n.id, names.length > 1 && prefix ? n.host.slice(prefix.length) : n.host]));
+}
+
+function uptime(s) {
+  if (s == null) return "–";
+  const d = Math.floor(s / 86400), hr = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  return d ? `${d}d ${hr}h` : hr ? `${hr}h ${m}m` : `${m}m`;
+}
+
+function meter(label, value, pct, sub, extra) {
+  const p = Math.max(0, Math.min(100, pct ?? 0));
+  return h("div", { class: "cm-meter" },
+    h("div", { class: "cm-meter-top" }, h("span", {}, label), h("strong", {}, value)),
+    h("div", { class: `cm-track ${level(p)}`, role: "meter", "aria-label": label, "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(Math.round(p)) },
+      h("span", { style: { width: `${p}%` } })),
+    sub ? h("div", { class: "cm-sub" }, sub) : null,
+    extra ?? null);
+}
+
+// ---------------------------------------------------------------- CPU chart
+const NS = "http://www.w3.org/2000/svg";
+const SERIES = 8;
+// Color follows the node (its position in the full node list), never its rank
+// among the visible lines, so filtering never repaints a line.
+const nodeColor = (index) => (index < SERIES ? `var(--series-${index + 1})` : "var(--s2-text-3)");
+const GROUPS = [["all", "All nodes"], ["agg", "Aggregators"], ["leaf", "Leaves"]];
+const inGroup = (n) => state.chart.group === "all" || (state.chart.group === "leaf" ? n.type === "LEAF" : n.type !== "LEAF");
+
+function svgEl(tag, attrs = {}, text) {
+  const el = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  if (text != null) el.textContent = text;
+  return el;
+}
+
+function niceCeil(value) {
+  const raw = value / 4;
+  const p = 10 ** Math.floor(Math.log10(raw));
+  const f = raw / p;
+  const step = (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * p;
+  return { max: Math.ceil(value / step) * step, step };
+}
+
+function timeLabel(t, withSeconds) {
+  return new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", ...(withSeconds ? { second: "2-digit" } : {}) });
+}
+
+const chartEl = h("section", { class: "s2-card cm-chart", "aria-label": "SingleStore CPU per node" });
+const plotEl = h("div", { class: "cm-plot", tabindex: "0" });
+new ResizeObserver(() => drawPlot()).observe(plotEl);
+
+function buildChart() {
+  const d = state.data;
+  const names = shortNames(d.nodes);
+  const minutes = Math.round((d.history_seconds ?? 900) / 60);
+  chartEl.replaceChildren(
+    h("div", { class: "cm-chart-head" },
+      h("h2", {}, "SingleStore CPU"),
+      h("span", { class: "s2-subtitle" }, `% of each node's core limit · last ${minutes} min`),
+      h("span", { class: "s2-spacer" }),
+      h("div", { class: "cm-seg", role: "group", "aria-label": "Nodes to show" },
+        GROUPS.map(([key, label]) => h("button", { "aria-pressed": String(state.chart.group === key),
+          onclick: () => { state.chart.group = key; state.chart.hidden.clear(); buildChart(); } }, label)))),
+    h("div", { class: "cm-legend", role: "group", "aria-label": "Toggle nodes" },
+      d.nodes.map((n, i) => inGroup(n) ? h("button", { "aria-pressed": String(!state.chart.hidden.has(n.id)), title: `${n.host} (${n.type_label})`,
+        onclick: () => { state.chart.hidden.has(n.id) ? state.chart.hidden.delete(n.id) : state.chart.hidden.add(n.id); buildChart(); } },
+        h("span", { class: "cm-key", style: { background: nodeColor(i) } }), names[n.id]) : null)),
+    plotEl);
+  drawPlot();
+}
+
+function drawPlot() {
+  const d = state.data;
+  if (!d) return;
+  const hist = state.history;
+  const names = shortNames(d.nodes);
+  const series = d.nodes.map((n, i) => ({ n, i, name: names[n.id] })).filter((s) => inGroup(s.n) && !state.chart.hidden.has(s.n.id));
+  if (hist.length < 2 || !series.length) {
+    plotEl.replaceChildren(h("div", { class: "cm-chart-empty" },
+      !series.length ? "No nodes selected." : "Collecting CPU readings — the chart fills in as the monitor refreshes."));
+    return;
+  }
+  const W = Math.max(320, plotEl.clientWidth || 600);
+  const H = S2.displayMode === "fullscreen" ? Math.max(260, Math.round(window.innerHeight * 0.4)) : 230;
+  const m = { l: 40, r: 104, t: 10, b: 24 };
+  const pw = W - m.l - m.r, ph = H - m.t - m.b;
+  const t1 = hist.at(-1).t, t0 = Math.min(hist[0].t, t1 - 60);
+  const x = (t) => m.l + ((t - t0) / (t1 - t0)) * pw;
+  let vmax = 0;
+  for (const p of hist) for (const s of series) vmax = Math.max(vmax, p.cpu[s.n.id] ?? 0);
+  const { max: ymax, step } = niceCeil(Math.min(100, Math.max(1, vmax * 1.15)));
+  const y = (v) => m.t + ph - (v / ymax) * ph;
+
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img",
+    "aria-label": `SingleStore CPU over the last ${Math.round((t1 - t0) / 60)} minutes for ${series.map((s) => s.name).join(", ")}; peak ${vmax.toFixed(1)}%` });
+  for (let v = 0; v <= ymax + 1e-9; v += step) {
+    svg.append(svgEl("line", { class: v === 0 ? "base" : "grid", x1: m.l, x2: m.l + pw, y1: y(v), y2: y(v) }));
+    svg.append(svgEl("text", { class: "tick", x: m.l - 6, y: y(v) + 4, "text-anchor": "end" }, `${+v.toFixed(2)}%`));
+  }
+  const span = t1 - t0;
+  const tstep = [10, 15, 30, 60, 120, 300, 600].find((s) => span / s <= 6) ?? 900;
+  for (let t = Math.ceil(t0 / tstep) * tstep; t <= t1; t += tstep) {
+    svg.append(svgEl("text", { class: "tick", x: x(t), y: H - 6, "text-anchor": "middle" }, timeLabel(t, tstep < 60)));
+  }
+
+  const labels = [];
+  for (const s of series) {
+    let dpath = "", pen = false, last = null;
+    for (const p of hist) {
+      const v = p.cpu[s.n.id];
+      if (v == null) { pen = false; continue; }
+      dpath += `${pen ? "L" : "M"}${x(p.t).toFixed(1)},${y(v).toFixed(1)}`;
+      pen = true;
+      last = v;
+    }
+    svg.append(svgEl("path", { class: "series", d: dpath, stroke: nodeColor(s.i) }));
+    if (last != null) labels.push({ s, y: y(last), v: last });
+  }
+  // Direct labels at the line ends, nudged apart so they never overlap.
+  labels.sort((a, b) => a.y - b.y);
+  for (let k = 1; k < labels.length; k++) labels[k].y = Math.max(labels[k].y, labels[k - 1].y + 14);
+  const overflow = labels.length ? labels.at(-1).y - (m.t + ph) : 0;
+  if (overflow > 0) for (const l of labels) l.y -= overflow;
+  for (const l of labels) {
+    svg.append(svgEl("line", { x1: m.l + pw + 6, x2: m.l + pw + 16, y1: l.y, y2: l.y, stroke: nodeColor(l.s.i), "stroke-width": 2, "stroke-linecap": "round" }));
+    svg.append(svgEl("text", { class: "label", x: m.l + pw + 20, y: l.y + 4 }, `${l.s.name} ${l.v.toFixed(1)}%`));
+  }
+
+  // Crosshair + tooltip: snap to the nearest reading.
+  const idx = state.chart.hoverT == null ? null
+    : hist.reduce((best, p, i) => (Math.abs(p.t - state.chart.hoverT) < Math.abs(hist[best].t - state.chart.hoverT) ? i : best), 0);
+  let tip = null;
+  if (idx != null) {
+    const p = hist[idx], cx = x(p.t);
+    svg.append(svgEl("line", { class: "cross", x1: cx, x2: cx, y1: m.t, y2: m.t + ph }));
+    const rows = series.filter((s) => p.cpu[s.n.id] != null).sort((a, b) => p.cpu[b.n.id] - p.cpu[a.n.id]);
+    for (const s of rows) svg.append(svgEl("circle", { class: "dot", cx, cy: y(p.cpu[s.n.id]), r: 4, fill: nodeColor(s.i) }));
+    tip = h("div", { class: "cm-tip" },
+      h("div", { class: "when" }, timeLabel(p.t, true)),
+      rows.map((s) => h("div", { class: "row" },
+        h("span", { class: "cm-key", style: { background: nodeColor(s.i) } }),
+        h("strong", {}, `${p.cpu[s.n.id].toFixed(1)}%`),
+        h("span", {}, s.name))));
+    const left = cx + 14;
+    tip.style.left = `${left}px`;
+    requestAnimationFrame(() => { if (left + tip.offsetWidth > W - 4) tip.style.left = `${cx - tip.offsetWidth - 14}px`; });
+  }
+  plotEl.replaceChildren(svg, ...(tip ? [tip] : []));
+  plotEl.dataset.plot = JSON.stringify({ l: m.l, pw, t0, t1, W });
+}
+
+function hoverAt(clientX) {
+  const geo = plotEl.dataset.plot && JSON.parse(plotEl.dataset.plot);
+  if (!geo) return;
+  const rect = plotEl.getBoundingClientRect();
+  const px = ((clientX - rect.left) / rect.width) * geo.W;
+  if (px < geo.l - 8 || px > geo.l + geo.pw + 8) { if (state.chart.hoverT != null) { state.chart.hoverT = null; drawPlot(); } return; }
+  state.chart.hoverT = geo.t0 + ((px - geo.l) / geo.pw) * (geo.t1 - geo.t0);
+  drawPlot();
+}
+plotEl.addEventListener("pointermove", (e) => hoverAt(e.clientX));
+plotEl.addEventListener("pointerleave", () => { state.chart.hoverT = null; drawPlot(); });
+plotEl.addEventListener("keydown", (e) => {
+  const hist = state.history;
+  if (!hist.length) return;
+  if (e.key === "Escape") { state.chart.hoverT = null; drawPlot(); return; }
+  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+  e.preventDefault();
+  let i = state.chart.hoverT == null ? hist.length - 1
+    : hist.reduce((best, p, k) => (Math.abs(p.t - state.chart.hoverT) < Math.abs(hist[best].t - state.chart.hoverT) ? k : best), 0);
+  i = Math.max(0, Math.min(hist.length - 1, i + (e.key === "ArrowLeft" ? -1 : 1)));
+  state.chart.hoverT = hist[i].t;
+  drawPlot();
+});
+
+function nodeCard(n, name, index) {
+  const online = (n.state || "").toLowerCase() === "online";
+  const cpu = n.cpu;
+  const mem = n.memory;
+  const memPct = mem.singlestore_b && mem.max_memory_b ? (mem.singlestore_b / mem.max_memory_b) * 100 : null;
+  const disk = n.disks[0];
+  const diskPct = disk && disk.total_b ? (disk.used_b / disk.total_b) * 100 : null;
+  return h("div", { class: `s2-card cm-node${online ? "" : " down"}` },
+    h("div", { class: "cm-node-head" },
+      h("span", { class: "cm-key", style: { background: nodeColor(index) }, title: "Color of this node in the CPU chart" }),
+      h("span", { class: "cm-node-name", title: `${n.host}:${n.port}` }, name),
+      h("span", { class: `s2-badge plain ${n.type === "LEAF" ? "" : "info"}` }, n.type_label),
+      h("span", { class: `s2-badge ${online ? "ok" : "err"}` }, n.state)),
+    h("div", { class: "cm-node-meta" }, `Node ${n.id}${n.availability_group != null ? ` · availability group ${n.availability_group}` : ""} · up ${uptime(n.uptime_s)}`),
+    cpu
+      ? meter("SingleStore CPU", `${cpu.singlestore_pct.toFixed(0)}% of ${cpu.cores} cores`, cpu.singlestore_pct,
+          cpu.host_pct != null ? `Host: ${cpu.host_pct.toFixed(0)}% of ${cpu.host_cpus} CPUs` : null)
+      : meter("SingleStore CPU", "–", 0, "No CPU data"),
+    meter("Memory", memPct != null ? `${fmt.bytes(mem.singlestore_b)} of ${fmt.bytes(mem.max_memory_b)}` : "–", memPct,
+      mem.container_limit_b ? `max_memory · container limit ${fmt.bytes(mem.container_limit_b)}` : "max_memory"),
+    disk
+      ? meter(`Disk ${disk.mount_point}`, `${fmt.bytes(disk.used_b)} of ${fmt.bytes(disk.total_b)}`, diskPct,
+          disk.read_bps != null ? `Read ${fmt.bytes(disk.read_bps)}/s · Write ${fmt.bytes(disk.write_bps)}/s` : null)
+      : meter("Disk", "–", 0, "No disk data"));
+}
+
+function queriesTable(qs, names) {
+  if (!qs.length) {
+    return h("div", { class: "s2-empty" }, "No queries running right now",
+      h("div", { class: "s2-small s2-faint" }, `${state.data.idle_connections} idle connection${state.data.idle_connections === 1 ? "" : "s"}`));
+  }
+  const cols = ["Node", "Conn", "User", "Database", "Time", "State", "Query"];
+  const body = h("tbody");
+  for (const q of qs) {
+    const k = qkey(q);
+    const open = state.open.has(k);
+    const timeClass = q.seconds >= 600 ? "verylong" : q.seconds >= 60 ? "long" : "";
+    body.append(h("tr", { class: open ? "open" : "", onclick: () => { open ? state.open.delete(k) : state.open.add(k); render(); } },
+      h("td", { title: q.node }, names[q.node_id] ?? q.node),
+      h("td", { class: "num" }, q.id),
+      h("td", {}, q.user),
+      h("td", { class: q.database ? "" : "null" }, q.database ?? "–"),
+      h("td", { class: `num ${timeClass}` }, fmt.duration(q.seconds)),
+      h("td", {}, q.state || q.command),
+      h("td", { class: "sql", title: open ? "" : (q.sql ?? "") }, q.sql ?? `(${q.command})`)));
+    if (open) {
+      body.append(h("tr", { class: "cm-q-detail" }, h("td", { colspan: String(cols.length) },
+        h("div", { class: "row" },
+          h("span", {}, `Client ${q.client}`),
+          q.transaction ? h("span", {}, `Transaction: ${q.transaction}`) : null,
+          q.resource_pool ? h("span", {}, `Resource pool: ${q.resource_pool}`) : null,
+          q.queued_reason ? h("span", { class: "s2-badge warn" }, `Queued: ${q.queued_reason}`) : null),
+        q.sql ? h("button", { class: "s2-btn", onclick: (e) => { e.stopPropagation(); askAbout(q); } }, "Ask Claude about this query") : null)));
+    }
+  }
+  return h("div", { class: "s2-table-wrap cm-q-wrap", style: { maxHeight: "380px" } },
+    h("table", { class: "s2-table cm-q" }, h("thead", {}, h("tr", {}, cols.map((c) => h("th", { class: c === "Conn" || c === "Time" ? "num" : "" }, c)))), body));
+}
+
+function askAbout(q) {
+  S2.sendPrompt(`This query has been running for ${q.seconds}s on SingleStore node ${q.node} (user ${q.user}, database ${q.database ?? "none"}, state "${q.state}"). Explain what it does and whether its runtime or resource use is a concern:\n\n${q.sql}`);
+}
+
+function render() {
+  if (!state.data) {
+    root.replaceChildren(state.error ? S2.errorBox(state.error) : h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Measuring the cluster…"));
+    return;
+  }
+  const d = state.data;
+  const names = shortNames(d.nodes);
+  const versions = [...new Set(d.nodes.map((n) => n.version))].join(", ");
+  const online = d.nodes.filter((n) => (n.state || "").toLowerCase() === "online").length;
+  root.replaceChildren(...[
+    h("div", { class: "s2-header" },
+      h("div", {},
+        h("h1", { class: "s2-title" }, "Cluster Monitor"),
+        h("div", { class: "s2-subtitle" }, `${d.nodes.length} nodes · ${online} online · SingleStore ${versions} · CPU over ${d.sample_seconds}s · updated ${fmt.relTime(d.generated_at)}`)),
+      h("span", { class: "s2-spacer" }),
+      h("label", { class: "cm-auto s2-small s2-muted", title: `Refresh every ${REFRESH_MS / 1000}s` },
+        h("input", { type: "checkbox", checked: state.auto, onchange: (e) => setAuto(e.target.checked) }), "Auto-refresh"),
+      h("button", { class: "s2-btn", onclick: () => refresh(), disabled: state.loading },
+        state.loading ? h("span", { class: "s2-spinner" }) : null, "Refresh"),
+      S2.openInBrowserButton("cluster_monitor", () => ({})),
+      S2.fullscreenButton()),
+    state.error ? h("div", { class: "s2-error", style: { marginBottom: "10px" } }, `Refresh failed: ${state.error.message}`) : null,
+    chartEl,
+    h("div", { class: "cm-section" }, h("h2", {}, "Nodes")),
+    h("div", { class: "cm-nodes" }, d.nodes.map((n, i) => nodeCard(n, names[n.id], i))),
+    h("div", { class: "cm-section" },
+      h("h2", {}, `Active queries (${d.queries.length})`),
+      h("span", { class: "s2-faint s2-small" }, `${d.idle_connections} idle connection${d.idle_connections === 1 ? "" : "s"}`),
+      h("span", { class: "s2-spacer" }),
+      h("label", { class: "cm-auto s2-small s2-muted", title: "Also show the work leaves do on behalf of user queries (user 'distributed')" },
+        h("input", { type: "checkbox", checked: state.includeInternal, onchange: (e) => { state.includeInternal = e.target.checked; refresh(); } }),
+        "Include internal leaf activity")),
+    queriesTable(d.queries, names),
+  ].filter(Boolean));
+  buildChart();
+}
+
+function accept(data) {
+  state.data = data;
+  state.error = null;
+  if (data.history) state.history = data.history;
+  const live = new Set(data.queries.map(qkey));
+  for (const k of state.open) if (!live.has(k)) state.open.delete(k);
+  reportContext();
+}
+
+function reportContext() {
+  const d = state.data;
+  const names = shortNames(d.nodes);
+  const nodeLines = d.nodes.map((n) => {
+    const disk = n.disks[0];
+    return `${names[n.id]} (${n.type_label}, ${n.state}): CPU ${n.cpu ? `${n.cpu.singlestore_pct}% of ${n.cpu.cores} cores` : "n/a"}, ` +
+      `memory ${n.memory.max_memory_b ? Math.round((n.memory.singlestore_b / n.memory.max_memory_b) * 100) : "?"}%, ` +
+      `disk ${disk && disk.total_b ? Math.round((disk.used_b / disk.total_b) * 100) : "?"}%`;
+  });
+  const qLines = d.queries.slice(0, 5).map((q) => `${q.seconds}s ${q.user}@${q.database ?? "-"}: ${(q.sql ?? q.command ?? "").replace(/\s+/g, " ").slice(0, 120)}`);
+  S2.updateModelContext(`User is viewing the Cluster Monitor:\n${nodeLines.join("\n")}\n${d.queries.length} active queries${qLines.length ? ":\n" + qLines.join("\n") : ""}`);
+}
+
+async function refresh() {
+  if (state.loading) return;
+  state.loading = true;
+  try {
+    accept(await S2.callTool("cluster_monitor_data", { include_internal: state.includeInternal }));
+  } catch (e) {
+    state.error = e;
+  } finally {
+    state.loading = false;
+    render();
+  }
+}
+
+function setAuto(on) {
+  state.auto = on;
+  clearInterval(state.timer);
+  state.timer = on ? setInterval(() => { if (!document.hidden) refresh(); }, REFRESH_MS) : null;
+  render();
+}
+
+S2.onDisplayModeChange = () => { if (state.data) render(); };
+await S2.connect({
+  name: "singlestore-cluster-monitor",
+  onToolResult(result) {
+    try { accept(S2.resultData(result)); } catch (e) { state.error = e; }
+    render();
+    refresh(); // the opening result carries no CPU history; fetch it right away
+    if (state.auto && !state.timer) setAuto(true);
+  },
+  onToolCancelled() {
+    if (!state.data) root.replaceChildren(h("div", { class: "s2-empty" }, "Cancelled."));
+  },
+});
+</script>
+</body>
+</html>

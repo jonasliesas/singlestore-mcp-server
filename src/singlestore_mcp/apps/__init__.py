@@ -11,7 +11,7 @@ import traceback
 
 from ._core import apps
 
-_APP_MODULES = ("pipeline_monitor", "query_grid", "schema_explorer")
+_APP_MODULES = ("pipeline_monitor", "query_grid", "schema_explorer", "cluster_monitor", "sql_editor")
 
 for _name in _APP_MODULES:
     if os.environ.get("SINGLESTORE_MCP_DEV_SKIP_BROKEN_APPS"):

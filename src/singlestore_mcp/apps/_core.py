@@ -105,10 +105,31 @@ def _head() -> str:
     )
 
 
+_VENDOR_MARKER = re.compile(r"<!--S2:VENDOR:([\w.-]+)-->")
+
+
+def _vendor_inline(match: re.Match[str]) -> str:
+    """Inline a file from vendor/: a .js file as a classic script, a .json file as a data block."""
+    name = match.group(1)
+    path = _HERE / "vendor" / name
+    if name.endswith(".json") and not path.exists():
+        text = "[]"  # optional data (e.g. the function list); the app copes without it
+    else:
+        text = path.read_text(encoding="utf-8")
+    if name.endswith(".json"):
+        # "<\/" is the same JSON string but can't close the <script> element.
+        block_id = "vendor-" + name.rsplit(".", 1)[0]
+        return f'<script type="application/json" id="{block_id}">{text.replace("</", "<\\/")}</script>'
+    if "</script" in text.lower():
+        raise RuntimeError(f"vendor/{name} contains '</script' and can't be inlined")
+    return f"<script>\n{text}\n</script>"
+
+
 def build_page(template: str) -> str:
     html = (_HERE / template).read_text(encoding="utf-8")
     if _HEAD_MARKER not in html:
         raise RuntimeError(f"{template} is missing the {_HEAD_MARKER} marker")
+    html = _VENDOR_MARKER.sub(_vendor_inline, html)
     return html.replace(_HEAD_MARKER, _head(), 1)
 
 

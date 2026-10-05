@@ -30,6 +30,7 @@ from mcp.types import ToolAnnotations
 from .apps import apps
 from .apps._core import set_browser_url_factory, surface_errors
 from .apps.browser_view import BrowserView
+from .apps.sql_editor import deliver_reply
 from .db import InvalidIdentifierError, db, quote_identifier
 
 mcp = MCPServer("singlestore", extensions=[apps])
@@ -331,12 +332,31 @@ def browser_link(tool: str, arguments: dict[str, Any] | None = None) -> dict[str
     works on this machine only, until the MCP server restarts.
 
     Args:
-        tool: The app tool: pipeline_monitor, query_grid or schema_explorer.
+        tool: The app tool: pipeline_monitor, query_grid, schema_explorer, cluster_monitor or sql_editor.
         arguments: That tool's arguments, e.g. {"sql": "...", "database": "SASDP"}
             for query_grid or {"database": "SASDP", "table": "CARS"} for
             schema_explorer.
     """
     return {"url": browser_view.url(tool, arguments or {})}
+
+
+@tool(annotations=ToolAnnotations(readOnlyHint=True))
+def sql_editor_reply(editor_id: str, message: str) -> dict[str, Any]:
+    """Send an answer to the chat panel of an open SQL Editor app.
+
+    Use this to answer a message that arrived from the SQL Editor (it starts
+    with "[SQL Editor <editor_id>]"), or when the user asks you to put SQL into
+    their open editor (the editor reports its id in the model context). The
+    message is plain text; put SQL in ```sql fenced blocks - each block gets
+    Replace / Insert / Copy buttons in the editor. Keep explanations short.
+    After calling this, reply briefly in the chat as well.
+
+    Args:
+        editor_id: The editor's id, e.g. "e-4f9a2c".
+        message: The answer, with SQL in ```sql fenced blocks.
+    """
+    seq = deliver_reply(editor_id, message)
+    return {"delivered": True, "editor_id": editor_id, "seq": seq}
 
 
 def main() -> None:

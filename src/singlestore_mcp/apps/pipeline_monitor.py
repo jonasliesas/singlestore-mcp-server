@@ -73,7 +73,47 @@ def collect(database: str | None) -> dict[str, Any]:
         params,
     )
 
+    # Progress through the source: file counts for file sources, offset lag for Kafka.
+    files = _query(
+        "SELECT DATABASE_NAME, PIPELINE_NAME, FILE_STATE, COUNT(*) AS n, SUM(FILE_SIZE) AS bytes"
+        f" FROM information_schema.PIPELINES_FILES{where} GROUP BY 1, 2, 3",
+        params,
+    )
+    kafka = _query(
+        "SELECT DATABASE_NAME, PIPELINE_NAME, COUNT(*) AS partitions,"
+        " SUM(GREATEST(LATEST_OFFSET - CURSOR_OFFSET, 0)) AS lag, MAX(UPDATED_UNIX_TIMESTAMP) AS updated_unix"
+        f" FROM information_schema.PIPELINES_CURSORS{where}{' AND' if where else ' WHERE'} SOURCE_TYPE = 'KAFKA'"
+        " GROUP BY 1, 2",
+        params,
+    )
+
     key = lambda r: (r["DATABASE_NAME"], r["PIPELINE_NAME"])  # noqa: E731
+    files_by: dict[tuple[str, str], dict[str, Any]] = defaultdict(
+        lambda: {"kind": "files", "total": 0, "loaded": 0, "skipped": 0, "pending": 0, "bytes_total": 0, "bytes_loaded": 0}
+    )
+    for r in files:
+        f = files_by[key(r)]
+        n, size = int(r["n"] or 0), int(r["bytes"] or 0)
+        f["total"] += n
+        f["bytes_total"] += size
+        state = (r["FILE_STATE"] or "").lower()
+        if state == "loaded":
+            f["loaded"] += n
+            f["bytes_loaded"] += size
+        elif state == "skipped":
+            f["skipped"] += n
+        else:
+            f["pending"] += n
+    kafka_by = {
+        key(r): {
+            "kind": "kafka",
+            "partitions": int(r["partitions"] or 0),
+            "lag": int(r["lag"] or 0),
+            "updated_unix": r["updated_unix"],
+        }
+        for r in kafka
+    }
+
     last_by = {key(r): r for r in last_batches}
     errors_by = {key(r): r for r in errors}
     recent_by: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
@@ -117,6 +157,7 @@ def collect(database: str | None) -> dict[str, Any]:
                     "mb_streamed": last["MB_STREAMED"],
                 },
                 "recent_batches": recent_by.get(k, []),
+                "progress": kafka_by.get(k) if p["SOURCE_TYPE"] == "KAFKA" else (dict(files_by[k]) if k in files_by else None),
                 "error_count": err["n"] if err else 0,
                 "last_error": None
                 if err is None
@@ -138,6 +179,13 @@ def _summary(data: dict[str, Any]) -> str:
     lines = [f"{len(pipelines)} pipeline(s) in {scope} (shown in the Pipeline Monitor app):"]
     for p in pipelines:
         line = f"- {p['database']}.{p['name']}: {p['state']} ({p['source_type']})"
+        prog = p["progress"]
+        if prog and prog["kind"] == "files":
+            line += f", {prog['loaded']}/{prog['total']} files loaded"
+            if prog["skipped"]:
+                line += f" ({prog['skipped']} skipped)"
+        elif prog and prog["kind"] == "kafka":
+            line += ", caught up" if prog["lag"] == 0 else f", {prog['lag']:,} messages behind"
         if p["last_batch"]:
             line += f", last batch {p['last_batch']['state']}"
         if p["error_count"]:
