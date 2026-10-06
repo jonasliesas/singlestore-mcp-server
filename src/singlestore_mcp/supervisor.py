@@ -23,6 +23,10 @@ import time
 from typing import Any
 
 RESTART_TOOL = "restart_server"
+# Requests of MCP protocol revision 2026-07-28+ carry this key in params._meta
+# and need no initialize handshake; a server that saw `initialize` first only
+# speaks the older handshake protocol.
+_MODERN_META_KEY = "io.modelcontextprotocol/protocolVersion"
 _INIT_ID = "s2-supervisor-init"
 
 
@@ -37,6 +41,7 @@ class Supervisor:
         self.pending: set[Any] = set()  # ids of client requests the child hasn't answered
         self.replay_done = threading.Event()
         self.restarting = False
+        self.modern = False  # the client sends 2026-07-28 envelopes: don't replay initialize
 
     # ------------------------------------------------------------ plumbing
     def write_client(self, msg: dict[str, Any]) -> None:
@@ -102,7 +107,7 @@ class Supervisor:
                                    "error": {"code": -32603, "message": "The SingleStore MCP server restarted; try again."}})
             started = time.time()
             self.start_child()
-            if self.init_request:
+            if self.init_request and not self.modern:
                 self.replay_done.clear()
                 self.write_child({**self.init_request, "id": _INIT_ID})
                 if not self.replay_done.wait(60):
@@ -127,6 +132,9 @@ class Supervisor:
             except ValueError:
                 continue
             method = msg.get("method")
+            meta = (msg.get("params") or {}).get("_meta") if isinstance(msg.get("params"), dict) else None
+            if isinstance(meta, dict) and _MODERN_META_KEY in meta:
+                self.modern = True
             if method == "initialize":
                 self.init_request = msg
             elif method == "notifications/initialized":
@@ -162,7 +170,9 @@ class Supervisor:
         structured = {"restarted": not error, "message": text}
         self.write_client({"jsonrpc": "2.0", "id": msg["id"],
                            "result": {"content": [{"type": "text", "text": json.dumps(structured)}],
-                                      "structuredContent": structured, "isError": error}})
+                                      "structuredContent": structured, "isError": error,
+                                      # Required by MCP protocol revision 2026-07-28 and later.
+                                      "resultType": "complete"}})
 
 
 def run() -> None:

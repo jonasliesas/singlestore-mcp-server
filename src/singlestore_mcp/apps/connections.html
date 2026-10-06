@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connections</title>
+<!--S2:HEAD-->
+<style>
+  body { padding: 12px 16px; }
+  .cx-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .cx-sub { color: var(--s2-text-2); font-size: var(--s2-fs-xs); margin: -4px 0 12px; }
+  .cx-list { display: grid; gap: 8px; max-width: 900px; }
+  .cx-card { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; gap: 10px; align-items: center;
+    border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); padding: 10px 12px; background: var(--s2-bg); }
+  .cx-card.active { border-color: var(--s2-ok); box-shadow: 0 0 0 1px color-mix(in srgb, var(--s2-ok) 35%, transparent); }
+  .cx-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--s2-border); }
+  .cx-card.active .cx-dot { background: var(--s2-ok); }
+  .cx-name { font-weight: var(--font-weight-semibold, 600); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .cx-tag { font-size: 10px; font-weight: 600; padding: 0 6px; border-radius: 4px; background: var(--s2-bg-2); color: var(--s2-text-2); }
+  .cx-card.active .cx-tag.on { background: var(--s2-ok-bg); color: var(--s2-ok); }
+  .cx-where { font-family: var(--s2-mono); font-size: 12px; color: var(--s2-text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cx-result { font-size: var(--s2-fs-xs); margin-top: 3px; }
+  .cx-result.ok { color: var(--s2-ok); } .cx-result.err { color: var(--s2-err); }
+  .cx-actions { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+  .cx-form { max-width: 620px; border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); padding: 14px 16px; background: var(--s2-bg-2); margin-bottom: 12px; }
+  .cx-form[hidden] { display: none; }
+  .cx-grid { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 8px 12px; align-items: center; }
+  .cx-grid label { font-size: var(--s2-fs-xs); color: var(--s2-text-2); }
+  .cx-grid .s2-input { width: 100%; }
+  .cx-grid .hint { grid-column: 2; font-size: 11px; color: var(--s2-text-3); margin-top: -4px; }
+  .cx-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; align-items: center; }
+  .cx-file { display: flex; gap: 4px; align-items: center; }
+  .cx-file .s2-input { flex: 1; min-width: 0; font-family: var(--s2-mono); font-size: 12px; }
+  .cx-sec { grid-column: 1 / -1; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--s2-text-3); margin-top: 6px; border-top: 1px solid var(--s2-border-2); padding-top: 8px; }
+  .cx-browse { grid-column: 1 / -1; border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); padding: 8px 10px; background: var(--s2-bg); font-size: var(--s2-fs-xs); }
+  .cx-browse[hidden] { display: none; }
+  .cx-browse .row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .cx-browse .row + .row, .cx-browse .list + .row { margin-top: 6px; }
+  .cx-browse .list { margin-top: 6px; max-height: 180px; overflow: auto; border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius-sm); }
+  .cx-browse .item { display: flex; gap: 10px; width: 100%; border: 0; background: none; text-align: left; padding: 4px 8px; cursor: pointer; font: inherit; color: inherit; }
+  .cx-browse .item:hover { background: var(--s2-info-bg); }
+  .cx-browse .item .n { flex: 1; font-family: var(--s2-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cx-browse .item .m { color: var(--s2-text-3); white-space: nowrap; }
+  .cx-browse .warn { color: var(--s2-warn); }
+  .cx-foot { margin-top: 14px; font-size: 11px; color: var(--s2-text-3); max-width: 900px; }
+</style>
+</head>
+<body>
+<div id="root"><div class="s2-empty"><span class="s2-spinner"></span> Loading connections…</div></div>
+<script type="module">
+const { h } = S2;
+const root = document.getElementById("root");
+const cleanError = (e) => String(e?.message ?? e).replace(/^Error executing tool [\w-]+:\s*/, "");
+const st = { data: null, results: {}, editing: null, busy: null };
+
+const headEl = h("div", { class: "cx-head" });
+const formEl = h("div", { class: "cx-form", hidden: true });
+const listEl = h("div", { class: "cx-list" });
+const footEl = h("div", { class: "cx-foot" });
+root.replaceChildren(headEl, h("div", { class: "cx-sub" }, "One connection is active at a time: every view, Claude's tools and new notebook kernels use it."), formEl, listEl, footEl);
+
+function where(c) {
+  if (c.url) return c.url;
+  const tls = c.ssl_disabled ? "  (no TLS)" : c.ssl_ca ? `  · TLS with ${c.ssl_ca.split(/[\\/]/).pop()}${c.ssl_verify ? "" : " (not verified)"}` : "";
+  return `${c.user}@${c.host}:${c.port}${c.database ? ` / ${c.database}` : ""}${tls}`;
+}
+
+function tokenText(c) {
+  if (!c.token_valid) return c.token_expires ? "token expired" : "no token";
+  if (!c.token_expires) return "token saved";
+  const min = Math.round((c.token_expires * 1000 - Date.now()) / 60000);
+  return min > 90 ? `token valid ${Math.round(min / 60)} h` : `token valid ${min} min`;
+}
+function tokenTitle(c) {
+  return c.auth === "jwt" ? "Logs in with a JWT token (pasted; stored in your OS credential store)"
+    : c.auth === "entra" ? "Logs in with Microsoft Entra ID: Sign in once in the browser; tokens are then renewed automatically"
+    : "Logs in with SingleStore browser SSO: Sign in opens your browser, the token is cached until it expires";
+}
+
+function render() {
+  const d = st.data;
+  headEl.replaceChildren(...[
+    h("h1", { class: "s2-title" }, "Connections"),
+    h("button", { class: "s2-btn primary", onclick: () => edit(null) }, "+ New connection"),
+    h("span", { class: "s2-spacer" }),
+    S2.openInBrowserButton("connections_window", () => ({})),
+    S2.fullscreenButton(),
+  ].filter(Boolean));
+  if (!d) return;
+  listEl.replaceChildren(...(d.connections.length ? d.connections.map((c) => {
+    const isActive = c.name === d.active;
+    const res = st.results[c.name];
+    return h("div", { class: `cx-card${isActive ? " active" : ""}` },
+      h("span", { class: "cx-dot", title: isActive ? "Active" : "" }),
+      h("div", {},
+        h("div", { class: "cx-name" }, c.name,
+          isActive ? h("span", { class: "cx-tag on" }, "ACTIVE") : null,
+          c.builtin ? h("span", { class: "cx-tag", title: "From the SINGLESTORE_* settings of the server; edit those to change it" }, "from settings") : null,
+          c.auth === "password" && !c.has_password ? h("span", { class: "cx-tag", title: "No password saved" }, "no password") : null,
+          c.auth !== "password" ? h("span", { class: "cx-tag", title: tokenTitle(c) }, ({ jwt: "JWT", entra: "Entra ID" })[c.auth] ?? "SSO") : null,
+          c.auth !== "password" ? h("span", { class: `cx-tag${c.token_valid ? " on" : ""}`, style: c.token_valid ? {} : { color: "var(--s2-warn)" } }, tokenText(c)) : null),
+        h("div", { class: "cx-where", title: where(c) }, where(c)),
+        res ? h("div", { class: `cx-result ${res.ok ? "ok" : "err"}` },
+          res.ok ? `✓ Connected · SingleStore ${res.version} as ${res.user} · ${res.ms} ms` : `✕ ${res.error}`) : null),
+      h("div", { class: "cx-actions" }, ...[
+        isActive ? null : h("button", { class: "s2-btn primary", disabled: st.busy, onclick: () => activate(c.name) },
+          st.busy === `use:${c.name}` ? h("span", { class: "s2-spinner" }) : null, "Connect"),
+        c.auth === "browser_sso" || c.auth === "entra" ? h("button", { class: `s2-btn${c.token_valid ? "" : " primary"}`, disabled: st.busy,
+          title: c.auth === "entra" ? "Sign in with Microsoft in the browser" : "Sign in with your SSO in the browser (Helios)", onclick: () => signIn(c.name) },
+          st.busy === `sso:${c.name}` ? h("span", { class: "s2-spinner" }) : null, c.token_valid ? "Sign in again" : "Sign in") : null,
+        h("button", { class: "s2-btn", disabled: st.busy, onclick: () => testSaved(c.name) },
+          st.busy === `test:${c.name}` ? h("span", { class: "s2-spinner" }) : null, "Test"),
+        c.builtin ? null : h("button", { class: "s2-btn ghost", onclick: () => edit(c) }, "Edit"),
+        c.builtin ? null : h("button", { class: "s2-btn ghost", title: "Delete this connection and its saved password", onclick: (e) => remove(c, e.currentTarget) }, "Delete"),
+      ].filter(Boolean)));
+  }) : [h("div", { class: "s2-empty" }, "No connections yet. Add one with + New connection.")]));
+  footEl.textContent = `Passwords are stored in: ${d.password_store}. The list itself (no passwords) is in ~/.singlestore-mcp/connections.json.`;
+}
+
+// ---------------------------------------------------------------- form
+function edit(c) {
+  st.editing = c ? { ...c, original_name: c.name } : { name: "", host: "", port: 3306, user: "admin", database: "", ssl_disabled: false, url: "" };
+  const e = st.editing;
+  const useUrl = Boolean(c?.url);
+  const f = {
+    name: h("input", { class: "s2-input", value: e.name, placeholder: "e.g. Production", spellcheck: false }),
+    host: h("input", { class: "s2-input", value: e.host, placeholder: "host name or IP", spellcheck: false }),
+    port: h("input", { class: "s2-input", type: "number", value: e.port, min: 1, max: 65535 }),
+    user: h("input", { class: "s2-input", value: e.user, spellcheck: false }),
+    password: h("input", { class: "s2-input", type: "password", autocomplete: "new-password",
+      placeholder: c?.has_password ? "•••••••• saved — leave empty to keep" : "password" }),
+    auth: h("select", { class: "s2-input", "aria-label": "Authentication" },
+      h("option", { value: "password", selected: (e.auth ?? "password") === "password" }, "Password"),
+      h("option", { value: "jwt", selected: e.auth === "jwt" }, "JWT token"),
+      h("option", { value: "browser_sso", selected: e.auth === "browser_sso" }, "Browser SSO (SingleStore Helios)"),
+      h("option", { value: "entra", selected: e.auth === "entra" }, "Microsoft Entra ID (SSO)")),
+    tenant: h("input", { class: "s2-input", value: e.entra_tenant ?? "", placeholder: "optional: tenant ID or domain (default: your work account's)", spellcheck: false }),
+    client: h("input", { class: "s2-input", value: e.entra_client_id ?? "", placeholder: "optional: your own app registration's client ID", spellcheck: false }),
+    scope: h("input", { class: "s2-input", value: e.entra_scope ?? "", placeholder: "optional (default: Azure database login, ossrdbms-aad)", spellcheck: false }),
+    token: h("textarea", { class: "s2-input", rows: 3, spellcheck: false, style: { fontFamily: "var(--s2-mono)", fontSize: "11px" },
+      placeholder: c?.auth === "jwt" && c?.has_password ? "token saved — paste a new one to replace it" : "paste the JWT token (eyJ…)" }),
+    database: h("input", { class: "s2-input", value: e.database ?? "", placeholder: "optional", spellcheck: false }),
+    ssl: h("input", { type: "checkbox", checked: e.ssl_disabled }),
+    useUrl: h("input", { type: "checkbox", checked: useUrl }),
+    url: h("input", { class: "s2-input", value: "", placeholder: "user:password@host:3306/database", spellcheck: false, autocomplete: "off" }),
+    ca: h("input", { class: "s2-input", value: e.ssl_ca ?? "", placeholder: "path to the CA certificate (.pem)", spellcheck: false }),
+    verify: h("input", { type: "checkbox", checked: e.ssl_verify !== false }),
+    cert: h("input", { class: "s2-input", value: e.ssl_cert ?? "", placeholder: "optional: client certificate (.pem)", spellcheck: false }),
+    key: h("input", { class: "s2-input", value: e.ssl_key ?? "", placeholder: "optional: client key (.pem / .key)", spellcheck: false }),
+  };
+  // File browser for certificate files, shown inside the form.
+  const browseEl = h("div", { class: "cx-browse", hidden: true });
+  const dirOf = (path) => (path ? path.replace(/[\\/][^\\/]*$/, "") : null);
+  const browse = (input) => {
+    browseEl.hidden = false;
+    S2.fileBrowser(browseEl, { kind: "pem", mode: "open", start: dirOf(input.value),
+      onOpen: (path) => { input.value = path; browseEl.hidden = true; browseEl.replaceChildren(); },
+      onClose: () => { browseEl.hidden = true; browseEl.replaceChildren(); } });
+  };
+  const fileRow = (input, extra = []) => h("div", { class: "cx-file" }, input,
+    h("button", { class: "s2-btn", type: "button", onclick: () => browse(input) }, "Browse…"), ...extra);
+  const heliosBtn = h("button", { class: "s2-btn", type: "button", title: "Download SingleStore's CA bundle (portal.singlestore.com) and use it",
+    onclick: async () => {
+      heliosBtn.disabled = true;
+      try { f.ca.value = (await S2.callTool("connection_helios_ca", {})).path; f.verify.checked = true; }
+      catch (err) { S2.toast(cleanError(err), "err"); }
+      heliosBtn.disabled = false;
+    } }, "Use SingleStore Helios CA");
+  const status = h("div", { class: "cx-result" });
+  const grid = h("div", { class: "cx-grid" });
+  const drawGrid = () => {
+    const rows = [["Name", f.name]];
+    if (f.useUrl.checked) rows.push(["Connection URL", f.url, c?.url ? "Saved URL is hidden; enter it again to change it, or leave empty to keep it." : "Stored in the connection list; prefer host fields if it contains a password."]);
+    else {
+      const auth = f.auth.value;
+      rows.push(["Host", f.host], ["Port", f.port], ["Authentication", f.auth],
+        ["User", f.user, auth === "browser_sso" ? "Your SingleStore login email." : auth === "jwt" ? "The database user the token is for (often your email)."
+          : auth === "entra" ? "Your Entra user name (UPN, e.g. jonas@company.com): the database user created for you." : ""]);
+      if (auth === "password") rows.push(["Password", f.password, "Stored in your OS credential store, never in the connection list."]);
+      else if (auth === "jwt") rows.push(["JWT token", f.token, "Stored in your OS credential store. Tokens expire: paste a new one when it does. Needs TLS."]);
+      else if (auth === "entra") rows.push(["Tenant", f.tenant], ["Client ID", f.client, "Leave empty: no app registration needed (Microsoft's Azure CLI app, available in every tenant)."],
+        ["Scope", f.scope, "Leave empty for the Azure database login token (user name in upn: jwks_username_field = 'upn' on the cluster)."],
+        ["", h("div", { class: "hint", style: { marginTop: 0 } }, "After saving, Sign in uses the account you're signed in to Windows with (Entra-joined laptops: usually no prompt), otherwise Microsoft's sign-in page in your browser. Tokens are then renewed automatically for all views, notebooks and Claude.")]);
+      else rows.push(["", h("div", { class: "hint", style: { marginTop: 0 } }, "After saving, Sign in opens SingleStore's sign-in page in your browser; the token is cached until it expires and shared by all views, notebooks and Claude.")]);
+      rows.push(
+        ["Default database", f.database], ["section", "TLS / certificates"],
+        ["", h("label", {}, f.ssl, " TLS off (only for clusters without TLS)")]);
+      if (!f.ssl.checked) rows.push(
+        ["CA certificate", fileRow(f.ca, [heliosBtn]), "Helios and most TLS clusters need one; the file stays where it is, only its path is saved."],
+        ["", h("label", {}, f.verify, " Verify the server's certificate")],
+        ["Client certificate", fileRow(f.cert)], ["Client key", fileRow(f.key), "Only if your cluster requires client certificates."],
+        ["browse", browseEl]);
+    }
+    rows.push(["", h("label", {}, f.useUrl, " Use a connection URL instead")]);
+    grid.replaceChildren(...rows.flatMap(([label, input, hint]) =>
+      label === "section" ? [h("div", { class: "cx-sec" }, input)]
+      : label === "browse" ? [input]
+      : [h("label", {}, label), input, hint ? h("div", { class: "hint" }, hint) : null].filter(Boolean)));
+  };
+  f.useUrl.onchange = drawGrid;
+  f.auth.onchange = drawGrid;
+  // The secret for the chosen login: password, pasted token, or none (SSO signs in later).
+  const secret = () => (f.useUrl.checked ? null : f.auth.value === "password" ? f.password.value || null
+    : f.auth.value === "jwt" ? f.token.value.trim() || null : null);
+  f.ssl.onchange = drawGrid;
+  drawGrid();
+  const values = () => ({
+    name: f.name.value.trim(), original_name: e.original_name ?? null,
+    host: f.host.value.trim(), port: Number(f.port.value) || 3306, user: f.user.value.trim(),
+    database: f.database.value.trim() || null, ssl_disabled: f.ssl.checked,
+    ssl_ca: f.ca.value.trim() || null, ssl_cert: f.cert.value.trim() || null, ssl_key: f.key.value.trim() || null,
+    ssl_verify: f.verify.checked,
+    auth: f.useUrl.checked ? "password" : f.auth.value,
+    entra_tenant: f.tenant.value.trim() || null, entra_client_id: f.client.value.trim() || null, entra_scope: f.scope.value.trim() || null,
+    url: f.useUrl.checked ? (f.url.value.trim() || (c?.url && e.original_name ? "__keep__" : "")) : "",
+  });
+  async function save(activate) {
+    const v = values();  // url "__keep__" = keep the saved URL (the app never sees it)
+    status.className = "cx-result"; status.replaceChildren(h("span", { class: "s2-spinner" }), " Saving…");
+    try {
+      const sso = v.auth === "browser_sso" || v.auth === "entra";
+      st.data = await S2.callTool("connection_save", { profile: v, password: secret(), original_name: e.original_name ?? null, activate: activate && !sso });
+      formEl.hidden = true; st.editing = null;
+      if (activate && sso) {  // sign in first, then switch
+        render();
+        if (await signIn(v.name)) await activate_(v.name);
+        return;
+      }
+      S2.toast(activate ? `Connected to ${v.name}` : `Saved ${v.name}`, "ok");
+      if (activate) { await testSaved(v.name); announce(v.name); }
+      render();
+    } catch (err) { status.className = "cx-result err"; status.textContent = cleanError(err); }
+  }
+  async function test() {
+    status.className = "cx-result"; status.replaceChildren(h("span", { class: "s2-spinner" }), " Testing…");
+    try {
+      const r = await S2.callTool("connection_test", { profile: values(), password: secret() });
+      status.className = `cx-result ${r.ok ? "ok" : "err"}`;
+      status.textContent = r.ok ? `✓ Connected · SingleStore ${r.version} as ${r.user} · ${r.ms} ms` : `✕ ${r.error}`;
+    } catch (err) { status.className = "cx-result err"; status.textContent = cleanError(err); }
+  }
+  formEl.replaceChildren(
+    h("strong", {}, c ? `Edit ${c.name}` : "New connection"),
+    h("div", { style: { height: "10px" } }), grid,
+    h("div", { class: "cx-row" },
+      h("button", { class: "s2-btn", onclick: test }, "Test"),
+      h("button", { class: "s2-btn", onclick: () => save(false) }, "Save"),
+      h("button", { class: "s2-btn primary", onclick: () => save(true) }, "Save and connect"),
+      h("span", { class: "s2-spacer" }),
+      h("button", { class: "s2-btn ghost", onclick: () => { formEl.hidden = true; st.editing = null; } }, "Cancel")),
+    status);
+  formEl.hidden = false;
+  f.name.focus();
+}
+
+// ---------------------------------------------------------------- actions
+async function load() {
+  try { st.data = await S2.callTool("connections_state", {}); }
+  catch (err) { listEl.replaceChildren(S2.errorBox(new Error(cleanError(err)))); return; }
+  render();
+}
+async function activate_(name) { return activate(name); }
+async function activate(name) {
+  st.busy = `use:${name}`; render();
+  try {
+    const r = await S2.callTool("connection_activate", { name });
+    st.data = r; st.results[name] = r.test;
+    S2.toast(r.test?.ok ? `Connected to ${name}` : `Switched to ${name}, but the test failed`, r.test?.ok ? "ok" : "err");
+    announce(name);
+  } catch (err) { S2.toast(cleanError(err), "err"); }
+  st.busy = null; render();
+}
+// Browser SSO: the server opens SingleStore's sign-in page in your browser and
+// waits (up to 2 minutes) for the token.
+async function signIn(name) {
+  st.busy = `sso:${name}`; render();
+  S2.toast("Sign in in the browser window that opened…", "ok");
+  let ok = false;
+  try {
+    const r = await S2.callTool("connection_sso_sign_in", { name });
+    st.data = r; st.results[name] = r.test; ok = true;
+    S2.toast(r.test?.ok ? `Signed in to ${name}${r.token?.signed_in_with ? ` with ${r.token.signed_in_with}` : ""}` : "Signed in, but the connection test failed", r.test?.ok ? "ok" : "err");
+    if (r.token?.warning) S2.toast(r.token.warning, "err");
+    if (r.token?.token_user && !r.test?.ok) st.results[name] = { ok: false, error: `${r.test?.error ?? "Test failed"} · Signed in as ${r.token.token_user}. The cluster needs jwks_endpoint = 'https://login.microsoftonline.com/${r.token.tenant}/discovery/keys', jwks_username_field = '${r.token.username_claim}' and a user '${r.token.token_user}'@'%' IDENTIFIED WITH authentication_jwt REQUIRE SSL.` };
+  } catch (err) { st.results[name] = { ok: false, error: cleanError(err) }; }
+  st.busy = null; render();
+  return ok;
+}
+
+async function testSaved(name) {
+  st.busy = `test:${name}`; render();
+  try { st.results[name] = await S2.callTool("connection_test", { name }); }
+  catch (err) { st.results[name] = { ok: false, error: cleanError(err) }; }
+  st.busy = null; render();
+}
+async function remove(c, button) {
+  if (!(await S2.confirmInline(button, `Delete ${c.name} and its saved password?`, "Delete"))) return;
+  try { st.data = await S2.callTool("connection_delete", { name: c.name }); delete st.results[c.name]; S2.toast(`Deleted ${c.name}`, "ok"); }
+  catch (err) { S2.toast(cleanError(err), "err"); }
+  render();
+}
+// Tell the workspace (and through it the other views) about the new active connection.
+function announce(name) {
+  if (S2.embedded()) window.parent.postMessage({ type: "s2-connection-changed", name }, "*");
+  S2.updateModelContext(`The user switched the active SingleStore connection to "${name}". Tools now run against it.`);
+}
+
+render();
+await S2.connect({
+  name: "singlestore-connections",
+  onToolResult(result) {
+    try { st.data = S2.resultData(result); render(); } catch { load(); }
+  },
+  onToolInput() {},
+});
+if (!st.data) load();
+</script>
+</body>
+</html>

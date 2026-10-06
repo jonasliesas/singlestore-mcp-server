@@ -68,6 +68,7 @@ const ICONS = {
   schema: '<rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="9.5" x2="21" y2="9.5"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="9.5" x2="9" y2="20"/>',
   pipelines: '<rect x="3" y="3.5" width="7" height="6" rx="1.5"/><rect x="14" y="14.5" width="7" height="6" rx="1.5"/><path d="M6.5 9.5v2.5a3 3 0 0 0 3 3h4.5"/><polyline points="12 13 14 15 12 17"/>',
   cluster: '<rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><line x1="7" y1="7.5" x2="7.01" y2="7.5"/><line x1="7" y1="16.5" x2="7.01" y2="16.5"/><line x1="11" y1="7.5" x2="17" y2="7.5"/><line x1="11" y1="16.5" x2="17" y2="16.5"/>',
+  connections: '<path d="M9 7V3"/><path d="M15 7V3"/><path d="M6 7h12v4a6 6 0 0 1-12 0z"/><path d="M12 17v4"/>',
   browser: '<path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
   fullscreen: '<path d="M4 9V4h5"/><path d="M20 9V4h-5"/><path d="M4 15v5h5"/><path d="M20 15v5h-5"/>',
 };
@@ -76,6 +77,7 @@ const VIEWS = {
   notebook: { label: "Notebook", title: "Notebook", uri: "ui://singlestore/notebook.html", tool: "notebook" },
   schema: { label: "Schema", title: "Schema Explorer", uri: "ui://singlestore/schema-explorer.html", tool: "schema_explorer" },
   pipelines: { label: "Pipelines", title: "Pipeline Monitor", uri: "ui://singlestore/pipeline-monitor.html", tool: "pipeline_monitor" },
+  connections: { label: "Connect", title: "Connections", uri: "ui://singlestore/connections.html", tool: "connections_window", bottom: true },
   cluster: { label: "Cluster", title: "Cluster Monitor", uri: "ui://singlestore/cluster-monitor.html", tool: "cluster_monitor" },
 };
 
@@ -99,12 +101,12 @@ const mainEl = h("div", { class: "ws-main" });
 // ---------------------------------------------------------------- layout
 function buildShell() {
   const rail = h("nav", { class: "ws-rail", "aria-label": "Workspace views" });
-  for (const [key, v] of Object.entries(VIEWS)) {
-    railButtons[key] = h("button", { title: v.title, "aria-label": v.title,
-      onclick: () => openView(key === "notebook" ? (ws.lastNotebook ?? "notebook") : key) }, svg(ICONS[key]), v.label);
-    rail.append(railButtons[key]);
-  }
+  const railButton = (key, v) => (railButtons[key] = h("button", { title: v.title, "aria-label": v.title,
+    onclick: () => openView(key === "notebook" ? (ws.lastNotebook ?? "notebook") : key) }, svg(ICONS[key]), v.label));
+  for (const [key, v] of Object.entries(VIEWS)) if (!v.bottom) rail.append(railButton(key, v));
   rail.append(h("div", { class: "gap" }));
+  for (const [key, v] of Object.entries(VIEWS)) if (v.bottom) rail.append(railButton(key, v));
+  refreshConnectionLabel();
   if (!S2.inBrowserView()) {
     rail.append(h("button", { class: "tool", title: "Open the workspace full-window in your browser", "aria-label": "Open in browser",
       onclick: async () => {
@@ -139,6 +141,33 @@ function openView(view, handoff) {
   for (const el of mainEl.querySelectorAll(".ws-loading")) el.hidden = el.dataset.view !== view;
   renderTabs();
   pushContext();
+}
+
+// ---------------------------------------------------------------- active connection
+// One SingleStore connection is active for the whole server. After a switch,
+// the monitors reload; the SQL Editor and notebooks are told (they keep their
+// work: SQL text, cells and kernel variables).
+async function refreshConnectionLabel() {
+  try {
+    const st = await S2.callTool("connections_state", {});
+    ws.connection = st.active;
+  } catch { return; }
+  const btn = railButtons.connections;
+  if (btn) btn.title = btn.ariaLabel = `Connections · active: ${ws.connection ?? "none"}`;
+  pushContext();
+}
+function connectionChanged(name) {
+  ws.connection = name;
+  for (const key of Object.keys(ws.frames)) {
+    if (["schema", "pipelines", "cluster"].includes(key)) {
+      ws.frames[key].iframe?.remove();
+      mainEl.querySelector(`.ws-loading[data-view="${key}"]`)?.remove();
+      delete ws.frames[key]; delete ws.contexts[key];
+    } else if (key !== "connections") {
+      deliver(key, { type: "s2-connection-changed", name });
+    }
+  }
+  refreshConnectionLabel();
 }
 
 // ---------------------------------------------------------------- notebook tabs
@@ -250,6 +279,7 @@ window.addEventListener("message", async (ev) => {
   const [view, f] = hit;
   const msg = ev.data;
   if (msg?.type === "s2-open-view") { openView(msg.view, msg); return; }
+  if (msg?.type === "s2-connection-changed") { connectionChanged(msg.name); return; }
   if (msg?.type === "s2-title") { ws.titles[view] = { title: String(msg.title || "untitled"), dirty: Boolean(msg.dirty), path: msg.path }; renderTabs(); return; }
   if (msg?.jsonrpc !== "2.0" || !msg.method) return;
   const { id, method, params } = msg;
@@ -309,7 +339,7 @@ function pushContext() {
   clearTimeout(ctxTimer);
   ctxTimer = setTimeout(() => {
     const label = (key) => `${viewDef(key)?.title ?? "?"}${isNotebook(key) ? ` "${ws.titles[key]?.title ?? "untitled"}"` : ""}`;
-    const parts = [`SingleStore Workspace is open; the user is on the ${label(ws.current)} view.`];
+    const parts = [`SingleStore Workspace is open (active connection: ${ws.connection ?? "?"}); the user is on the ${label(ws.current)} view.`];
     for (const [view, text] of Object.entries(ws.contexts)) if (text) parts.push(`[${label(view)}]\n${text}`);
     S2.updateModelContext(parts.join("\n\n"));
   }, 250);
@@ -330,6 +360,7 @@ await S2.connect({
       ws.args = { ...ws.args, database: data.database ?? ws.args.database, sql: data.sql ?? ws.args.sql, table: data.table ?? ws.args.table };
       buildShell();
       openView(viewDef(data.view) ? data.view : "sql");
+      if (data.connection_error) S2.toast(`The active connection fails: ${data.connection_error.slice(0, 160)}`, "err");
     } catch (e) {
       root.replaceChildren(S2.errorBox(e));
     }

@@ -875,6 +875,16 @@ async function loadAssistantStatus() {
   }, chat.waiting ? 2000 : 5000);
 })();
 
+// The workspace switched the active connection: new database list and schema.
+window.addEventListener("s2:connection-changed", async (e) => {
+  state.schemas.clear();
+  await refreshDatabases({ force: true });
+  if (state.database && !state.databases.includes(state.database)) chooseDatabase(state.databases.find((d) => !SYSTEM.has(d)) ?? null);
+  else if (state.database) loadSchema(state.database, true);
+  renderTree();
+  S2.toast(`Connected to ${e.detail.name}`, "ok");
+});
+
 // Hand-off from another workspace view (e.g. the Explorer's "Query in grid").
 window.addEventListener("s2:set-sql", (e) => {
   const { sql, database, run: runIt } = e.detail;

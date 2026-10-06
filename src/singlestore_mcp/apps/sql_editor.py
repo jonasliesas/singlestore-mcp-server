@@ -37,7 +37,7 @@ register_app(
 # The workspace shell: SQL editor plus the Schema, Pipelines and Cluster apps
 # as views behind a left-hand rail. sql_editor opens it.
 WORKSPACE_URI = "ui://singlestore/workspace.html"
-WORKSPACE_VIEWS = ("sql", "notebook", "schema", "pipelines", "cluster")
+WORKSPACE_VIEWS = ("sql", "notebook", "schema", "pipelines", "cluster", "connections")
 register_app(
     WORKSPACE_URI,
     "workspace.html",
@@ -90,16 +90,26 @@ def sql_editor(
     Args:
         database: Database to start in (case-sensitive).
         sql: SQL to put in the editor (not run automatically).
-        view: View to show first: "sql" (default), "notebook", "schema", "pipelines" or "cluster".
+        view: View to show first: "sql" (default), "notebook", "schema", "pipelines", "cluster" or "connections".
         table: For view="schema": table to pre-select in `database`.
     """
     if view not in WORKSPACE_VIEWS:
         raise ValueError(f"view must be one of {', '.join(WORKSPACE_VIEWS)}")
-    databases = _databases()
-    if database and database not in databases:
+    # A failing connection must not lock the user out of the workspace: it then
+    # opens on the Connections view with the error, to fix or switch connection.
+    connection_error = None
+    try:
+        databases = _databases()
+    except Exception as exc:  # noqa: BLE001 - shown in the app and to the model
+        databases, connection_error = [], str(exc)
+        view = "connections" if view in ("sql", "schema", "pipelines", "cluster") else view
+    if database and databases and database not in databases:
         raise LookupError(f"Database {database!r} not found (names are case-sensitive).")
-    data: dict[str, Any] = {"databases": databases, "database": database, "sql": sql, "view": view, "table": table}
+    data: dict[str, Any] = {"databases": databases, "database": database, "sql": sql, "view": view, "table": table,
+                            "connection_error": connection_error}
     summary = f"SingleStore Workspace opened on the {view} view{f', database {database}' if database else ''}."
+    if connection_error:
+        summary += f" The active connection fails ({connection_error[:200]}); the user can fix or switch it in Connections."
     if sql:
         summary += f" Editor prefilled with: {' '.join(sql.split())[:300]}"
     summary = with_browser_link(
@@ -244,7 +254,7 @@ def files_browse(path: str | None = None, kind: str = "sql") -> CallToolResult:
     ``path`` defaults to the SQL folder. Only folders inside the allowed roots
     (the user's home folder, the SQL folder, SINGLESTORE_MCP_FILE_ROOTS) can be browsed.
     """
-    suffix = ".ipynb" if kind == "notebook" else _SQL_SUFFIX
+    suffix = {"notebook": (".ipynb",), "pem": (".pem", ".crt", ".cer", ".key")}.get(kind, (_SQL_SUFFIX,))
     folder = _check_allowed(Path(path).expanduser() if path else sql_dir())
     if not folder.is_dir():
         if folder == sql_dir().resolve():
@@ -262,7 +272,7 @@ def files_browse(path: str | None = None, kind: str = "sql") -> CallToolResult:
                 continue
             if entry.is_dir():
                 folders.append({"name": entry.name, "path": str(entry)})
-            elif entry.suffix.lower() == suffix:
+            elif entry.suffix.lower() in suffix:
                 st = entry.stat()
                 files.append({"name": entry.name, "path": str(entry), "size": st.st_size, "modified": round(st.st_mtime)})
         except OSError:

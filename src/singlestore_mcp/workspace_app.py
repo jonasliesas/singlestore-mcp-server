@@ -22,6 +22,7 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -100,10 +101,62 @@ def _open_window(url: str, use_browser: bool) -> None:
         webbrowser.open(url)
 
 
+def _free_port(preferred: int) -> int:
+    """``preferred`` if nothing listens there, else any free port (checked with an exclusive bind)."""
+    import socket
+
+    for port in (preferred, 0):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            try:
+                sock.bind(("127.0.0.1", port))
+                return sock.getsockname()[1]
+            except OSError:
+                continue
+    raise OSError("No free port")
+
+
+def _warm_database() -> None:
+    try:
+        from .db import db
+
+        db.warm()
+    except Exception:  # noqa: BLE001 - the app shows connection problems itself
+        pass
+
+
+_SPLASH = """<!doctype html><html><head><meta charset="utf-8"><title>SingleStore Workspace</title>
+<style>html,body{height:100%;margin:0}body{display:grid;place-items:center;font:14px system-ui,'Segoe UI',sans-serif;
+color:#555;background:#fff}@media(prefers-color-scheme:dark){body{background:#1e1e1e;color:#aaa}}
+.s{width:18px;height:18px;border:2px solid #ccc;border-top-color:#7c3aed;border-radius:50%;
+display:inline-block;vertical-align:-4px;margin-right:8px;animation:r .8s linear infinite}@keyframes r{to{transform:rotate(360deg)}}
+</style></head><body><div id="m"><span class="s"></span>Starting SingleStore Workspace…</div>
+<script>
+const target = __TARGET__, ping = target.split("?")[0] + "ping", t0 = Date.now();
+(function poll() {
+  fetch(ping + "?t=" + Date.now(), { mode: "no-cors", cache: "no-store" })
+    .then(() => location.replace(target))
+    .catch(() => {
+      if (Date.now() - t0 > 90000) document.getElementById("m").textContent =
+        "The workspace didn't start. Close this window and try the shortcut again.";
+      else setTimeout(poll, 250);
+    });
+})();
+</script></body></html>"""
+
+
+def _splash(target: str) -> Path:
+    """A local "Starting…" page that switches to ``target`` once the server answers."""
+    path = data_dir() / "starting.html"
+    path.write_text(_SPLASH.replace("__TARGET__", json.dumps(target)), encoding="utf-8")
+    return path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Open the SingleStore Workspace in a browser window.")
     parser.add_argument("--database", help="database to start in")
-    parser.add_argument("--view", default="sql", choices=["sql", "notebook", "schema", "pipelines", "cluster"])
+    parser.add_argument("--view", default="sql", choices=["sql", "notebook", "schema", "pipelines", "cluster", "connections"])
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--browser", action="store_true", help="open in the default browser instead of an Edge app window")
     parser.add_argument("--no-open", action="store_true", help="start the server and print the URL, without opening a window")
@@ -119,27 +172,35 @@ def main() -> None:
     if state:
         _stop(state)  # running an older version of the code: replace it
 
+    # Start-up work runs in parallel: the window opens at once on a "Starting…"
+    # page, the database connections open in the background, and the server
+    # code loads meanwhile (the slowest part: the MCP SDK). The page switches
+    # to the workspace as soon as the server answers.
+    token = secrets.token_urlsafe(24)
+    port = _free_port(opts.port)
+    state = {"port": port, "token": token, "pid": os.getpid(), "build": build}
+    if opts.no_open:
+        pass
+    else:
+        _open_window(_splash(_workspace_url(state, args)).as_uri(), opts.browser)
+    threading.Thread(target=_warm_database, name="db-warm-early", daemon=True).start()
+
     # Importing the server registers every tool and app page; no MCP client needed.
     from .apps.browser_view import BrowserView
-    from .db import db
     from .server_impl import mcp
 
-    db.warm()
-
-    token = secrets.token_urlsafe(24)
     try:
-        view = BrowserView(mcp, port=opts.port, token=token)
-        url = view.url("sql_editor", {})  # starts the HTTP server
-    except OSError:  # port taken by something else: use any free port
+        view = BrowserView(mcp, port=port, token=token)
+        view.url("sql_editor", {})  # starts the HTTP server
+    except OSError:  # the port was taken in the meantime: use any free port (the splash can't follow; reopen)
         view = BrowserView(mcp, port=0, token=token)
-        url = view.url("sql_editor", {})
+        state["port"] = urllib.parse.urlsplit(view.url("sql_editor", {})).port
+        if not opts.no_open:
+            _open_window(_workspace_url(state, args), opts.browser)
     view.allow_shutdown = True
-    state = {"port": urllib.parse.urlsplit(url).port, "token": token, "pid": os.getpid(), "build": build}
     _state_file().write_text(json.dumps(state), encoding="utf-8")
     if opts.no_open:
         print(_workspace_url(state, args), flush=True)
-    else:
-        _open_window(_workspace_url(state, args), opts.browser)
 
     try:
         while time.time() - view.last_activity < IDLE_SHUTDOWN_SECONDS and not view.shutdown_requested:

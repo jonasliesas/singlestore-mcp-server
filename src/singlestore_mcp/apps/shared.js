@@ -102,6 +102,7 @@ window.addEventListener("message", (ev) => {
   const msg = ev.data;
   if (msg?.type === "s2-visibility") embeddedHidden = Boolean(msg.hidden);
   else if (msg?.type === "s2-set-sql") window.dispatchEvent(new CustomEvent("s2:set-sql", { detail: msg }));
+  else if (msg?.type === "s2-connection-changed") window.dispatchEvent(new CustomEvent("s2:connection-changed", { detail: msg }));
 });
 
 // Header button; null when the host doesn't offer fullscreen.

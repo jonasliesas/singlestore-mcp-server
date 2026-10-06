@@ -84,13 +84,57 @@ def _s2_connect():
         host=_s2_os.environ["SINGLESTORE_HOST"],
         port=int(_s2_os.environ.get("SINGLESTORE_PORT", "3306")),
         user=_s2_os.environ.get("SINGLESTORE_USER", "root"),
-        password=_s2_os.environ.get("SINGLESTORE_PASSWORD", ""),
+        password=_s2_password(),
         autocommit=True,
         ssl_disabled=_s2_os.environ.get("SINGLESTORE_SSL_DISABLED", "").lower() in ("1", "true", "yes"),
     )
     if _s2_os.environ.get("SINGLESTORE_DATABASE"):
         kw["database"] = _s2_os.environ["SINGLESTORE_DATABASE"]
+    kw.update(_s2_tls())
     return _s2.connect(**kw)
+
+
+def _s2_token_left(token):
+    """Seconds until a JWT expires (very large for passwords and tokens without exp)."""
+    import base64, time
+    try:
+        part = token.split(".")[1]
+        claims = _s2_json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+        return float(claims.get("exp", 1e18)) - time.time()
+    except Exception:
+        return 1e18
+
+
+def _s2_password():
+    """The password; for token logins (JWT / SSO / Entra ID) a fresh token, renewed through the MCP
+    server's Python (SINGLESTORE_MCP_TOKEN_CMD) when the one this kernel got is about to expire."""
+    pw = _s2_os.environ.get("SINGLESTORE_PASSWORD", "")
+    cmd = _s2_os.environ.get("SINGLESTORE_MCP_TOKEN_CMD")
+    if cmd and _s2_token_left(pw) < 300:
+        import subprocess, sys
+        try:
+            out = subprocess.run(_s2_json.loads(cmd), capture_output=True, text=True, timeout=60,
+                                 creationflags=0x08000000 if sys.platform == "win32" else 0)
+            if out.returncode == 0 and out.stdout.strip():
+                pw = _s2_os.environ["SINGLESTORE_PASSWORD"] = out.stdout.strip()
+        except Exception:
+            pass
+    return pw
+
+
+def _s2_tls():
+    """TLS certificate settings of the active connection (SINGLESTORE_SSL_*)."""
+    env, kw = _s2_os.environ, {}
+    if env.get("SINGLESTORE_SSL_DISABLED", "").lower() in ("1", "true", "yes"):
+        return kw
+    if env.get("SINGLESTORE_SSL_CA"):
+        kw["ssl_ca"] = env["SINGLESTORE_SSL_CA"]
+        kw["ssl_verify_cert"] = env.get("SINGLESTORE_SSL_VERIFY", "1") not in ("0", "false", "no")
+    if env.get("SINGLESTORE_SSL_CERT") and env.get("SINGLESTORE_SSL_KEY"):
+        kw["ssl_cert"], kw["ssl_key"] = env["SINGLESTORE_SSL_CERT"], env["SINGLESTORE_SSL_KEY"]
+    # SINGLESTORE_CREDENTIAL_TYPE=jwt needs nothing here: the token is the
+    # password, sent with mysql_clear_password over TLS.
+    return kw
 
 
 class _S2LazyConnection:
@@ -163,8 +207,11 @@ def _s2_url(database=None):
     host = _s2_os.environ.get("SINGLESTORE_HOST", "localhost")
     port = _s2_os.environ.get("SINGLESTORE_PORT", "3306")
     user = quote(_s2_os.environ.get("SINGLESTORE_USER", "root"), safe="")
-    pw = quote(_s2_os.environ.get("SINGLESTORE_PASSWORD", ""), safe="")
-    return "singlestoredb://%s:%s@%s:%s%s" % (user, pw, host, port, "/" + database if database else "")
+    pw = quote(_s2_password(), safe="")
+    from urllib.parse import urlencode
+    tls = _s2_tls()
+    query = "?" + urlencode({k: str(v) for k, v in tls.items()}) if tls else ""
+    return "singlestoredb://%s:%s@%s:%s%s%s" % (user, pw, host, port, "/" + database if database else "", query)
 
 
 def _s2_set_database(database):

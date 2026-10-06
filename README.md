@@ -25,6 +25,9 @@ self-managed clusters** alike.
 - **Slash commands**: `/singlestore-workspace`, `/singlestore-notebook`,
   `/singlestore-table-report`, `/singlestore-pipeline-health`, … and
   `/singlestore-restart` to reload the server without reconnecting.
+- **Several SingleStore connections**: save connections (passwords in the OS
+  credential store) and switch the active one from the workspace or by asking
+  Claude.
 - **Standalone workspace**: the same apps in their own window from a desktop
   shortcut, with no Claude subscription needed (only the Claude chat needs
   Claude); see [Using the workspace without Claude](#using-the-workspace-without-claude).
@@ -76,6 +79,8 @@ Other:
 - `browser_link`: a link that opens an app full-window in your browser
 - `sql_editor_reply`: send SQL or an answer into an open SQL Editor's chat
 - `restart_server`: reload the server's code and apps without reconnecting
+- `list_connections`, `use_connection`: see the saved SingleStore connections
+  and switch the active one
 
 ## Slash commands
 
@@ -123,6 +128,7 @@ left switches between its views:
 | **Schema** | [Schema Explorer](#schema-explorer-pipeline-monitor-cluster-monitor-query-grid): databases, tables, columns, keys |
 | **Pipelines** | [Pipeline Monitor](#schema-explorer-pipeline-monitor-cluster-monitor-query-grid): state, progress and errors of pipelines |
 | **Cluster** | [Cluster Monitor](#schema-explorer-pipeline-monitor-cluster-monitor-query-grid): CPU, memory, disk per node and running queries |
+| **Connect** (bottom of the rail) | [Connections](#connections): saved SingleStore connections and the active one |
 
 **Opening it**
 
@@ -237,6 +243,93 @@ left switches between its views:
 - The **Claude** button opens a chat panel that sees the notebook's cells and
   outputs, checks the database (read-only) and answers with SQL or Python
   you insert as a new cell, or use to replace the selected one.
+
+### Connections
+
+The **Connect** view (also the `connections_window` tool) manages saved
+SingleStore connections. **One connection is active at a time**: every view,
+Claude's tools and new notebook kernels use it. The rail's tooltip shows which
+one.
+
+- **+ New connection**: name, host, port, user, password, default database,
+  TLS on/off, or a full connection URL.
+- **TLS certificates**: a CA certificate (PEM) to verify the server, with
+  **Browse…** and **Use SingleStore Helios CA** (downloads SingleStore's
+  `singlestore_bundle.pem` to `~/.singlestore-mcp` once), *Verify the server's
+  certificate*, and optional client certificate + key. Helios requires the CA
+  (otherwise: "1251: No SSL detected"). Only the file paths are saved. For the
+  Environment variables connection use `SINGLESTORE_SSL_CA`,
+  `SINGLESTORE_SSL_CERT`, `SINGLESTORE_SSL_KEY` and `SINGLESTORE_SSL_VERIFY`. **Test** tries it before saving;
+  **Save and connect** makes it active right away.
+- **Authentication**: *Password*, *JWT token* (paste a token from your
+  identity provider, for users created `IDENTIFIED WITH authentication_jwt`;
+  stored like a password, and the card shows how long it stays valid) or
+  *Browser SSO (SingleStore Helios)*: **Sign in** opens SingleStore's sign-in
+  page in your browser, and the token is cached until it expires, or
+  *Microsoft Entra ID (SSO)*: no app registration needed, just your UPN as
+  the user (tenant, client ID and scope are optional). **Sign in** first uses the account you're
+  signed in to Windows / macOS with (on an Entra-joined laptop usually without
+  any prompt), otherwise Microsoft's sign-in page in the browser; after that,
+  tokens are renewed silently, also inside running notebook kernels. One
+  sign-in serves all views, notebook kernels and Claude. Token logins need
+  TLS (for Helios: *Use SingleStore Helios CA*). When a token expires, new
+  connections ask you to sign in again or paste a new token; for the
+  Environment variables connection set `SINGLESTORE_CREDENTIAL_TYPE=jwt` and
+  put the token in `SINGLESTORE_PASSWORD`.
+- Each saved connection has **Connect**, **Test**, **Edit** and **Delete**.
+- Your existing `SINGLESTORE_*` settings appear as the built-in, read-only
+  connection **Environment variables**, so nothing changes until you add more.
+- After a switch, the Schema, Pipelines and Cluster views reload and the SQL
+  Editor refreshes its databases. Open notebooks keep their kernel (and
+  variables) on the old connection until you restart it; they offer a
+  **Restart kernel now** button.
+- Claude can switch too: `list_connections` and `use_connection(name)`
+  (e.g. "switch to the test cluster").
+
+**Where things are stored:** the connection list (no passwords) in
+`~/.singlestore-mcp/connections.json`. Passwords go to the operating system's
+credential store via [`keyring`](https://pypi.org/project/keyring/): Windows
+Credential Manager, macOS Keychain or the Secret Service on Linux. Where there
+is none (e.g. a headless Linux server) they go to an encrypted file in
+`~/.singlestore-mcp` whose key only your user account can read. Passwords are
+never sent back to the app. Secrets too large for Windows Credential Manager
+(Entra ID tokens) go to `~/.singlestore-mcp/secrets-large.enc`, encrypted with
+a key kept in Credential Manager.
+
+**Setting up Microsoft Entra ID logins** (self-managed cluster). No app
+registration is needed: by default the sign-in uses Microsoft's Azure CLI
+public client (available in every tenant) and requests the *Azure OSS
+database* token (`https://ossrdbms-aad.database.windows.net`), the same token
+Azure Database for MySQL / PostgreSQL accept for Entra logins. Only the
+cluster needs setting up (its nodes must reach `login.microsoftonline.com`):
+
+```sql
+SET GLOBAL jwks_endpoint = 'https://login.microsoftonline.com/<tenant ID>/discovery/keys';
+SET GLOBAL jwks_username_field = 'upn';
+CREATE USER 'jonas@company.com'@'%' IDENTIFIED WITH authentication_jwt REQUIRE SSL;
+GRANT SELECT ON mydb.* TO 'jonas@company.com'@'%';
+```
+
+Then in Connections: **Microsoft Entra ID (SSO)**, your UPN as the user, TLS
+on → **Save** → **Sign in**. After a sign-in whose test fails, the card shows
+the exact `jwks_endpoint`, `jwks_username_field` and user the cluster needs.
+
+- Use the `/discovery/keys` (v1) key list: the database tokens are v1 tokens,
+  and the keys in the `/discovery/v2.0/keys` list carry a v2 issuer that
+  doesn't match them, so the cluster rejects the token.
+- The database user must be spelled exactly as in the token's `upn`, upper
+  and lower case included (e.g. `'Jane.Doe@company.com'@'%'`); after
+  **Sign in**, the connection takes the token's spelling.
+- `SET GLOBAL jwks_require_audience = 'https://ossrdbms-aad.database.windows.net';`
+  makes the cluster accept only tokens issued for database logins.
+- Entra's signing keys sign tokens for every app in the tenant, and SingleStore
+  maps tokens to users by the user-name claim only, so create database users
+  only for people who should have access. `upn` is only issued for verified
+  domains, which is why it's the default rather than `preferred_username`.
+- Some tenants block the Azure CLI app with conditional access. Then register
+  an app of your own (public client, redirect URIs `http://localhost` and
+  `ms-appx-web://Microsoft.AAD.BrokerPlugin/<client ID>`, an exposed API scope)
+  and enter its client ID; tokens then come for `api://<client ID>/.default`.
 
 ### Schema Explorer, Pipeline Monitor, Cluster Monitor, Query Grid
 
@@ -362,6 +455,40 @@ The SingleStore Workspace also runs as a **standalone desktop app**: a small
 local web server plus a browser window, talking directly to SingleStore. No
 Claude subscription, Claude app or MCP client is needed for it. Only the
 Claude chat panels need Claude.
+
+### Quick install (Windows, one command)
+
+Open PowerShell (or press Win+R) and run:
+
+```bash
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/jonasliesas/singlestore-mcp-server/main/install.ps1 | iex"
+```
+
+No administrator rights needed. [`install.ps1`](install.ps1):
+1. installs [uv](https://docs.astral.sh/uv/), which brings Python 3.12;
+2. downloads the program to `%USERPROFILE%\singlestore-workspace` (with git if
+   available, otherwise as a ZIP);
+3. installs the dependencies;
+4. creates a **SingleStore Workspace** shortcut on the desktop and in the Start
+   menu;
+5. opens the workspace. On the first start it opens on **Connections**, where
+   you add your cluster (password, JWT, Helios SSO or Microsoft Entra ID).
+
+Run the same command again to **update**. Options (pass them with
+`& ([scriptblock]::Create((irm <url>))) -Notebook -Database SASDP`, or run a
+downloaded `install.ps1` with them):
+
+| Option | What it does |
+|---|---|
+| `-Database SASDP` | database the shortcut opens in |
+| `-Notebook` | also install the notebook's Python environment now (about 150 MB) |
+| `-InstallDir <folder>` | install somewhere else |
+| `-Source <folder>` | install from a local copy of the project (share, USB stick), not from GitHub |
+| `-WithClaude` | also register the MCP server and skills with Claude Code, if installed |
+| `-NoLaunch` | don't open the workspace at the end |
+| `-Uninstall` | remove the program and shortcuts (keeps connections, files and notebooks) |
+
+The manual steps below do the same by hand.
 
 ### What works and what doesn't
 

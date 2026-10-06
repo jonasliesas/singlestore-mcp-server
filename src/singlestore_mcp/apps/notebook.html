@@ -992,6 +992,20 @@ function reportContext(extra = "") {
 }
 
 // ---------------------------------------------------------------- host wiring
+// The workspace switched the active connection. SQL cells, %sql and conn run in
+// the kernel, which keeps the old connection until it restarts (so variables
+// aren't lost without asking).
+window.addEventListener("s2:connection-changed", async (e) => {
+  await refreshDatabases({ force: true });
+  if (state.kernel.state === "stopped" || state.kernel.state === "dead") return;
+  envEl.hidden = false;
+  envEl.replaceChildren(h("strong", {}, `Active connection is now ${e.detail.name}`),
+    h("div", {}, "This notebook's kernel still uses the previous connection. Restart it to run SQL, %sql and conn against the new one (variables are cleared)."),
+    h("div", { style: { marginTop: "8px" } },
+      h("button", { class: "s2-btn primary", onclick: () => { envEl.hidden = true; kernelControl("restart"); } }, "Restart kernel now"),
+      h("button", { class: "s2-btn ghost", onclick: () => { envEl.hidden = true; } }, "Later")));
+});
+
 window.addEventListener("message", (ev) => {
   if (ev.source === window.parent && ev.data?.type === "s2-close") {
     S2.callTool("notebook_kernel_control", { notebook_id: notebookId, action: "shutdown" }).catch(() => {});

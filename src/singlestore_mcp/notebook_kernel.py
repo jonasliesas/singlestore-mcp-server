@@ -42,6 +42,19 @@ _BRIDGE = Path(__file__).with_name("notebook_bridge.py")
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
+def _uv() -> str | None:
+    """uv: on PATH, or where its installers put it (a shortcut started before the next sign-in
+    doesn't see a PATH change made by a fresh uv install)."""
+    found = shutil.which("uv")
+    if found:
+        return found
+    exe = "uv.exe" if os.name == "nt" else "uv"
+    candidates = [Path.home() / ".local" / "bin" / exe, Path.home() / ".cargo" / "bin" / exe]
+    if os.environ.get("LOCALAPPDATA"):
+        candidates.append(Path(os.environ["LOCALAPPDATA"]) / "Microsoft" / "WinGet" / "Links" / exe)
+    return next((str(c) for c in candidates if c.exists()), None)
+
+
 def _env_dir() -> Path:
     return data_dir() / "notebook-env"
 
@@ -68,7 +81,7 @@ def environment_status() -> dict[str, Any]:
     if py and state not in ("installing",):
         return {"state": "ready", "python": str(py), "packages": PACKAGES, "missing": _missing_packages(), "log": log}
     return {"state": "missing" if state == "idle" else state, "log": log, "packages": PACKAGES,
-            "folder": str(_env_dir()), "uv": bool(shutil.which("uv"))}
+            "folder": str(_env_dir()), "uv": bool(_uv())}
 
 
 def _stamp() -> Path:
@@ -154,7 +167,7 @@ def _log(line: str) -> None:
 
 def _install(extra: list[str] | None = None) -> None:
     """Create/complete the environment, or (``extra``) install the user's packages into it."""
-    uv = shutil.which("uv")
+    uv = _uv()
     env = _env_dir()
     try:
         if not uv:
@@ -196,7 +209,16 @@ def _kernel_env(python: Path) -> dict[str, str]:
     """Environment for the kernel: the notebook environment comes first on PATH,
     as if activated, so `!pip install`, `!pip3`, `!python` and `%pip` all use
     the kernel's own Python instead of whatever Python is first on the system PATH."""
-    env = dict(os.environ)
+    from . import connections
+
+    # SINGLESTORE_* of the active saved connection (conn, %sql, connection_url use them).
+    env = connections.apply_env(dict(os.environ))
+    active = connections.active()
+    if active and active.auth != "password" and not active.builtin:
+        # Tokens expire (Entra ID: about an hour); the kernel asks the server's Python for a fresh one.
+        env["SINGLESTORE_MCP_TOKEN_CMD"] = json.dumps([sys.executable, "-m", "singlestore_mcp.connections", "token", active.name])
+    else:
+        env.pop("SINGLESTORE_MCP_TOKEN_CMD", None)
     scripts = python.parent
     env_root = scripts.parent
     env["PATH"] = str(scripts) + os.pathsep + env.get("PATH", "")
@@ -456,6 +478,15 @@ import atexit  # noqa: E402
 
 atexit.register(close_all)
 
-if __name__ == "__main__":  # pragma: no cover - manual check
-    print(json.dumps(environment_status(), indent=2))
-    sys.exit(0)
+if __name__ == "__main__":  # pragma: no cover
+    # No argument: show the notebook environment's status. "setup": create it now, with progress
+    # (the installer's -Notebook option; the app's Install button does the same in the background).
+    if sys.argv[1:] != ["setup"]:
+        print(json.dumps(environment_status(), indent=2))
+        sys.exit(0)
+    if kernel_python() and not _missing_packages():
+        print("The notebook environment is already installed:", kernel_python())
+        sys.exit(0)
+    _log = lambda line: print(line.rstrip()[:300], flush=True)  # noqa: E731 - print progress instead of keeping it
+    _install()
+    sys.exit(0 if kernel_python() else 1)

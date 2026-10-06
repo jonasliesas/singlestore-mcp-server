@@ -9,6 +9,7 @@ port, user and password.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import threading
@@ -108,6 +109,7 @@ def _is_connection_error(exc: BaseException) -> bool:
 # Statements that change session state behind our back (USE, SET ...).
 _SESSION_CHANGE = re.compile(r"^\s*(USE|SET)\b", re.IGNORECASE)
 _UNKNOWN = object()
+_READ_ONLY = re.compile(r"^\s*(SELECT|SHOW|DESC|DESCRIBE|EXPLAIN|PROFILE|WITH)\b", re.IGNORECASE)
 
 
 class _PooledConnection:
@@ -135,20 +137,46 @@ class Database:
         self._max = max(1, int(os.environ.get("SINGLESTORE_MCP_POOL_SIZE", "8")))
         self._idle: list[_PooledConnection] = []
         self._open = 0
+        self._generation = 0
+        self._warming = 0  # background connects in flight (warm)
         self._cond = threading.Condition()
         self._default_db: str | None = None
 
     def _connect(self) -> _PooledConnection:
-        settings = ConnectionSettings.from_env()
-        self._default_db = settings.database
-        conn = s2.connect(**settings.connect_kwargs(), autocommit=True)
-        return _PooledConnection(conn, settings.database)
+        # The active saved connection (connections.py); the SINGLESTORE_* settings
+        # are its "Environment variables" profile.
+        from . import connections
 
-    def _acquire(self) -> _PooledConnection:
+        profile = connections.active()
+        if profile is None:
+            ConnectionSettings.from_env()  # raises the "set SINGLESTORE_HOST…" guidance
+        generation = self._generation
+        self._default_db = profile.database
+        conn = s2.connect(**connections.connect_kwargs(profile), autocommit=True)
+        pc = _PooledConnection(conn, profile.database)
+        pc.generation = generation
+        return pc
+
+    def reset(self) -> None:
+        """Drop every connection (after switching the active connection); busy ones close when released."""
+        with self._cond:
+            self._generation += 1
+            idle, self._idle = self._idle, []
+            self._open -= len(idle)
+            self._cond.notify_all()
+        for pc in idle:
+            self._discard(pc)
+
+    def _acquire(self, warming: bool = False) -> _PooledConnection:
         with self._cond:
             while True:
                 if self._idle:
                     return self._idle.pop()
+                # Connections are being opened in the background (warm): wait for
+                # the first instead of paying for yet another connect.
+                if not warming and self._warming > 0:
+                    self._cond.wait(timeout=0.5)
+                    continue
                 if self._open < self._max:
                     self._open += 1
                     break
@@ -162,12 +190,15 @@ class Database:
             raise
 
     def _release(self, pc: _PooledConnection | None) -> None:
+        stale = pc is not None and getattr(pc, "generation", self._generation) != self._generation
         with self._cond:
-            if pc is None:
+            if pc is None or stale:
                 self._open -= 1
             else:
                 self._idle.append(pc)
             self._cond.notify()
+        if stale:
+            self._discard(pc)
 
     @staticmethod
     def _discard(pc: _PooledConnection) -> None:
@@ -182,11 +213,18 @@ class Database:
 
         def run() -> None:
             try:
-                self._release(self._acquire())
+                self._release(self._acquire(warming=True))
             except Exception:  # noqa: BLE001 - the first real call reports the problem
                 pass
+            finally:
+                with self._cond:
+                    self._warming -= 1
+                    self._cond.notify_all()
 
-        for _ in range(min(connections, self._max)):
+        n = min(connections, self._max)
+        with self._cond:
+            self._warming += n
+        for _ in range(n):
             threading.Thread(target=run, name="db-warm", daemon=True).start()
 
     def execute(
@@ -240,6 +278,15 @@ class Database:
                         columns = []
                 finally:
                     cur.close()
+            except json.JSONDecodeError:
+                # The driver couldn't decode a JSON column of the result (e.g. empty JSON values in
+                # information_schema.USERS). The connection is mid-result: drop it, and for a read-only
+                # statement read the result again with JSON left as text.
+                self._discard(pc)
+                self._release(None)
+                if not _READ_ONLY.match(sql):
+                    raise
+                return self._execute_json_as_text(sql, params, database, fetch, limit)
             except (s2.Error, OSError) as exc:
                 if _is_connection_error(exc):
                     self._discard(pc)
@@ -252,6 +299,27 @@ class Database:
             self._release(pc)
             return columns, rows, rowcount
         raise AssertionError("unreachable")
+
+    def _execute_json_as_text(self, sql: str, params: tuple[Any, ...] | None, database: str | None, fetch: bool,
+                              limit: int | None) -> tuple[list[str], list[dict[str, Any]], int]:
+        """``execute`` on a one-off connection that returns JSON columns as text (no decoding)."""
+        from . import connections
+
+        profile = connections.active()
+        conn = s2.connect(**connections.connect_kwargs(profile), autocommit=True, parse_json=False)
+        try:
+            cur = conn.cursor()
+            target_db = database or self._default_db
+            if target_db:
+                cur.execute(f"USE {quote_identifier(target_db)}")
+            if limit is not None:
+                cur.execute(f"SET SESSION sql_select_limit = {limit}")
+            cur.execute(sql, params or ())
+            if fetch and cur.description is not None:
+                return [d[0] for d in cur.description], cur.fetchall(), cur.rowcount
+            return [], [], cur.rowcount
+        finally:
+            conn.close()
 
     def close(self) -> None:
         with self._cond:
@@ -290,3 +358,12 @@ class Database:
 
 
 db = Database()
+
+
+def _on_connection_change() -> None:
+    db.reset()
+
+
+from . import connections as _connections  # noqa: E402
+
+_connections.on_change(_on_connection_change)

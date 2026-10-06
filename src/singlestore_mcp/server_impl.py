@@ -359,6 +359,40 @@ def sql_editor_reply(editor_id: str, message: str) -> dict[str, Any]:
     return {"delivered": True, "editor_id": editor_id, "seq": seq}
 
 
+# --------------------------------------------------------------------------
+# Connections (saved SingleStore connections; one is active)
+# --------------------------------------------------------------------------
+
+
+@tool(annotations=ToolAnnotations(readOnlyHint=True))
+def list_connections() -> dict[str, Any]:
+    """List the saved SingleStore connections (no passwords) and which one is active.
+
+    All tools and apps use the active connection. The user manages them in the
+    Connections window (connections_window tool, or the workspace's Connect view).
+    """
+    from .apps.connections import _state
+
+    return _state()
+
+
+@tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
+def use_connection(name: str) -> dict[str, Any]:
+    """Switch the active SingleStore connection; all tools, apps and new notebook kernels then use it.
+
+    Args:
+        name: Name of a saved connection (see list_connections).
+    """
+    from . import connections
+    from .apps.connections import _state
+
+    p = connections.activate(name)
+    check = connections.test(name=name)
+    message = (f"Now connected to {p.name} (SingleStore {check['version']} as {check['user']})." if check["ok"]
+               else f"Switched to {p.name}, but the connection test failed: {check['error']}")
+    return {"message": message, "test": check, **_state()}
+
+
 @tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True))
 def restart_server() -> dict[str, Any]:
     """Restart the SingleStore MCP server so code and app changes load, without reconnecting.

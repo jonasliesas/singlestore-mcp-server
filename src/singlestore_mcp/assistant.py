@@ -32,6 +32,7 @@ import time
 import uuid
 from collections import deque
 from pathlib import Path
+from . import connections as _connections
 from .paths import data_dir
 from typing import Any, Callable
 
@@ -214,6 +215,7 @@ class _Worker:
             args, cwd=workdir, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace",
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            env=_connections.apply_env(dict(os.environ)),  # its read-only server uses the active connection
         )
         self.last_used = time.time()
         self.job: _Job | None = None
@@ -310,6 +312,18 @@ def _start_reaper() -> None:
                         _workers.pop(eid, None)
 
     threading.Thread(target=reap, daemon=True).start()
+
+
+def _on_connection_change() -> None:
+    """New active connection: idle assistant processes restart on the next question."""
+    with _lock:
+        for eid, w in list(_workers.items()):
+            if w.job is None:
+                w.close()
+                _workers.pop(eid, None)
+
+
+_connections.on_change(_on_connection_change)
 
 
 @atexit.register
