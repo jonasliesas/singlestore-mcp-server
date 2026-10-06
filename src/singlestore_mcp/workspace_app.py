@@ -28,6 +28,8 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
+from .paths import data_dir
+
 DEFAULT_PORT = 8790
 IDLE_SHUTDOWN_SECONDS = 300
 _EDGE_PATHS = (
@@ -36,10 +38,41 @@ _EDGE_PATHS = (
 )
 
 
+def code_fingerprint() -> str:
+    """Changes whenever a file of this package changes (so a running server can be replaced)."""
+    import hashlib
+
+    h = hashlib.sha1()
+    root = Path(__file__).parent
+    for p in sorted(root.rglob("*")):
+        if p.suffix in (".py", ".html", ".js", ".css", ".json", ".md") and "__pycache__" not in p.parts:
+            st = p.stat()
+            h.update(f"{p.relative_to(root)}:{st.st_mtime_ns}:{st.st_size}".encode())
+    return h.hexdigest()[:12]
+
+
+def _stop(state: dict) -> None:
+    """Stop a running workspace server (outdated code): ask it, then end the process."""
+    base = f"http://127.0.0.1:{state['port']}/{state['token']}"
+    try:
+        urllib.request.urlopen(f"{base}/shutdown", timeout=2).read()
+    except OSError:
+        pass
+    for _ in range(30):
+        time.sleep(0.2)
+        try:
+            urllib.request.urlopen(f"{base}/ping", timeout=1)
+        except OSError:
+            return
+    try:
+        os.kill(int(state["pid"]), 9)
+    except (OSError, ValueError, KeyError):
+        pass
+    time.sleep(0.5)
+
+
 def _state_file() -> Path:
-    base = Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()) / "singlestore-mcp"
-    base.mkdir(parents=True, exist_ok=True)
-    return base / "workspace.json"
+    return data_dir() / "workspace.json"
 
 
 def _running() -> dict | None:
@@ -77,11 +110,14 @@ def main() -> None:
     opts = parser.parse_args()
     args = {k: v for k, v in {"database": opts.database, "view": None if opts.view == "sql" else opts.view}.items() if v}
 
+    build = code_fingerprint()
     state = _running()
-    if state:
+    if state and state.get("build") == build:
         if not opts.no_open:
             _open_window(_workspace_url(state, args), opts.browser)
         return
+    if state:
+        _stop(state)  # running an older version of the code: replace it
 
     # Importing the server registers every tool and app page; no MCP client needed.
     from .apps.browser_view import BrowserView
@@ -97,7 +133,8 @@ def main() -> None:
     except OSError:  # port taken by something else: use any free port
         view = BrowserView(mcp, port=0, token=token)
         url = view.url("sql_editor", {})
-    state = {"port": urllib.parse.urlsplit(url).port, "token": token, "pid": os.getpid()}
+    view.allow_shutdown = True
+    state = {"port": urllib.parse.urlsplit(url).port, "token": token, "pid": os.getpid(), "build": build}
     _state_file().write_text(json.dumps(state), encoding="utf-8")
     if opts.no_open:
         print(_workspace_url(state, args), flush=True)
@@ -105,8 +142,8 @@ def main() -> None:
         _open_window(_workspace_url(state, args), opts.browser)
 
     try:
-        while time.time() - view.last_activity < IDLE_SHUTDOWN_SECONDS:
-            time.sleep(10)
+        while time.time() - view.last_activity < IDLE_SHUTDOWN_SECONDS and not view.shutdown_requested:
+            time.sleep(1)
     finally:
         try:
             if json.loads(_state_file().read_text(encoding="utf-8")).get("pid") == os.getpid():

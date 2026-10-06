@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
+import socket
 import threading
 import time
 import urllib.parse
@@ -34,12 +35,27 @@ _EXTRA_TOOLS = {"start_pipeline", "stop_pipeline", "test_pipeline", "browser_lin
 _MAX_BODY = 1_000_000
 
 
+class _ExclusiveHTTPServer(ThreadingHTTPServer):
+    """Owns its port exclusively. Python's default SO_REUSEADDR lets two servers
+    bind the same port on Windows, so a stale standalone workspace would keep
+    answering requests meant for the new one."""
+
+    allow_reuse_address = False
+
+    def server_bind(self) -> None:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 class BrowserView:
     def __init__(self, mcp: Any, port: int = 0, token: str | None = None) -> None:
         self._mcp = mcp
         self._port = port
         self._token = token or secrets.token_urlsafe(24)
         self.last_activity = time.time()  # any request; open pages ping every 30 s
+        self.allow_shutdown = False        # standalone workspace: /shutdown stops it
+        self.shutdown_requested = False
         self._lock = threading.Lock()
         self._httpd: ThreadingHTTPServer | None = None
         self._tools: dict[str, dict[str, Any]] = {}
@@ -61,7 +77,7 @@ class BrowserView:
                 d = t.model_dump(by_alias=True, exclude_none=True, mode="json")
                 if "ui" in d.get("_meta", {}) or t.name in _EXTRA_TOOLS:
                     self._tools[t.name] = d
-            self._httpd = ThreadingHTTPServer(("127.0.0.1", self._port), self._handler())
+            self._httpd = _ExclusiveHTTPServer(("127.0.0.1", self._port), self._handler())
             self._httpd.daemon_threads = True
             threading.Thread(target=self._httpd.serve_forever, name="browser-view", daemon=True).start()
 
@@ -114,6 +130,9 @@ class BrowserView:
                 if route == "":
                     return self._send(200, _HOST_PAGE.read_bytes(), "text/html; charset=utf-8")
                 if route == "ping":
+                    return self._json(200, {"ok": True})
+                if route == "shutdown" and view.allow_shutdown:
+                    view.shutdown_requested = True
                     return self._json(200, {"ok": True})
                 if route == "tool":
                     tool = view._tools.get(query.get("name", [""])[0])

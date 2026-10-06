@@ -1,0 +1,1025 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Notebook</title>
+<!--S2:HEAD-->
+<!--S2:VENDOR:codemirror-bundle.js-->
+<!--S2:VENDOR:singlestore_functions.json-->
+<style>
+  body { padding: 10px 12px; }
+  .nb-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .nb-head select { max-width: 190px; }
+  .nb-file { font-size: var(--s2-fs-xs); color: var(--s2-text-2); max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nb-file .dirty { color: var(--s2-warn); margin-left: 3px; }
+  .nb-kernel { display: inline-flex; align-items: center; gap: 5px; font-size: var(--s2-fs-xs); color: var(--s2-text-2); padding: 2px 8px; border-radius: 999px; background: var(--s2-bg-2); }
+  .nb-kernel .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--s2-text-3); }
+  .nb-kernel.idle .dot { background: var(--s2-ok); }
+  .nb-kernel.busy .dot { background: var(--s2-warn); animation: nbpulse 1s infinite; }
+  .nb-kernel.error .dot, .nb-kernel.dead .dot { background: var(--s2-err); }
+  @keyframes nbpulse { 50% { opacity: .35; } }
+  .nb-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; height: 680px; }
+  .nb-layout.chat-open { grid-template-columns: minmax(0, 1fr) 340px; }
+  html[data-display-mode="fullscreen"] .nb-layout { height: calc(100vh - 64px); }
+  @media (max-width: 760px) { .nb-layout.chat-open { grid-template-columns: minmax(0, 1fr); } }
+  .nb-cells { overflow: auto; min-height: 0; padding: 2px 4px 80px 0; }
+  .nb-files { border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); padding: 8px 10px; margin-bottom: 8px; background: var(--s2-bg-2); font-size: var(--s2-fs-xs); }
+  .nb-files[hidden] { display: none; }
+  .nb-files .row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .nb-files .row + .row, .nb-files .list + .row { margin-top: 6px; }
+  .nb-files .list { margin-top: 6px; max-height: 190px; overflow: auto; border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius-sm); background: var(--s2-bg); }
+  .nb-files .item { display: flex; gap: 10px; width: 100%; border: 0; background: none; text-align: left; padding: 4px 8px; cursor: pointer; font: inherit; color: inherit; }
+  .nb-files .item:hover { background: var(--s2-info-bg); }
+  .nb-files .item .n { flex: 1; font-family: var(--s2-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nb-files .item .m { color: var(--s2-text-3); white-space: nowrap; }
+  .nb-files .warn { color: var(--s2-warn); }
+  .nb-pkgs .list { max-height: 260px; }
+  .nb-pkgs .pkg { display: grid; grid-template-columns: minmax(140px, 220px) 110px minmax(0, 1fr); gap: 10px; padding: 3px 8px; border-bottom: 1px solid var(--s2-border-2); }
+  .nb-pkgs .pkg .n { font-family: var(--s2-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nb-pkgs .pkg .v { font-family: var(--s2-mono); color: var(--s2-text-2); }
+  .nb-pkgs .pkg .d { color: var(--s2-text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nb-pkgs .core { font-size: 10px; font-weight: 600; margin-left: 6px; padding: 0 4px; border-radius: 3px; background: var(--s2-info-bg); color: var(--s2-info); }
+  .nb-pkgs pre { max-height: 140px; overflow: auto; background: var(--s2-bg); padding: 6px 8px; border-radius: var(--s2-radius-sm); margin: 6px 0 0; font-size: 11px; }
+  .nb-files .s2-input { min-width: 220px; }
+
+  .nb-env { border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); padding: 14px 16px; margin-bottom: 10px; background: var(--s2-bg-2); font-size: var(--s2-fs-xs); line-height: 1.6; }
+  .nb-env pre { max-height: 140px; overflow: auto; background: var(--s2-bg); padding: 6px 8px; border-radius: var(--s2-radius-sm); margin: 8px 0 0; font-size: 11px; }
+
+  .cell { display: grid; grid-template-columns: 54px minmax(0, 1fr); gap: 6px; margin-bottom: 10px; }
+  .cell .gutter { text-align: right; font-family: var(--s2-mono); font-size: 11px; color: var(--s2-text-3); padding-top: 7px; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+  .cell .gutter .badge { font-family: var(--s2-font); font-size: 10px; font-weight: 600; letter-spacing: .03em; padding: 0 5px; border-radius: 4px; background: var(--s2-bg-2); color: var(--s2-text-2); }
+  .cell.sql .gutter .badge { background: var(--s2-info-bg); color: var(--s2-info); }
+  .cell.python .gutter .badge { background: color-mix(in srgb, var(--s2-ok) 15%, transparent); color: var(--s2-ok); }
+  .cell .gutter .run { border: 0; background: none; cursor: pointer; color: var(--s2-text-2); font-size: 13px; padding: 0 2px; }
+  .cell .gutter .run:hover { color: var(--s2-info); }
+  .cell .body { min-width: 0; border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); background: var(--s2-bg); }
+  .cell.active .body { border-color: var(--s2-info); box-shadow: 0 0 0 1px color-mix(in srgb, var(--s2-info) 35%, transparent); }
+  .cell .bar { display: flex; align-items: center; gap: 4px; padding: 3px 6px; border-bottom: 1px solid var(--s2-border-2); background: var(--s2-bg-2); font-size: 11px; color: var(--s2-text-2); border-radius: var(--s2-radius) var(--s2-radius) 0 0; flex-wrap: wrap; }
+  .cell .bar select, .cell .bar input { font-size: 11px; padding: 1px 4px; height: auto; }
+  .cell .bar input { width: 110px; font-family: var(--s2-mono); }
+  .cell .bar .s2-btn { font-size: 11px; padding: 1px 6px; }
+  .cell .bar .spacer { flex: 1; }
+  .cell .editor .cm-editor { max-height: 520px; }
+  .cell .editor .cm-editor.cm-focused { outline: none; }
+  .cell .md-view { padding: 6px 12px; font-size: var(--s2-fs); line-height: 1.55; cursor: text; min-height: 28px; }
+  .cell .md-view h1, .cell .md-view h2, .cell .md-view h3 { margin: 6px 0 4px; line-height: 1.25; }
+  .cell .md-view h1 { font-size: 20px; } .cell .md-view h2 { font-size: 16px; } .cell .md-view h3 { font-size: 14px; }
+  .cell .md-view p { margin: 4px 0; } .cell .md-view ul, .cell .md-view ol { margin: 4px 0; padding-left: 22px; }
+  .cell .md-view code { font-family: var(--s2-mono); font-size: 12px; background: var(--s2-bg-2); padding: 0 3px; border-radius: 3px; }
+  .cell .md-view .empty { color: var(--s2-text-3); font-style: italic; }
+  .cell .md-view img { max-width: 100%; }
+  .cell .md-view tt { font-family: var(--s2-mono); font-size: 12px; }
+  /* Jupyter / SingleStore Notebooks alert boxes (Bootstrap classes) */
+  .cell .md-view .alert { padding: 8px 12px; margin: 6px 0; border-radius: 6px; border: 1px solid transparent; display: flex; gap: 10px; align-items: flex-start; }
+  .cell .md-view .alert p { margin: 2px 0; }
+  .cell .md-view .alert > b.fa:empty::before { content: "!"; display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; font-size: 12px; font-weight: 700; color: #fff; background: var(--alert-c, var(--s2-text-2)); }
+  .cell .md-view .alert-warning { background: var(--s2-warn-bg); border-color: color-mix(in srgb, var(--s2-warn) 35%, transparent); }
+  .cell .md-view .alert-warning { --alert-c: var(--s2-warn); }
+  .cell .md-view .alert-info { background: var(--s2-info-bg); border-color: color-mix(in srgb, var(--s2-info) 35%, transparent); }
+  .cell .md-view .alert-info { --alert-c: var(--s2-info); }
+  .cell .md-view .alert-success { background: var(--s2-ok-bg); border-color: color-mix(in srgb, var(--s2-ok) 35%, transparent); }
+  .cell .md-view .alert-success { --alert-c: var(--s2-ok); }
+  .cell .md-view .alert-danger { background: var(--s2-err-bg); border-color: color-mix(in srgb, var(--s2-err) 35%, transparent); }
+  .cell .md-view .alert-danger { --alert-c: var(--s2-err); }
+  .cell .md-view .md-html > :first-child { margin-top: 0; }
+  .cell.markdown .body { border-style: dashed; }
+  .cell.markdown.rendered .body { border-color: transparent; background: transparent; }
+  .cell.markdown.rendered:hover .body { border-color: var(--s2-border-2); }
+  .cell .outputs { border-top: 1px solid var(--s2-border-2); padding: 6px 8px; display: flex; flex-direction: column; gap: 6px; max-height: 460px; overflow: auto; }
+  .cell .outputs:empty { display: none; }
+  .cell .outputs pre { margin: 0; font-family: var(--s2-mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+  .cell .outputs pre.stderr { color: var(--s2-warn); }
+  .cell .outputs .err { background: var(--s2-err-bg); color: var(--s2-text); padding: 6px 8px; border-radius: var(--s2-radius-sm); }
+  .cell .outputs .err strong { color: var(--s2-err); }
+  .cell .outputs img { max-width: 100%; height: auto; align-self: flex-start; background: #fff; border-radius: 4px; }
+  .cell .outputs .tbl-head { font-size: 11px; color: var(--s2-text-2); }
+  .cell .outputs .s2-table-wrap { max-height: 300px; }
+  .cell .outputs .html-out { font-size: 12px; overflow: auto; }
+  .cell .outputs .html-out table { border-collapse: collapse; } .cell .outputs .html-out td, .cell .outputs .html-out th { border: 1px solid var(--s2-border-2); padding: 2px 6px; }
+  .cell .status { font-size: 11px; color: var(--s2-text-3); padding: 3px 8px; border-top: 1px solid var(--s2-border-2); display: flex; gap: 8px; align-items: center; }
+  .cell .status:empty { display: none; }
+  .cell .confirm { margin: 6px 8px; padding: 8px 10px; border-radius: var(--s2-radius-sm); background: var(--s2-warn-bg); font-size: var(--s2-fs-xs); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .nb-add { display: flex; gap: 6px; justify-content: center; margin: 6px 0 4px 60px; opacity: .55; }
+  .nb-add:hover, .nb-add:focus-within { opacity: 1; }
+  .nb-add .s2-btn { font-size: 11px; padding: 2px 8px; }
+
+  .nb-chat { display: flex; flex-direction: column; min-height: 0; border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); overflow: hidden; }
+  .nb-chat[hidden] { display: none; }
+  .nb-chat .top { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--s2-border-2); background: var(--s2-bg-2); font-size: var(--s2-fs-xs); }
+  .nb-chat .top strong { flex: 1; }
+  .nb-chat .top select { font-size: 11px; padding: 1px 4px; height: auto; }
+  .nb-msgs { flex: 1; overflow: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+  .nb-msg { max-width: 96%; font-size: var(--s2-fs-xs); line-height: 1.5; }
+  .nb-msg.you { align-self: flex-end; background: var(--s2-info-bg); border-radius: 10px 10px 2px 10px; padding: 6px 10px; white-space: pre-wrap; }
+  .nb-msg.claude { align-self: flex-start; background: var(--s2-bg-2); border-radius: 10px 10px 10px 2px; padding: 6px 10px; width: 96%; }
+  .nb-msg.error { align-self: flex-start; background: var(--s2-err-bg); border-radius: 10px; padding: 6px 10px; width: 96%; }
+  .nb-msg.note { align-self: center; color: var(--s2-text-3); font-style: italic; }
+  .nb-msg .who { font-size: 11px; color: var(--s2-text-3); margin-bottom: 2px; }
+  .nb-msg p { margin: 0 0 4px; white-space: pre-wrap; }
+  .nb-msg p code { font-family: var(--s2-mono); font-size: 11.5px; background: var(--s2-bg-3); border-radius: 3px; padding: 0 3px; }
+  .nb-code { margin: 6px 0; border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius-sm); overflow: hidden; background: var(--s2-bg); }
+  .nb-code pre { margin: 0; padding: 7px 9px; font-family: var(--s2-mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; }
+  .nb-code .cbar { display: flex; gap: 4px; padding: 4px 6px; border-top: 1px solid var(--s2-border-2); background: var(--s2-bg-2); }
+  .nb-code .cbar .lang { font-size: 10px; color: var(--s2-text-3); align-self: center; margin-right: auto; text-transform: uppercase; }
+  .nb-ask { display: flex; gap: 6px; align-items: flex-end; padding: 6px 8px; border-top: 1px solid var(--s2-border-2); }
+  .nb-ask textarea { flex: 1; resize: none; min-height: 34px; max-height: 120px; font-size: var(--s2-fs-xs); }
+  .nb-chat .hint { font-size: 11px; color: var(--s2-text-3); padding: 0 8px 6px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="module">
+const { h, fmt } = S2;
+const CM = globalThis.CM;
+const FUNCTIONS = JSON.parse(document.getElementById("vendor-singlestore_functions")?.textContent || "[]");
+const SYSTEM = new Set(["information_schema", "cluster", "memsql"]);
+const TABLE_MIME = "application/vnd.s2.table+json";
+const rid = (p) => p + Array.from(crypto.getRandomValues(new Uint8Array(4)), (b) => b.toString(16).padStart(2, "0")).join("");
+const notebookId = rid("n-");
+const cleanError = (e) => new Error(String(e?.message ?? e).replace(/^Error executing tool [\w-]+:\s*/, ""));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const state = {
+  env: null, kernel: { state: "stopped" }, databases: [], database: null, schema: null,
+  file: { name: null, folder: null, savedJson: "" }, cells: [], active: null, chatOpen: false,
+  runningAll: false,
+};
+
+// ---------------------------------------------------------------- CodeMirror setup (matches the SQL Editor)
+const SINGLESTORE_KEYWORDS = "pipeline pipelines extractor batch_interval shard sort columnstore rowstore reference link links stage aggregator aggregators leaf leaves partition partitions rebalance attach detach snapshot extension extensions resource_pool workload infer inferred offsets earliest latest skip parser vector autostats sparse unenforced global temporary echo";
+const dialect = CM.MySQL?.spec ? CM.SQLDialect.define({ ...CM.MySQL.spec, keywords: `${CM.MySQL.spec.keywords} ${SINGLESTORE_KEYWORDS}` }) : CM.MySQL;
+const theme = CM.EditorView.theme({
+  "&": { fontSize: "13px", backgroundColor: "var(--s2-bg)", color: "var(--s2-text)", borderRadius: "0 0 var(--s2-radius) var(--s2-radius)" },
+  ".cm-scroller": { fontFamily: "var(--s2-mono)", lineHeight: "1.5" },
+  ".cm-content": { caretColor: "var(--s2-text)", padding: "4px 0" },
+  ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--s2-text)" },
+  ".cm-gutters": { backgroundColor: "var(--s2-bg)", color: "var(--s2-text-3)", border: "none" },
+  ".cm-activeLine": { backgroundColor: "transparent" },
+  ".cm-activeLineGutter": { backgroundColor: "transparent" },
+  "&.cm-focused .cm-activeLine": { backgroundColor: "color-mix(in srgb, var(--s2-info) 6%, transparent)" },
+  "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection": { backgroundColor: "color-mix(in srgb, var(--s2-info) 28%, transparent) !important" },
+  ".cm-matchingBracket": { backgroundColor: "color-mix(in srgb, var(--s2-ok) 25%, transparent)", outline: "none" },
+  ".cm-tooltip": { backgroundColor: "var(--s2-bg)", color: "var(--s2-text)", border: "1px solid var(--s2-border)", borderRadius: "6px" },
+  ".cm-tooltip-autocomplete > ul > li[aria-selected]": { backgroundColor: "var(--s2-info-bg)", color: "var(--s2-text)" },
+});
+const highlight = CM.HighlightStyle.define([
+  { tag: [CM.tags.keyword, CM.tags.controlKeyword, CM.tags.definitionKeyword, CM.tags.moduleKeyword, CM.tags.operatorKeyword], color: "var(--s2-info)", fontWeight: "600" },
+  { tag: [CM.tags.string, CM.tags.special(CM.tags.string)], color: "var(--s2-ok)" },
+  { tag: [CM.tags.number, CM.tags.bool, CM.tags.null], color: "var(--s2-warn)" },
+  { tag: [CM.tags.lineComment, CM.tags.blockComment, CM.tags.comment], color: "var(--s2-text-3)", fontStyle: "italic" },
+  { tag: [CM.tags.standard(CM.tags.name), CM.tags.typeName, CM.tags.className], color: "var(--s2-err)" },
+  { tag: [CM.tags.function(CM.tags.variableName), CM.tags.function(CM.tags.propertyName)], color: "var(--s2-text)", fontWeight: "500" },
+  { tag: CM.tags.operator, color: "var(--s2-text-2)" },
+]);
+const LEGACY_VECTOR_VARIANT = /_(I8|I16|I32|I64|F32|F64)$/;
+const functionOptions = FUNCTIONS.filter((f) => !LEGACY_VECTOR_VARIANT.test(f.name)).map((f) => ({
+  label: f.name, type: "function", detail: f.signature?.replace(/^[^(]*/, "") || "()",
+  info: [f.signature, f.description].filter(Boolean).join("\n"), boost: -1,
+}));
+function sqlLanguage() {
+  const schema = {};
+  for (const t of state.schema?.tables ?? []) schema[t.name] = t.columns.map((c) => ({ label: c.name, type: "property", detail: c.type }));
+  const config = { dialect, schema, upperCaseKeywords: true };
+  return [
+    dialect.language,
+    dialect.language.data.of({ autocomplete: CM.schemaCompletionSource(config) }),
+    dialect.language.data.of({ autocomplete: CM.keywordCompletionSource(dialect, true) }),
+    dialect.language.data.of({ autocomplete: CM.completeFromList(functionOptions) }),
+  ];
+}
+
+function makeEditor(cell, parent) {
+  const lang = new CM.Compartment();
+  cell.lang = lang;
+  cell.view = new CM.EditorView({
+    parent,
+    state: CM.EditorState.create({
+      doc: cell.source,
+      extensions: [
+        CM.Prec.highest(CM.keymap.of([
+          { key: "Shift-Enter", run: () => { runCell(cell, { advance: true }); return true; } },
+          { key: "Mod-Enter", run: () => { runCell(cell); return true; } },
+          { key: "Alt-Enter", run: () => { runCell(cell); addCell(cell.type === "markdown" ? "python" : cell.type, cell, { focus: true }); return true; } },
+          { key: "Mod-s", run: () => { saveFile(); return true; } },
+        ])),
+        CM.basicSetup,
+        CM.keymap.of([CM.indentWithTab]),
+        lang.of(languageFor(cell.type)),
+        theme,
+        CM.syntaxHighlighting(highlight),
+        CM.placeholder(cell.type === "sql" ? "SQL: the result becomes a DataFrame (Shift+Enter runs)" : cell.type === "python" ? "Python: use df, pd, plt, conn (Shift+Enter runs)" : "Text (Markdown). Shift+Enter shows it."),
+        CM.EditorView.updateListener.of((u) => {
+          if (u.docChanged) { cell.source = u.state.doc.toString(); markDirty(); }
+          if (u.focusChanged && u.view.hasFocus) setActive(cell);
+          if (u.focusChanged && !u.view.hasFocus && cell.type === "markdown" && cell.source.trim()) { cell.editing = false; renderCell(cell); }
+        }),
+      ],
+    }),
+  });
+}
+function languageFor(type) {
+  return type === "sql" ? sqlLanguage() : type === "python" ? CM.python() : [];
+}
+
+// ---------------------------------------------------------------- tiny markdown (safe: builds DOM, no HTML)
+function mdInline(text) {
+  const out = [];
+  const re = /\*\*([^*\n]+)\*\*|`([^`\n]+)`|\*([^*\n]+)\*|\[([^\]\n]+)\]\((https?:[^)\s]+)\)/g;
+  let last = 0, m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    if (m[1] !== undefined) out.push(h("strong", {}, m[1]));
+    else if (m[2] !== undefined) out.push(h("code", {}, m[2]));
+    else if (m[3] !== undefined) out.push(h("em", {}, m[3]));
+    else out.push(h("a", { href: m[5], target: "_blank", rel: "noopener" }, m[4]));
+    last = re.lastIndex;
+  }
+  out.push(text.slice(last));
+  return out;
+}
+// Markdown with embedded HTML, like Jupyter text cells: lines that start with
+// a tag (and everything inside an open HTML block) pass through as HTML; the
+// rest is Markdown. The result goes through safeHtml (no scripts or handlers).
+// Inline HTML in text (e.g. <i>, <b>, <tt>) passes through, as in Jupyter; a
+// "<" that doesn't start a tag is escaped. Everything is sanitized afterwards.
+const esc = (t) => t.replace(/&(?![a-zA-Z]+;|#\d+;)/g, "&amp;").replace(/<(?![a-zA-Z/!])/g, "&lt;");
+function mdInlineHtml(text) {
+  return esc(text)
+    .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+    .replace(/!\[([^\]\n]*)\]\((https?:[^)\s]+)\)/g, '<img alt="$1" src="$2">')
+    .replace(/\[([^\]\n]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+}
+const VOID_TAGS = /^(img|br|hr|input|meta|link|source|col|area|wbr)$/i;
+function htmlDepth(line) {
+  let depth = 0;
+  for (const m of line.matchAll(/<(\/?)([a-zA-Z][\w-]*)[^>]*?(\/?)>/g)) {
+    if (VOID_TAGS.test(m[2]) || m[3]) continue;
+    depth += m[1] ? -1 : 1;
+  }
+  return depth;
+}
+function renderMarkdown(src) {
+  if (!src.trim()) return [h("div", { class: "empty" }, "Empty text cell. Double-click to edit.")];
+  const out = [];
+  let list = null, depth = 0;
+  const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  for (const line of src.split("\n")) {
+    if (depth > 0 || /^\s*<\/?[a-zA-Z!]/.test(line)) {
+      closeList();
+      out.push(line);
+      depth = Math.max(0, depth + htmlDepth(line));
+      continue;
+    }
+    const hm = /^(#{1,6})\s+(.*)$/.exec(line);
+    const lm = /^\s*([-*]|\d+\.)\s+(.*)$/.exec(line);
+    if (lm) {
+      const tag = /\d/.test(lm[1]) ? "ol" : "ul";
+      if (list !== tag) { closeList(); out.push(`<${tag}>`); list = tag; }
+      out.push(`<li>${mdInlineHtml(lm[2])}</li>`);
+      continue;
+    }
+    closeList();
+    if (hm) out.push(`<h${hm[1].length}>${mdInlineHtml(hm[2])}</h${hm[1].length}>`);
+    else if (/^\s*(---|\*\*\*)\s*$/.test(line)) out.push("<hr>");
+    else if (line.trim()) out.push(`<p>${mdInlineHtml(line)}</p>`);
+  }
+  closeList();
+  const box = safeHtml(out.join("\n"));
+  box.className = "md-html";
+  for (const a of box.querySelectorAll("a[href]")) { a.target = "_blank"; a.rel = "noopener"; }
+  return [box];
+}
+
+// Sanitize kernel HTML output (e.g. pandas Styler): drop scripts, styles that
+// could escape the box, event handlers and javascript: URLs.
+function safeHtml(html) {
+  const doc = new DOMParser().parseFromString(String(html), "text/html");
+  doc.querySelectorAll("script, iframe, object, embed, link, meta, base, form, style").forEach((n) => n.remove());
+  for (const el of doc.body.querySelectorAll("*")) {
+    for (const a of [...el.attributes]) {
+      if (a.name.startsWith("on") || /^\s*javascript:/i.test(a.value)) el.removeAttribute(a.name);
+    }
+  }
+  const box = h("div", { class: "html-out" });
+  box.append(...doc.body.childNodes);
+  return box;
+}
+const stripAnsi = (s) => String(s).replace(/\x1b\[[0-9;]*m/g, "");
+const joinText = (v) => (Array.isArray(v) ? v.join("") : String(v ?? ""));
+// Progress bars (pip, tqdm) redraw a line with a carriage return: keep only each line's
+// latest state, as Jupyter does.
+const overwriteCR = (t) => t.includes("\r") ? t.split("\n").map((l) => l.split("\r").filter((x) => x !== "").pop() ?? "").join("\n") : t;
+
+// ---------------------------------------------------------------- layout
+const root = document.getElementById("root");
+const headEl = h("div", { class: "nb-head" });
+const filePanel = h("div", { class: "nb-files", hidden: true });
+const pkgPanel = h("div", { class: "nb-files nb-pkgs", hidden: true });
+const envEl = h("div", { class: "nb-env", hidden: true });
+const cellsEl = h("div", { class: "nb-cells" });
+const fileLabel = h("span", { class: "nb-file" });
+const kernelEl = h("span", { class: "nb-kernel", title: "Python kernel" }, h("span", { class: "dot" }), h("span", { class: "txt" }, "Kernel"));
+const msgsEl = h("div", { class: "nb-msgs", "aria-live": "polite" });
+const askBox = h("textarea", { class: "s2-input", rows: 2, placeholder: "Ask Claude about this notebook… (Enter to send)", "aria-label": "Question for Claude",
+  onkeydown: (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(); } } });
+const profileSelect = h("select", { class: "s2-input", "aria-label": "Assistant speed", title: "Fast: Haiku. Balanced: Sonnet, medium effort. Thorough: Opus, high effort.",
+  onchange: (e) => { try { localStorage.setItem("s2-sql-chat-profile", e.target.value); } catch {} warmAssistant(true); } },
+  h("option", { value: "fast" }, "Fast"), h("option", { value: "balanced" }, "Balanced"), h("option", { value: "thorough" }, "Thorough"));
+try { profileSelect.value = localStorage.getItem("s2-sql-chat-profile") || "balanced"; } catch { profileSelect.value = "balanced"; }
+const chatEl = h("aside", { class: "nb-chat", hidden: true },
+  h("div", { class: "top" }, h("strong", {}, "Claude"), profileSelect, h("button", { class: "s2-btn ghost", title: "Close", onclick: () => toggleChat(false) }, "✕")),
+  msgsEl,
+  h("div", { class: "nb-ask" }, askBox, h("button", { class: "s2-btn primary", onclick: () => ask() }, "Send")),
+  h("div", { class: "hint" }, "Claude sees the notebook's cells and outputs and can check the database (read-only)."));
+const layoutEl = h("div", { class: "nb-layout" }, cellsEl, chatEl);
+root.replaceChildren(headEl, filePanel, pkgPanel, envEl, layoutEl);
+
+function renderHeader() {
+  const dbSelect = h("select", { class: "s2-input", "aria-label": "Database for SQL cells", title: "Database for SQL cells",
+    onfocus: () => refreshDatabases(), onmousedown: () => refreshDatabases(),
+    onchange: (e) => chooseDatabase(e.target.value || null) },
+    h("option", { value: "", selected: !state.database }, "(default database)"),
+    state.databases.filter((d) => !SYSTEM.has(d) || d === state.database).map((d) => h("option", { value: d, selected: d === state.database }, d)));
+  headEl.replaceChildren(...[
+    h("h1", { class: "s2-title", title: `Notebook · build ${S2.build}` }, "Notebook"),
+    h("button", { class: "s2-btn ghost", title: S2.embedded() ? "New notebook in a new tab" : "New notebook",
+      onclick: () => (S2.embedded() ? S2.openView("notebook:new", { database: state.database }) : confirmDiscard(() => newNotebook())) }, "New"),
+    h("button", { class: "s2-btn ghost", title: "Open a notebook", onclick: () => showFiles("open") }, "Open"),
+    h("button", { class: "s2-btn ghost", title: "Save (Ctrl+S)", onclick: () => saveFile() }, "Save"),
+    h("button", { class: "s2-btn ghost", title: "Save under a new name", onclick: () => showFiles("save") }, "Save as"),
+    fileLabel,
+    dbSelect,
+    h("button", { class: "s2-btn ghost", title: "Refresh the database list", "aria-label": "Refresh databases", onclick: () => refreshDatabases({ force: true }) }, "↻"),
+    h("button", { class: "s2-btn primary", disabled: state.runningAll || !envReady(), title: "Run all cells from the top", onclick: runAll }, state.runningAll ? h("span", { class: "s2-spinner" }) : null, "▶▶ Run all"),
+    kernelEl,
+    h("button", { class: "s2-btn ghost", title: "Python packages in the notebook environment", disabled: !envReady(), onclick: () => togglePackages() }, "Packages"),
+    h("button", { class: "s2-btn ghost", title: "Interrupt the running cell", disabled: !envReady(), onclick: () => kernelControl("interrupt") }, "■"),
+    h("button", { class: "s2-btn ghost", title: "Restart the Python kernel (clears variables)", disabled: !envReady(), onclick: () => kernelControl("restart") }, "↻"),
+    h("span", { class: "s2-spacer" }),
+    h("button", { class: `s2-btn${state.chatOpen ? " primary" : ""}`, title: "Ask Claude about this notebook", onclick: () => toggleChat() }, "Claude"),
+    S2.openInBrowserButton("notebook", () => ({ name: state.file.name, database: state.database })),
+    S2.fullscreenButton(),
+  ].filter(Boolean));
+  renderFileLabel();
+  renderKernel();
+}
+function renderKernel() {
+  const st = envReady() ? state.kernel.state : "no Python";
+  const label = { stopped: "Kernel stopped", starting: "Starting kernel…", idle: "Kernel idle", busy: "Running…", error: "Kernel error", dead: "Kernel stopped", restarting: "Restarting…" }[st] ?? st;
+  kernelEl.className = `nb-kernel ${st}`;
+  kernelEl.title = state.kernel.error ? `Python kernel: ${state.kernel.error}` : "Python kernel (IPython)";
+  kernelEl.querySelector(".txt").textContent = label;
+}
+const envReady = () => state.env?.state === "ready";
+
+// ---------------------------------------------------------------- environment
+function renderEnv() {
+  const env = state.env;
+  const missing = env?.state === "ready" ? env.missing ?? [] : [];
+  envEl.hidden = !env || (env.state === "ready" && !missing.length);
+  if (envEl.hidden) return;
+  const installing = env.state === "installing";
+  if (missing.length && !installing) {
+    envEl.replaceChildren(h("strong", {}, "More packages for SingleStore example notebooks"),
+      h("div", {}, `Not installed yet in the notebook environment: ${missing.join(", ")}. `),
+      h("div", { style: { marginTop: "8px" } }, h("button", { class: "s2-btn primary", onclick: installEnv }, "Install missing packages"),
+        h("button", { class: "s2-btn ghost", onclick: () => { envEl.hidden = true; } }, "Not now")));
+    return;
+  }
+  envEl.replaceChildren(
+    h("strong", {}, "Python environment for notebooks"),
+    h("div", {}, `Python cells run in their own environment with ${env.packages.join(", ")} (about 150 MB, installed once with uv into ${env.folder}). `,
+      env.state === "error" ? h("span", { style: { color: "var(--s2-err)" } }, "The last install failed. ") : null),
+    h("div", { style: { marginTop: "8px" } },
+      installing ? h("span", {}, h("span", { class: "s2-spinner" }), " Installing… this takes a minute or two.")
+        : h("button", { class: "s2-btn primary", onclick: installEnv, disabled: env.uv === false }, env.state === "error" ? "Try again" : "Install"),
+      env.uv === false ? h("span", { class: "s2-muted" }, " uv isn't available to the server; set SINGLESTORE_MCP_NOTEBOOK_PYTHON instead.") : null),
+    env.log?.length ? h("pre", {}, env.log.join("\n")) : null);
+}
+async function loadEnv() {
+  try { state.env = await S2.callTool("notebook_environment", {}); } catch (e) { state.env = { state: "error", log: [cleanError(e).message], packages: [] }; }
+  renderEnv(); renderHeader();
+  if (envReady()) startKernel();
+}
+async function installEnv() {
+  try { state.env = await S2.callTool("notebook_environment_install", {}); } catch (e) { S2.toast(cleanError(e).message, "err"); return; }
+  renderEnv();
+  while (state.env?.state === "installing") {
+    await sleep(2000);
+    try { state.env = await S2.callTool("notebook_environment", {}); } catch {}
+    renderEnv();
+  }
+  renderHeader();
+  if (envReady()) { S2.toast("Notebook environment installed", "ok"); startKernel(); }
+}
+
+// ---------------------------------------------------------------- packages
+// Lists what's installed in the notebook environment and installs more (uv,
+// server side, so it always lands in the environment the kernel uses).
+const pkgs = { list: null, error: null, filter: "", installing: false, log: [] };
+function togglePackages(open = pkgPanel.hidden) {
+  pkgPanel.hidden = !open;
+  if (open) loadPackages(); else pkgPanel.replaceChildren();
+}
+async function loadPackages() {
+  pkgs.error = null; renderPackages();
+  try { pkgs.list = (await S2.callTool("notebook_packages", {})).packages; } catch (e) { pkgs.error = cleanError(e).message; }
+  renderPackages();
+}
+async function installPackages(spec) {
+  spec = spec.trim();
+  if (!spec || pkgs.installing) return;
+  pkgs.installing = true; pkgs.log = ["Starting…"]; renderPackages();
+  try {
+    await S2.callTool("notebook_packages_install", { packages: spec });
+    let st;
+    do {
+      await sleep(1500);
+      try { st = await S2.callTool("notebook_environment", {}); pkgs.log = st.log ?? pkgs.log; } catch { st = null; }
+      renderPackages();
+    } while (st?.state === "installing");
+    const failed = (pkgs.log.at(-1) ?? "").startsWith("Error");
+    S2.toast(failed ? "Install failed — see the log" : "Installed. Restart the kernel (↻) to use them.", failed ? "err" : "ok");
+  } catch (e) { pkgs.log = [cleanError(e).message]; }
+  pkgs.installing = false;
+  await loadPackages();
+}
+function renderPackages() {
+  if (pkgPanel.hidden) return;
+  const filter = h("input", { class: "s2-input", type: "search", placeholder: "Filter installed…", value: pkgs.filter, "aria-label": "Filter packages",
+    oninput: (e) => { pkgs.filter = e.target.value; drawList(); } });
+  const spec = h("input", { class: "s2-input", placeholder: "Install: e.g. plotly faiss-cpu==1.9", spellcheck: false, "aria-label": "Packages to install",
+    onkeydown: (e) => { if (e.key === "Enter") installPackages(spec.value); } });
+  const list = h("div", { class: "list" });
+  const drawList = () => {
+    const q = pkgs.filter.trim().toLowerCase();
+    const shown = (pkgs.list ?? []).filter((p) => !q || p.name.toLowerCase().includes(q) || p.summary.toLowerCase().includes(q));
+    list.replaceChildren(...(pkgs.error ? [h("div", { class: "item m" }, pkgs.error)]
+      : !pkgs.list ? [h("div", { class: "item m" }, h("span", { class: "s2-spinner" }), " Loading…")]
+      : shown.length ? shown.map((p) => h("div", { class: "pkg", title: p.summary },
+          h("span", { class: "n" }, p.name, p.core ? h("span", { class: "core", title: "Used by the notebook itself" }, "core") : null),
+          h("span", { class: "v" }, p.version), h("span", { class: "d" }, p.summary)))
+      : [h("div", { class: "item m" }, "No match")]));
+  };
+  drawList();
+  pkgPanel.replaceChildren(...[
+    h("div", { class: "row" }, h("strong", {}, `Packages${pkgs.list ? ` (${pkgs.list.length})` : ""}`), filter,
+      h("span", { class: "s2-spacer" }), h("button", { class: "s2-btn ghost", onclick: () => togglePackages(false) }, "Close")),
+    list,
+    h("div", { class: "row" }, spec,
+      h("button", { class: "s2-btn primary", disabled: pkgs.installing, onclick: () => installPackages(spec.value) },
+        pkgs.installing ? h("span", { class: "s2-spinner" }) : null, pkgs.installing ? " Installing…" : "Install"),
+      h("span", { class: "s2-muted" }, "Same as %pip install in a cell; restart the kernel afterwards.")),
+    pkgs.log.length && (pkgs.installing || pkgs.log.length > 1) ? h("pre", {}, pkgs.log.slice(-15).join("\n")) : null,
+  ].filter(Boolean));
+}
+
+// ---------------------------------------------------------------- kernel
+async function startKernel() {
+  try { state.kernel = await S2.callTool("notebook_kernel_start", { notebook_id: notebookId }); }
+  catch (e) { state.kernel = { state: "error", error: cleanError(e).message }; }
+  renderKernel();
+}
+async function refreshKernel() {
+  if (!envReady()) return;
+  try { state.kernel = await S2.callTool("notebook_kernel_state", { notebook_id: notebookId }); } catch { return; }
+  renderKernel();
+}
+async function kernelControl(action) {
+  try {
+    await S2.callTool("notebook_kernel_control", { notebook_id: notebookId, action });
+    if (action === "restart") {
+      state.kernel = { state: "restarting" }; renderKernel();
+      for (const c of state.cells) { c.count = null; renderGutter(c); }
+      S2.toast("Kernel restarting; variables are cleared", "ok");
+    }
+  } catch (e) { S2.toast(`Couldn't ${action} the kernel: ${cleanError(e).message}`, "err"); }
+  setTimeout(refreshKernel, 600);
+}
+(function kernelLoop() {
+  setTimeout(async () => {
+    if (S2.app && !S2.isHidden() && envReady()) await refreshKernel();
+    kernelLoop();
+  }, ["starting", "restarting", "busy"].includes(state.kernel.state) ? 1000 : 5000);
+})();
+
+// ---------------------------------------------------------------- cells
+function makeCell(type, source = "", extra = {}) {
+  return { id: rid("c"), type, source, name: "", outputs: [], count: null, running: false, editing: type !== "markdown" || !source.trim(), ...extra };
+}
+function cellEl(cell) {
+  const gutter = h("div", { class: "gutter" });
+  const bar = h("div", { class: "bar" });
+  const editor = h("div", { class: "editor" });
+  const mdView = h("div", { class: "md-view", ondblclick: () => { cell.editing = true; renderCell(cell); cell.view.focus(); } });
+  const outputs = h("div", { class: "outputs" });
+  const status = h("div", { class: "status" });
+  const confirm = h("div", {});
+  const body = h("div", { class: "body", onclick: () => setActive(cell) }, bar, editor, mdView, confirm, outputs, status);
+  const el = h("div", { class: `cell ${cell.type}`, dataset: { id: cell.id } }, gutter, body);
+  cell.el = { root: el, gutter, bar, editor, mdView, outputs, status, confirm };
+  makeEditor(cell, editor);
+  renderCell(cell);
+  renderOutputs(cell);
+  return el;
+}
+function renderGutter(cell) {
+  const badge = { sql: "SQL", python: "PY", markdown: "TEXT" }[cell.type];
+  cell.el.gutter.replaceChildren(...[
+    h("span", { class: "badge" }, badge),
+    cell.type === "markdown" ? null : h("span", {}, cell.running ? "[*]" : cell.count ? `[${cell.count}]` : "[ ]"),
+    cell.type === "markdown" ? null : h("button", { class: "run", title: "Run (Shift+Enter)", disabled: !envReady(), onclick: (e) => { e.stopPropagation(); runCell(cell); } }, cell.running ? "…" : "▶"),
+  ].filter(Boolean));
+}
+function renderCell(cell) {
+  const { root: el, bar, editor, mdView } = cell.el;
+  el.className = `cell ${cell.type}${state.active === cell ? " active" : ""}${cell.type === "markdown" && !cell.editing ? " rendered" : ""}`;
+  renderGutter(cell);
+  const typeSelect = h("select", { class: "s2-input", "aria-label": "Cell type", onchange: (e) => changeType(cell, e.target.value) },
+    ["sql", "python", "markdown"].map((t) => h("option", { value: t, selected: t === cell.type }, { sql: "SQL", python: "Python", markdown: "Text" }[t])));
+  const nameInput = cell.type === "sql" ? h("input", { class: "s2-input", value: cell.name, placeholder: "df", spellcheck: false,
+    title: "Python variable for the result (always also df)",
+    oninput: (e) => { cell.name = e.target.value.trim(); markDirty(); } }) : null;
+  const idx = state.cells.indexOf(cell);
+  bar.replaceChildren(...[
+    typeSelect,
+    nameInput ? h("span", {}, "result →") : null, nameInput,
+    h("span", { class: "spacer" }),
+    h("button", { class: "s2-btn ghost", title: "Move up", disabled: idx <= 0, onclick: () => moveCell(cell, -1) }, "↑"),
+    h("button", { class: "s2-btn ghost", title: "Move down", disabled: idx >= state.cells.length - 1, onclick: () => moveCell(cell, 1) }, "↓"),
+    cell.outputs.length ? h("button", { class: "s2-btn ghost", title: "Clear output", onclick: () => { cell.outputs = []; renderOutputs(cell); markDirty(); } }, "Clear") : null,
+    h("button", { class: "s2-btn ghost", title: "Delete cell", onclick: () => deleteCell(cell) }, "🗑"),
+  ].filter(Boolean));
+  const showEditor = cell.type !== "markdown" || cell.editing;
+  editor.hidden = !showEditor;
+  mdView.hidden = showEditor;
+  if (!showEditor) mdView.replaceChildren(...renderMarkdown(cell.source));
+}
+function renderAll() {
+  const items = [];
+  state.cells.forEach((cell, i) => {
+    if (!cell.el) cellEl(cell);
+    items.push(cell.el.root, addBar(cell));
+  });
+  if (!state.cells.length) items.push(addBar(null));
+  cellsEl.replaceChildren(...items);
+}
+function addBar(after) {
+  return h("div", { class: "nb-add" },
+    h("button", { class: "s2-btn", onclick: () => addCell("sql", after, { focus: true }) }, "+ SQL"),
+    h("button", { class: "s2-btn", onclick: () => addCell("python", after, { focus: true }) }, "+ Python"),
+    h("button", { class: "s2-btn", onclick: () => addCell("markdown", after, { focus: true }) }, "+ Text"));
+}
+function setActive(cell) {
+  if (state.active === cell) return;
+  const prev = state.active;
+  state.active = cell;
+  if (prev?.el) prev.el.root.classList.remove("active");
+  cell?.el?.root.classList.add("active");
+}
+function addCell(type, after, { focus = false, source = "" } = {}) {
+  const cell = makeCell(type, source, { editing: true });
+  const i = after ? state.cells.indexOf(after) + 1 : state.cells.length;
+  state.cells.splice(i, 0, cell);
+  renderAll();
+  state.cells.forEach((c) => c.el && renderCell(c));
+  markDirty();
+  if (focus) { cell.view.focus(); setActive(cell); cell.el.root.scrollIntoView({ block: "nearest" }); }
+  return cell;
+}
+function deleteCell(cell) {
+  const i = state.cells.indexOf(cell);
+  state.cells.splice(i, 1);
+  cell.view?.destroy();
+  renderAll();
+  state.cells.forEach((c) => renderCell(c));
+  markDirty();
+  const next = state.cells[i] ?? state.cells[i - 1];
+  if (next) { setActive(next); next.view.focus(); }
+}
+function moveCell(cell, delta) {
+  const i = state.cells.indexOf(cell), j = i + delta;
+  if (j < 0 || j >= state.cells.length) return;
+  [state.cells[i], state.cells[j]] = [state.cells[j], state.cells[i]];
+  renderAll();
+  state.cells.forEach((c) => renderCell(c));
+  markDirty();
+}
+function changeType(cell, type) {
+  cell.type = type;
+  cell.editing = true;
+  cell.view.dispatch({ effects: cell.lang.reconfigure(languageFor(type)) });
+  renderCell(cell);
+  markDirty();
+  cell.view.focus();
+}
+
+// ---------------------------------------------------------------- outputs
+function outputEl(o) {
+  if (o.output_type === "stream") return h("pre", { class: o.name === "stderr" ? "stderr" : "" }, overwriteCR(stripAnsi(joinText(o.text))));
+  if (o.output_type === "error") {
+    const tb = (o.traceback ?? []).map(stripAnsi).join("\n");
+    return h("div", { class: "err" }, h("strong", {}, `${o.ename}: `), stripAnsi(o.evalue),
+      tb ? h("details", {}, h("summary", { class: "s2-small" }, "Traceback"), h("pre", {}, tb)) : null);
+  }
+  const d = o.data ?? {};
+  if (d[TABLE_MIME]) {
+    const t = d[TABLE_MIME];
+    const rows = t.rows.map((r) => Object.fromEntries(t.columns.map((c, i) => [c, r[i]])));
+    const note = [`${fmt.number(t.row_count)} row${t.row_count === 1 ? "" : "s"}`,
+      t.variable ? `→ ${t.variable}` : null,
+      t.truncated ? `showing first ${fmt.number(rows.length)}` : null,
+      t.fetch_limited ? "fetch limit reached" : null].filter(Boolean).join(" · ");
+    return h("div", {}, h("div", { class: "tbl-head" }, note), S2.dataTable(t.columns, rows));
+  }
+  if (d["image/png"]) return h("img", { src: `data:image/png;base64,${joinText(d["image/png"]).trim()}`, alt: joinText(d["text/plain"]) || "chart" });
+  if (d["image/jpeg"]) return h("img", { src: `data:image/jpeg;base64,${joinText(d["image/jpeg"]).trim()}`, alt: "image" });
+  if (d["image/svg+xml"]) return h("img", { src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(joinText(d["image/svg+xml"]))}`, alt: "image" });
+  if (d["text/html"]) return safeHtml(joinText(d["text/html"]));
+  if (d["text/markdown"]) return h("div", { class: "md-view" }, ...renderMarkdown(joinText(d["text/markdown"])));
+  if (d["text/plain"] !== undefined) return h("pre", {}, stripAnsi(joinText(d["text/plain"])));
+  return h("pre", { class: "s2-muted" }, `[${Object.keys(d).join(", ") || "empty output"}]`);
+}
+function renderOutputs(cell) {
+  // Merge consecutive stream chunks of the same kind, like Jupyter does.
+  const merged = [];
+  for (const o of cell.outputs) {
+    const last = merged[merged.length - 1];
+    if (o.output_type === "stream" && last?.output_type === "stream" && last.name === o.name) last.text = joinText(last.text) + joinText(o.text);
+    else merged.push(o.output_type === "stream" ? { ...o, text: joinText(o.text) } : o);
+  }
+  cell.el.outputs.replaceChildren(...merged.map(outputEl));
+  const st = cell.el.status;
+  if (cell.running) st.replaceChildren(h("span", { class: "s2-spinner" }), ` Running${cell.seconds ? ` · ${cell.seconds}s` : ""}`);
+  else if (cell.lastRun) st.replaceChildren(cell.lastRun);
+  else st.replaceChildren();
+}
+
+// ---------------------------------------------------------------- running
+async function runCell(cell, { advance = false, confirmed = false } = {}) {
+  if (cell.type === "markdown") {
+    cell.editing = false; renderCell(cell);
+    if (advance) focusNext(cell);
+    return true;
+  }
+  if (!envReady()) { S2.toast("Install the notebook Python environment first", "err"); return false; }
+  if (cell.running) return false;
+  const source = cell.view.state.doc.toString();
+  if (!source.trim()) { if (advance) focusNext(cell); return true; }
+  cell.el.confirm.replaceChildren();
+  let started;
+  try {
+    started = await S2.callTool("notebook_run", { notebook_id: notebookId, cell_type: cell.type, source, database: state.database, name: cell.name || null, confirmed });
+  } catch (e) {
+    cell.outputs = [{ output_type: "error", ename: "Error", evalue: cleanError(e).message, traceback: [] }];
+    renderOutputs(cell);
+    return false;
+  }
+  if (started.needs_confirmation) {
+    return new Promise((resolve) => {
+      cell.el.confirm.replaceChildren(h("div", { class: "confirm" },
+        h("span", {}, `This statement changes data or schema (${started.reason}). Run it?`),
+        h("button", { class: "s2-btn primary", onclick: async () => resolve(await runCell(cell, { advance, confirmed: true })) }, "Run it"),
+        h("button", { class: "s2-btn ghost", onclick: () => { cell.el.confirm.replaceChildren(); resolve(false); } }, "Cancel")));
+    });
+  }
+  if (advance) focusNext(cell);
+  cell.running = true; cell.outputs = []; cell.seconds = 0; cell.lastRun = null;
+  renderGutter(cell); renderOutputs(cell);
+  state.kernel = { ...state.kernel, state: "busy" }; renderKernel();
+  let after = 0, cleared = 0, result = null, delay = 150;
+  while (true) {
+    await sleep(delay);
+    delay = Math.min(delay * 1.5, 800);
+    try { result = await S2.callTool("notebook_poll", { run_id: started.run_id, after, cleared }); }
+    catch (e) { result = { done: true, status: "error", outputs: [{ output_type: "error", ename: "Error", evalue: cleanError(e).message, traceback: [] }], reset: false, count: after + 1 }; }
+    if (result.reset) cell.outputs = [];
+    if (result.outputs.length || result.reset) { cell.outputs.push(...result.outputs); }
+    after = result.count; cleared = result.cleared ?? cleared; cell.seconds = Math.round(result.seconds ?? 0);
+    renderOutputs(cell);
+    if (result.done) break;
+  }
+  cell.running = false;
+  cell.count = result.execution_count ?? cell.count;
+  if (DB_DDL.test(source)) refreshDatabases({ force: true });
+  cell.lastRun = `${result.status === "ok" ? "✓" : result.status === "aborted" ? "◼ stopped" : "✕ error"} · ${result.seconds ?? 0}s`;
+  renderGutter(cell); renderOutputs(cell); renderCell(cell);
+  markDirty();
+  refreshKernel();
+  report(cell, result.status);
+  return result.status === "ok";
+}
+function focusNext(cell) {
+  const i = state.cells.indexOf(cell);
+  const next = state.cells[i + 1] ?? addCell(cell.type === "markdown" ? "python" : cell.type, cell);
+  setActive(next);
+  if (next.type === "markdown" && !next.editing) next.el.root.scrollIntoView({ block: "nearest" });
+  else { next.view.focus(); next.el.root.scrollIntoView({ block: "nearest" }); }
+}
+async function runAll() {
+  if (state.runningAll) return;
+  state.runningAll = true; renderHeader();
+  try {
+    for (const cell of state.cells) {
+      if (cell.type === "markdown") { if (cell.source.trim()) { cell.editing = false; renderCell(cell); } continue; }
+      cell.el.root.scrollIntoView({ block: "nearest" });
+      if (!(await runCell(cell))) { S2.toast("Stopped at a cell that failed or was cancelled", "err"); break; }
+    }
+  } finally { state.runningAll = false; renderHeader(); }
+}
+
+// ---------------------------------------------------------------- database and schema (SQL autocomplete)
+// Database list: refreshed when the dropdown is opened (at most every few
+// seconds), with the ↻ button, and after statements that create or drop a
+// database, so databases made by code show up without reopening the app.
+const DB_DDL = /\b(CREATE|DROP)\s+(DATABASE|SCHEMA)\b/i;
+let dbListLoadedAt = 0;
+async function refreshDatabases({ force = false } = {}) {
+  if (!force && Date.now() - dbListLoadedAt < 4000) return;
+  dbListLoadedAt = Date.now();
+  try {
+    const res = await S2.callTool("schema_explorer_databases", {});
+    const names = (res.databases ?? []).map((d) => d.name ?? d);
+    if (JSON.stringify(names) === JSON.stringify(state.databases)) return;
+    state.databases = names;
+    if (state.database && !names.includes(state.database)) S2.toast(`Database ${state.database} no longer exists`, "err");
+    onDatabasesChanged();
+  } catch (e) { if (force) S2.toast(`Couldn't refresh databases: ${cleanError(e).message}`, "err"); }
+}
+function onDatabasesChanged() { renderHeader(); }
+
+async function chooseDatabase(db) {
+  // Picking a database for an untouched notebook isn't an unsaved change.
+  const wasClean = !isDirty();
+  state.database = db;
+  state.schema = null;
+  if (wasClean) state.file.savedJson = JSON.stringify(toIpynb());
+  markDirty();
+  renderHeader();
+  if (!db) return;
+  try { state.schema = await S2.callTool("sql_editor_schema", { database: db }); } catch { state.schema = null; }
+  for (const c of state.cells) if (c.type === "sql") c.view.dispatch({ effects: c.lang.reconfigure(languageFor("sql")) });
+}
+
+// ---------------------------------------------------------------- .ipynb
+const toLines = (text) => (text ? text.split(/(?<=\n)/) : []);
+function toIpynb() {
+  return {
+    cells: state.cells.map((c) => {
+      if (c.type === "markdown") return { cell_type: "markdown", id: c.id, metadata: {}, source: toLines(c.source) };
+      const src = c.type === "sql" ? `%%sql${c.name ? ` ${c.name} <<` : ""}\n${c.source}` : c.source;
+      return { cell_type: "code", id: c.id, metadata: {}, execution_count: c.count ?? null, outputs: c.outputs, source: toLines(src) };
+    }),
+    metadata: {
+      kernelspec: { name: "python3", display_name: "Python 3", language: "python" },
+      language_info: { name: "python" },
+      singlestore: { database: state.database ?? null },
+    },
+    nbformat: 4, nbformat_minor: 5,
+  };
+}
+function fromIpynb(nb) {
+  return (nb.cells ?? []).map((c) => {
+    const src = joinText(c.source);
+    if (c.cell_type === "markdown" || c.cell_type === "raw") return makeCell("markdown", src, { editing: !src.trim() });
+    const m = /^%%sql\b([^\n]*)\n?/.exec(src);
+    if (m) {
+      const name = /^\s*([A-Za-z_]\w*)\s*<</.exec(m[1])?.[1] ?? "";
+      return makeCell("sql", src.slice(m[0].length), { name, outputs: c.outputs ?? [], count: c.execution_count ?? null });
+    }
+    return makeCell("python", src, { outputs: c.outputs ?? [], count: c.execution_count ?? null });
+  });
+}
+function loadCells(cells) {
+  for (const c of state.cells) c.view?.destroy();
+  state.cells = cells;
+  state.active = null;
+  renderAll();
+  state.cells.forEach((c) => renderCell(c));
+}
+function newNotebook() {
+  state.file = { name: null, folder: state.file.folder, savedJson: "" };
+  loadCells([
+    makeCell("markdown", "# Untitled notebook\nSQL cells put their result in `df` (or the name you give); Python cells can use it with pandas and matplotlib.", { editing: false }),
+    makeCell("sql", state.database ? "SHOW TABLES;" : "SELECT 1 AS x;"),
+    makeCell("python", "df.head()"),
+  ]);
+  state.file.savedJson = JSON.stringify(toIpynb());
+  renderFileLabel();
+}
+
+// ---------------------------------------------------------------- files
+const isDirty = () => JSON.stringify(toIpynb()) !== state.file.savedJson;
+let dirtyTimer = null;
+function markDirty() { clearTimeout(dirtyTimer); dirtyTimer = setTimeout(renderFileLabel, 150); }
+function renderFileLabel() {
+  const dirty = isDirty();
+  if (S2.embedded()) window.parent.postMessage({ type: "s2-title", title: baseOf(state.file.name) ?? "untitled", dirty, path: state.file.path ?? null }, "*");
+  fileLabel.title = state.file.path ?? (state.file.name ? `${state.file.folder ?? "SQL folder"}\\${state.file.name}` : "Not saved yet");
+  fileLabel.replaceChildren(state.file.name ?? "untitled.ipynb", dirty ? h("span", { class: "dirty", title: "Unsaved changes" }, "●") : "");
+}
+const ago = (t) => { const s = Date.now() / 1000 - t; return s < 90 ? "just now" : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 129600 ? `${Math.round(s / 3600)} h ago` : new Date(t * 1000).toLocaleDateString(); };
+function hideFiles() { filePanel.hidden = true; filePanel.replaceChildren(); }
+const dirOf = (p) => (p ? p.replace(/[\\/][^\\/]*$/, "") : null);
+const baseOf = (p) => (p ? p.split(/[\\/]/).pop() : null);
+function showFiles(mode) {
+  filePanel.hidden = false;
+  S2.fileBrowser(filePanel, {
+    kind: "notebook", mode, start: dirOf(state.file.path), name: baseOf(state.file.name) ?? "notebook.ipynb",
+    onOpen: (path) => openFile(path, { newTab: true }),
+    onSave: (path, overwrite) => saveAs(path, overwrite),
+    onClose: hideFiles,
+    extra: mode === "save" ? [h("button", { class: "s2-btn", title: "Download the .ipynb (browser view)",
+      onclick: () => S2.download(baseOf(state.file.name) || "notebook.ipynb", JSON.stringify(toIpynb(), null, 1), "application/x-ipynb+json") }, "Download")] : [],
+  });
+}
+// Returns the tool result ({exists} asks the browser to confirm); throws on errors.
+async function saveAs(name, overwrite) {
+  const nb = toIpynb();
+  const res = await S2.callTool("notebook_save", { name, notebook: nb, overwrite });
+  if (res.exists) return res;
+  state.file = { name: res.name, path: res.path, folder: res.folder, savedJson: JSON.stringify(nb) };
+  renderFileLabel(); hideFiles();
+  S2.toast(`Saved ${res.name}`, "ok");
+  reportContext();
+  return res;
+}
+async function saveFile() {
+  if (!state.file.name) return showFiles("save");
+  try { await saveAs(state.file.path ?? state.file.name, true); } catch (e) { S2.toast(`Couldn't save: ${cleanError(e).message}`, "err"); }
+}
+function confirmDiscard(then) {
+  if (!isDirty()) return then();
+  filePanel.hidden = false;
+  filePanel.replaceChildren(h("div", { class: "row" }, h("span", { class: "warn" }, `Discard unsaved changes in ${state.file.name ?? "this notebook"}?`),
+    h("button", { class: "s2-btn", onclick: () => { hideFiles(); then(); } }, "Discard"),
+    h("button", { class: "s2-btn ghost", onclick: hideFiles }, "Cancel")));
+}
+// Inside the workspace, a notebook opens in a new tab unless this one is still
+// an untouched, unsaved notebook.
+const pristine = () => !state.file.name && !isDirty();
+function openFile(name, { newTab = false } = {}) {
+  if (newTab && S2.embedded() && !pristine()) {
+    hideFiles();
+    S2.openView("notebook:new", { name, database: state.database });
+    return;
+  }
+  confirmDiscard(async () => {
+    try {
+      const res = await S2.callTool("notebook_open", { name });
+      const db = res.notebook?.metadata?.singlestore?.database;
+      if (db && state.databases.includes(db)) await chooseDatabase(db);
+      loadCells(fromIpynb(res.notebook));
+      state.file = { name: res.name, path: res.path, folder: res.folder, savedJson: JSON.stringify(toIpynb()) };
+      renderFileLabel(); hideFiles(); renderHeader();
+      reportContext();
+    } catch (e) { S2.toast(`Couldn't open ${name}: ${cleanError(e).message}`, "err"); }
+  });
+}
+
+// ---------------------------------------------------------------- Claude panel (in-app assistant)
+const chat = { waiting: false, lastSeq: 0, messages: [], job: null, warmed: null };
+function toggleChat(open = !state.chatOpen) {
+  state.chatOpen = open;
+  chatEl.hidden = !open;
+  layoutEl.classList.toggle("chat-open", open);
+  renderHeader();
+  if (open) { renderChat(); askBox.focus(); warmAssistant(); }
+}
+function warmAssistant(force = false) {
+  if (!force && chat.warmed === profileSelect.value) return;
+  chat.warmed = profileSelect.value;
+  S2.callTool("notebook_assistant_warm", { notebook_id: notebookId, profile: profileSelect.value }).catch(() => { chat.warmed = null; });
+}
+function codeBlock(code, lang) {
+  const type = /^(sql|mysql)$/i.test(lang) ? "sql" : /^(py|python|ipython)$/i.test(lang) ? "python" : null;
+  return h("div", { class: "nb-code" }, h("pre", {}, code),
+    h("div", { class: "cbar" }, h("span", { class: "lang" }, type ?? (lang || "code")),
+      type ? h("button", { class: "s2-btn", title: "Insert as a new cell after the selected cell", onclick: () => {
+        const cell = addCell(type, state.active ?? state.cells[state.cells.length - 1], { focus: false, source: code });
+        setActive(cell); cell.el.root.scrollIntoView({ block: "nearest" }); S2.toast(`Inserted ${type === "sql" ? "SQL" : "Python"} cell`, "ok");
+      } }, `Insert ${type === "sql" ? "SQL" : "Python"} cell`) : null,
+      state.active && type && state.active.type === type ? h("button", { class: "s2-btn ghost", title: "Replace the selected cell's code", onclick: () => {
+        const c = state.active; c.view.dispatch({ changes: { from: 0, to: c.view.state.doc.length, insert: code } }); S2.toast("Cell replaced", "ok");
+      } }, "Replace selected") : null,
+      h("button", { class: "s2-btn ghost", onclick: async () => { try { await navigator.clipboard.writeText(code); S2.toast("Copied", "ok"); } catch { S2.toast("Couldn't copy", "err"); } } }, "Copy")));
+}
+function messageBody(text) {
+  const parts = [], re = /```([\w-]*)\n?([\s\S]*?)```/g;
+  let last = 0, m;
+  const textPart = (t) => (t.trim() ? h("p", {}, ...mdInline(t.trim())) : null);
+  while ((m = re.exec(text))) { parts.push(textPart(text.slice(last, m.index)), codeBlock(m[2].replace(/\s+$/, ""), m[1])); last = re.lastIndex; }
+  parts.push(textPart(text.slice(last)));
+  return parts.filter(Boolean);
+}
+function renderChat() {
+  const items = chat.messages.map((m) => m.from === "you" ? h("div", { class: "nb-msg you" }, m.text)
+    : m.from === "note" ? h("div", { class: "nb-msg note" }, m.text)
+    : h("div", { class: `nb-msg ${m.from === "error" ? "error" : "claude"}` }, h("div", { class: "who" }, m.from === "error" ? "Couldn't answer" : "Claude"), messageBody(m.text)));
+  if (!items.length) items.push(h("div", { class: "nb-msg note" }, "Ask for an analysis, e.g. “chart sales per month from the orders table” or “why does this cell fail?”."));
+  if (chat.waiting) {
+    const j = chat.job;
+    items.push(h("div", { class: "nb-msg note" }, h("span", { class: "s2-spinner" }), ` ${j ? `${j.activity}${j.seconds >= 5 ? ` · ${j.seconds}s` : ""}` : "Starting Claude…"}`,
+      h("button", { class: "s2-btn ghost", style: { marginLeft: "6px", fontStyle: "normal" }, onclick: stopAsking }, "Stop")));
+  }
+  msgsEl.replaceChildren(...items);
+  msgsEl.scrollTop = msgsEl.scrollHeight;
+}
+function notebookContext() {
+  const parts = [`Notebook ${state.file.name ?? "(unsaved)"}; database for SQL cells: ${state.database ?? "(default)"}.`];
+  state.cells.forEach((c, i) => {
+    const sel = state.active === c ? " (selected)" : "";
+    if (c.type === "markdown") { if (c.source.trim()) parts.push(`[${i + 1}] Text${sel}:\n${c.source.slice(0, 600)}`); return; }
+    const head = c.type === "sql" ? `[${i + 1}] SQL cell${sel}, result → ${c.name || "df"}` : `[${i + 1}] Python cell${sel}`;
+    const outs = c.outputs.map((o) => {
+      if (o.output_type === "error") return `Error: ${o.ename}: ${stripAnsi(o.evalue)}`.slice(0, 400);
+      if (o.output_type === "stream") return joinText(o.text).slice(0, 300);
+      const d = o.data ?? {};
+      if (d[TABLE_MIME]) return `Table ${d[TABLE_MIME].row_count} rows; columns ${d[TABLE_MIME].columns.join(", ")}`;
+      if (d["image/png"]) return "(chart)";
+      return joinText(d["text/plain"] ?? "").slice(0, 300);
+    }).filter(Boolean).join("\n");
+    parts.push(`${head}:\n\`\`\`${c.type}\n${c.source.slice(0, 3000)}\n\`\`\`${outs ? `\nOutput:\n${outs}` : ""}`);
+  });
+  return parts.join("\n\n");
+}
+async function ask() {
+  const question = askBox.value.trim();
+  if (!question || chat.waiting) return;
+  chat.messages.push({ from: "you", text: question });
+  askBox.value = ""; chat.waiting = true; chat.job = null;
+  renderChat();
+  try {
+    await S2.callTool("notebook_ask", { notebook_id: notebookId, question, context: notebookContext(), profile: profileSelect.value });
+  } catch (e) {
+    chat.waiting = false; chat.messages.push({ from: "error", text: cleanError(e).message }); renderChat();
+  }
+}
+async function stopAsking() {
+  chat.warmed = null;
+  try { await S2.callTool("sql_editor_ask_cancel", { editor_id: notebookId }); } catch (e) { S2.toast(`Couldn't stop: ${cleanError(e).message}`, "err"); }
+}
+async function pollInbox() {
+  try {
+    const { messages, job } = await S2.callTool("sql_editor_inbox", { editor_id: notebookId, after: chat.lastSeq });
+    const changed = JSON.stringify(job) !== JSON.stringify(chat.job);
+    chat.job = job ?? null;
+    for (const m of messages) {
+      chat.messages.push({ from: m.kind === "error" ? "error" : m.kind === "note" ? "note" : "claude", text: m.text });
+      chat.lastSeq = Math.max(chat.lastSeq, m.seq);
+    }
+    if (messages.length && !job) chat.waiting = false;
+    if (messages.length || (chat.waiting && changed)) renderChat();
+  } catch {}
+}
+(function inboxLoop() {
+  setTimeout(async () => { if (S2.app && chat.waiting) await pollInbox(); inboxLoop(); }, chat.waiting ? 1500 : 3000);
+})();
+
+// ---------------------------------------------------------------- model context
+function report(cell, status) {
+  const i = state.cells.indexOf(cell) + 1;
+  const err = cell.outputs.find((o) => o.output_type === "error");
+  reportContext(`Last run: cell ${i} (${cell.type}) ${status}${err ? ` — ${err.ename}: ${stripAnsi(err.evalue).slice(0, 200)}` : ""}.`);
+}
+function reportContext(extra = "") {
+  const counts = state.cells.reduce((a, c) => ((a[c.type] = (a[c.type] ?? 0) + 1), a), {});
+  S2.updateModelContext(`Notebook ${state.file.name ?? "(unsaved)"} is open (id ${notebookId}, database ${state.database ?? "default"}): `
+    + `${counts.sql ?? 0} SQL, ${counts.python ?? 0} Python and ${counts.markdown ?? 0} text cells. ${extra}`.trim());
+}
+
+// ---------------------------------------------------------------- host wiring
+window.addEventListener("message", (ev) => {
+  if (ev.source === window.parent && ev.data?.type === "s2-close") {
+    S2.callTool("notebook_kernel_control", { notebook_id: notebookId, action: "shutdown" }).catch(() => {});
+    S2.callTool("sql_editor_ask_cancel", { editor_id: notebookId }).catch(() => {});
+  }
+});
+window.addEventListener("beforeunload", () => { S2.callTool?.("notebook_kernel_control", { notebook_id: notebookId, action: "shutdown" }).catch?.(() => {}); });
+renderHeader();
+newNotebook();
+S2.onDisplayModeChange = () => renderHeader();
+await S2.connect({
+  name: "singlestore-notebook",
+  async onToolResult(result) {
+    let data = {};
+    try { data = S2.resultData(result); } catch (e) { S2.toast(cleanError(e).message, "err"); }
+    try {
+      const dbs = await S2.callTool("schema_explorer_databases", {});
+      state.databases = (dbs.databases ?? []).map((d) => d.name ?? d);
+    } catch { state.databases = []; }
+    state.env = data.environment ?? null;
+    renderEnv();
+    if (data.database && state.databases.includes(data.database)) await chooseDatabase(data.database);
+    if (data.name) openFile(data.name); else newNotebook();
+    renderHeader();
+    reportContext();
+    await loadEnv();
+  },
+});
+</script>
+</body>
+</html>

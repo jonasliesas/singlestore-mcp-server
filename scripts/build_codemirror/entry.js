@@ -1,4 +1,4 @@
-// Everything the SQL Editor app uses from CodeMirror, exposed as globalThis.CM.
+// Everything the SQL Editor and Notebook apps use from CodeMirror, exposed as globalThis.CM.
 // Rebuild with:  cd scripts/build_codemirror && npm install && npm run build
 export { basicSetup } from "codemirror";
 export { EditorView, keymap, placeholder } from "@codemirror/view";
@@ -8,3 +8,4 @@ export { sql, MySQL, SQLDialect, keywordCompletionSource, schemaCompletionSource
 export { autocompletion, completeFromList, ifNotIn, startCompletion } from "@codemirror/autocomplete";
 export { HighlightStyle, syntaxHighlighting, syntaxTree } from "@codemirror/language";
 export { tags } from "@lezer/highlight";
+export { python } from "@codemirror/lang-python";

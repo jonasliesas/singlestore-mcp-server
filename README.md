@@ -1,8 +1,36 @@
 # singlestore-mcp-server
 
-A local MCP server for SingleStore, meant to run in **stdio** mode from VS
-Code. It's built on two official SDKs rather than reimplementing protocol or
-driver code:
+A local MCP server for SingleStore that runs in **stdio** mode from Claude
+Code, Claude Desktop or VS Code, and works with **SingleStore Helios and
+self-managed clusters** alike.
+
+## What it does
+
+- **SQL and schema tools**: run SQL, list databases and tables, describe
+  tables, so Claude can query and explain your data.
+- **Pipelines as first-class tools**: create, alter, start, stop, test, drop
+  and inspect SingleStore Pipelines (S3, Kafka, Azure, GCS, filesystem).
+- **Interactive apps** in Claude (MCP Apps), combined in one **SingleStore
+  Workspace** with a left-hand rail:
+  - **SQL Editor**: autocomplete for SingleStore SQL, functions and your
+    schema; results grid; Open/Save `.sql` files; procedure-aware statements.
+  - **Notebook**: SQL, Python and text cells on a Jupyter kernel; SQL results
+    become pandas DataFrames; charts; `%sql` / `%%sql` magics; `.ipynb` files
+    compatible with SingleStore Notebooks; several notebooks as tabs.
+  - **Schema Explorer**, **Pipeline Monitor**, **Cluster Monitor** (CPU,
+    memory, disk per node and running queries) and a **Query Grid**.
+- **Claude inside the apps**: a chat panel in the SQL Editor and the Notebook
+  that checks the database (read-only) and answers with SQL / Python you can
+  insert with one click.
+- **Slash commands**: `/singlestore-workspace`, `/singlestore-notebook`,
+  `/singlestore-table-report`, `/singlestore-pipeline-health`, … and
+  `/singlestore-restart` to reload the server without reconnecting.
+- **Standalone workspace**: the same apps in their own window from a desktop
+  shortcut, without Claude.
+
+## How it's built
+
+It's built on official SDKs rather than reimplementing protocol or driver code:
 
 - [`mcp`](https://github.com/modelcontextprotocol/python-sdk) — the official
   Model Context Protocol Python SDK. It handles the stdio transport, JSON-RPC
@@ -12,11 +40,11 @@ driver code:
   connection.
 - [`@modelcontextprotocol/ext-apps`](https://github.com/modelcontextprotocol/ext-apps)
   — the official MCP Apps browser client, vendored and inlined into the
-  interactive UIs (see [MCP Apps](#mcp-apps)).
+  interactive UIs (see [SingleStore Workspace](#singlestore-workspace)).
 
 Everything in [`src/singlestore_mcp`](src/singlestore_mcp) is glue: a
-connection wrapper ([`db.py`](src/singlestore_mcp/db.py)) and a set of MCP
-tools ([`server.py`](src/singlestore_mcp/server.py)), including first-class
+pooled connection wrapper ([`db.py`](src/singlestore_mcp/db.py)) and a set of MCP
+tools ([`server_impl.py`](src/singlestore_mcp/server_impl.py)), including first-class
 tools for **Pipelines** (SingleStore's mechanism for continuously loading
 data from S3/Kafka/Azure/GCS/filesystem sources), which the official
 `mcp-server-singlestore` package does not expose as dedicated tools.
@@ -39,37 +67,34 @@ Pipelines:
 - `start_pipeline` (background or `FOREGROUND`, with optional batch limit)
 - `stop_pipeline`, `drop_pipeline`, `test_pipeline`
 
-Interactive apps (see below): `pipeline_monitor`, `query_grid`, `schema_explorer`,
-`cluster_monitor`, `sql_editor`.
+Interactive apps (see [SingleStore Workspace](#singlestore-workspace)): `sql_editor` (opens the
+SingleStore Workspace), `notebook`, `pipeline_monitor`, `query_grid`,
+`schema_explorer`, `cluster_monitor`.
 
-## Standalone workspace (desktop shortcut)
+Other:
+- `browser_link`: a link that opens an app full-window in your browser
+- `sql_editor_reply`: send SQL or an answer into an open SQL Editor's chat
+- `restart_server`: reload the server's code and apps without reconnecting
 
-The workspace also runs without Claude, in its own window:
-
-```bash
-uv run python scripts/make_shortcut.py --database SASDP
-```
-
-creates a **SingleStore Workspace** shortcut on the desktop. It runs
-`pythonw -m singlestore_mcp.workspace_app` (no console window), which starts
-the app server on `127.0.0.1:8790` and opens the workspace in an Edge app
-window (`--browser` for the default browser). Clicking it again while it runs
-just opens another window; the server stops 5 minutes after the last window
-closes. It uses the `SINGLESTORE_*` environment variables (set them as user
-environment variables), and the editor's chat uses the in-editor assistant.
-
-## Prompts (slash commands)
-
-In Claude Code the server's prompts show up as slash commands:
+## Slash commands
 
 | Command | What it does |
 |---|---|
-| `/singlestore:workspace` | Open the SingleStore Workspace (optional database, view) |
-| `/singlestore:explain_query` | Explain a query, run `EXPLAIN`, suggest a faster version |
-| `/singlestore:create_pipeline` | Build a pipeline from an S3 path / Kafka topic (asks before creating) |
-| `/singlestore:pipeline_health` | Check all pipelines for errors, stalls and lag |
-| `/singlestore:table_report` | Size, storage, keys and data profile of a table |
-| `/singlestore:restart` | Restart the server so code and app changes load |
+| `/singlestore-workspace [db] [view]` | Open the SingleStore Workspace, e.g. `/singlestore-workspace SASDP notebook` |
+| `/singlestore-notebook [db] [file]` | Open a notebook |
+| `/singlestore-explain-query <sql>` | Explain a query, run `EXPLAIN`, suggest a faster version |
+| `/singlestore-create-pipeline <source>` | Build a pipeline from an S3 path / Kafka topic (asks before creating) |
+| `/singlestore-pipeline-health [db]` | Check all pipelines for errors, stalls and lag |
+| `/singlestore-table-report <table>` | Size, storage, keys and data profile of a table |
+| `/singlestore-restart` | Restart the server so code and app changes load |
+
+These are Claude Code **skills**, in [`claude-skills/`](claude-skills): copy
+the folders to `~/.claude/skills/` to use them.
+
+The server also offers the same commands as MCP prompts
+(`/singlestore:workspace`, `/singlestore:restart`, …). The Claude Code
+desktop app adds an "(MCP)" label to those that it then refuses to send, so
+use the skills there; other clients can use the prompts.
 
 ### Restarting without reconnecting
 
@@ -81,129 +106,243 @@ changes load in a few seconds without touching `/mcp`. Browser links made
 before a restart stop working. Set `SINGLESTORE_MCP_NO_SUPERVISOR=1` to run
 the server without the relay.
 
-## MCP Apps
+## SingleStore Workspace
 
 In hosts that support [MCP Apps](https://modelcontextprotocol.io/seps/1865-mcp-apps-interactive-user-interfaces-for-mcp)
-(e.g. Claude), these tools render an interactive UI inline in the chat
-instead of plain text. In other hosts they still return a normal text result.
+(e.g. Claude), the server's apps open as interactive windows in the chat. In
+other hosts the same tools return a normal text result.
 
-| Tool | What it shows |
+The apps are combined in the **SingleStore Workspace**. A slim rail on the
+left switches between its views:
+
+| View | What it's for |
 |---|---|
-| `pipeline_monitor(database?)` | Every pipeline's state, source → target table, latest batch, batch history and recent errors. Start / Stop (with confirmation), Test, error drill-down, "Ask Claude" to diagnose an error, optional 10 s auto-refresh. |
-| `query_grid(sql, database?, max_rows=1000)` | Read-only query results as a sortable, filterable, paginated grid with CSV export. The SQL can be edited and re-run from the grid. Only SELECT / WITH / SHOW / DESCRIBE / EXPLAIN are accepted; writes are rejected before reaching the database. |
-| `schema_explorer(database?, table?)` | Databases → tables tree with row counts and sizes, and per-table columns, DDL (shard/sort keys) and a row preview. "Ask Claude" and "Query in grid" hand the table back to the chat. |
-| `cluster_monitor()` | Every node (aggregators and leaves) with SingleStore CPU (against the node's core limit, with a short history), memory against `max_memory`, and disk space and read/write throughput; plus the queries running right now (expand a row for the full SQL and "Ask Claude"). Auto-refreshes every 5 s. |
-| `sql_editor(database?, sql?, view?, table?)` | Opens the **SingleStore Workspace** (see below) on its SQL view: schema tree, SQL editor (CodeMirror) and results pane, split top/bottom with a draggable divider. Autocomplete for SQL and SingleStore keywords, SingleStore built-in functions (with signatures), your functions/procedures, databases, tables and columns (other databases load as you type `db.`). Ctrl+Enter runs the statement at the cursor or the selection. Reads run immediately; statements that change data or schema ask for confirmation first. A **Chat with Claude** tab answers questions about the editor's SQL; each SQL block in an answer gets Replace / Insert / Copy buttons. Answers come either **here in the editor** (default; see "In-app assistant" below) or **in the Claude chat** (the question goes to the chat box, you click Send, and Claude answers into the editor with `sql_editor_reply`). |
+| **SQL** | [SQL Editor](#sql-editor): write and run SQL, with autocomplete and Claude |
+| **Notebook** | [Notebook](#notebook): SQL and Python cells on a Jupyter kernel |
+| **Schema** | [Schema Explorer](#schema-explorer-pipeline-monitor-cluster-monitor-query-grid): databases, tables, columns, keys |
+| **Pipelines** | [Pipeline Monitor](#schema-explorer-pipeline-monitor-cluster-monitor-query-grid): state, progress and errors of pipelines |
+| **Cluster** | [Cluster Monitor](#schema-explorer-pipeline-monitor-cluster-monitor-query-grid): CPU, memory, disk per node and running queries |
 
-### SingleStore Workspace
+**Opening it**
 
-`sql_editor` opens a workspace that combines the apps in one window: a slim
-rail on the left switches between **SQL** (the editor), **Schema** (Schema
-Explorer), **Pipelines** (Pipeline Monitor) and **Cluster** (Cluster
-Monitor), with Open in browser / Full screen at the bottom. `view` picks the
-view it opens on (`sql`, `schema`, `pipelines`, `cluster`) and `table`
-pre-selects a table in the Schema view. Each view loads the first time you
-open it and keeps its state when you switch away; hidden views pause their
-auto-refresh. In the Schema view, **Query in grid** opens the table's query in
-the SQL view and runs it. The standalone apps still work on their own.
+- Ask Claude ("open the SingleStore workspace"), or use `/singlestore-workspace`
+  (optionally with a database and view, e.g. `/singlestore-workspace SASDP notebook`).
+- The tool behind it is `sql_editor(database?, sql?, view?, table?)`; `view`
+  is `sql`, `notebook`, `schema`, `pipelines` or `cluster`.
+- Outside Claude: in your browser or as a desktop app, see
+  [Browser and desktop window](#browser-and-desktop-window).
 
-The workspace acts as a small MCP Apps host for its views: each view runs in
-its own sandboxed iframe, loaded with `resources/read`, and the workspace
-relays its tool calls, chat messages and model-context updates (merged into
-one context, so Claude knows which view you're on) to the real host.
+**Working with it**
 
-### SQL files (SQL Editor)
+- Each view loads the first time you open it and keeps its state when you
+  switch; hidden views pause their auto-refresh.
+- Views hand work to each other, e.g. **Query in grid** in the Schema view
+  opens the table's query in the SQL view and runs it.
+- The database dropdowns refresh themselves (when opened, after `CREATE` /
+  `DROP DATABASE`, and with ↻).
+- **⤢ Full screen** (where the host supports it) and **↗ Open in browser** sit
+  at the bottom of the rail.
+- Buttons that run tools go through Claude, which may ask you to approve
+  them; statements that change data also ask in the app first.
 
-**Open** / **Save** (Ctrl+S) / **Save as** in the editor's header work on
-`.sql` files in a folder on the machine running the MCP server, by default
-`Documents\SingleStore SQL` (set `SINGLESTORE_MCP_SQL_DIR` to use another
-folder). Subfolders are allowed (`reports/sales.sql`); paths outside the
-folder are refused, and replacing an existing file asks first. The header
-shows the current file name and a ● for unsaved changes. This works inside
-Claude and in the browser view.
+### SQL Editor
 
-**Browse computer…** (in the Open panel) opens any local file with the
-browser's file picker; saving it stores a copy in the SQL folder. **Download**
-(in Save as) saves the SQL through the browser instead, where the host allows
-downloads (the browser view does; Claude may not).
+**Writing and running SQL**
 
-### In-app assistant (SQL Editor chat)
+- Schema tree on the left; editor on top, results grid below (drag the
+  divider to resize).
+- Autocomplete for SQL and SingleStore keywords, built-in functions (with
+  signatures), your functions and procedures, databases, tables and columns.
+- **Ctrl+Enter** runs the statement at the cursor, or the selection. Reads run
+  right away; statements that change data or schema ask first.
+- Understands `CREATE PROCEDURE / FUNCTION … BEGIN … END` bodies, `DECLARE`
+  sections and `DELIMITER //` scripts as one statement.
+- History of recent statements; results export to CSV.
 
-With "Answer: here in the editor", the server answers editor questions itself
-by running Claude Code headless (`claude -p`) with your own Claude login: no
-API key, no Send click in the chat, and it works in the browser view too.
-Progress ("Looking at the schema…", "Running query 2…") and a Stop button
-show while it works; each editor keeps one Claude session, so follow-up
-questions have context. Each editor keeps one Claude Code process running (streaming
-input), started in the background when you open the chat tab, so questions don't
-wait for Claude Code to start: they go straight to the model and the
-read-only tools. Idle processes close after 10 minutes (at most 4 run
-at once); changing Speed or pressing Stop restarts the process and resumes
-the same conversation.
+**Files**
 
-The headless session has no built-in tools (no shell or file access) and one
-MCP server: this package started with `python -m singlestore_mcp.assistant
---serve-readonly`, which offers only `list_databases`, `list_tables`,
-`describe_table` and `read_query` (the Query Grid's read-only guard, at most
-200 rows). It can't change data; it gives you statements to review and run.
+- **Open**, **Save** (Ctrl+S) and **Save as** open a file browser: folders,
+  plus shortcuts to the SQL folder, Documents, Desktop, Downloads and Home.
+- Files can live anywhere under your user folder; the SQL folder
+  (`Documents\SingleStore SQL` by default) is where the browser starts.
+- The header shows the file name and ● for unsaved changes; replacing a file
+  asks first.
+- **Browse computer…** uses the browser's own file picker; **Download** saves
+  through the browser (works in the browser window; Claude may block it).
 
-Requirements and settings:
-- Claude Code installed and logged in (`claude`, then `/login`, once in a
-  terminal). If it's missing, the editor offers only the Claude chat.
-- It uses your Claude plan's usage like any other Claude Code session; its
-  sessions are kept under `%LOCALAPPDATA%\singlestore-mcp\assistant`.
-- **Speed** in the chat options picks the profile: *Fast* (Haiku),
-  *Balanced* (Sonnet, medium effort; default) or *Thorough* (Opus, high effort).
-- Every question also gets the SingleStore skill
-  [`skills/singlestore-sql/SKILL.md`](src/singlestore_mcp/skills/singlestore-sql/SKILL.md):
-  key SingleStore SQL learnings (case-sensitive names, one table per `DROP`,
-  no `GROUP_CONCAT(DISTINCT … ORDER BY)`, procedure syntax, pipelines,
-  monitoring views). Add to it as you find new pitfalls. It's a standard Claude
-  skill, so you can also copy the folder to `~/.claude/skills/` for Claude Code itself.
-- Optional environment variables: `SINGLESTORE_MCP_CLAUDE` (path to the
-  `claude` executable), `SINGLESTORE_MCP_ASSISTANT_MODEL` /
-  `SINGLESTORE_MCP_ASSISTANT_EFFORT` (the Balanced profile; default `sonnet` /
-  `medium`), `SINGLESTORE_MCP_ASSISTANT_TIMEOUT` (seconds, default 300).
+**Chat with Claude**
 
-The model gets a compact text summary (e.g. the first 20 rows); the full data
-goes to the UI only, via `structuredContent`, which the MCP Apps spec keeps
-out of the model's context. Helper tools the UIs call for refreshes and
-drill-downs are marked app-only, so they don't clutter the model's tool list.
+- The **Claude** button opens a chat panel on the right.
+- Claude sees the editor's SQL and last result, checks the database
+  (read-only), and answers with SQL that you **Replace**, **Insert** or
+  **Copy** into the editor with one click. If the editor is empty, the
+  answer's SQL goes straight in.
+- **Answer here in the editor** (default) uses the
+  [in-app assistant](#claude-in-the-apps); **in the Claude chat** sends the
+  question to the chat box instead (you click Send there).
 
-Layout: [`src/singlestore_mcp/apps/`](src/singlestore_mcp/apps) — one
-`<name>.py` (tools) + `<name>.html` (UI) per app, shared `shared.js` /
-`shared.css` helpers, and the official ext-apps client in `vendor/`, inlined
-at startup so the apps need no CDN or internet access. The SQL Editor also
-inlines a CodeMirror bundle (`vendor/codemirror-bundle.js`, MIT) built by
-`scripts/build_codemirror` (`npm install && npm run build`) and a list of
-SingleStore built-in functions (`vendor/singlestore_functions.json`).
+### Notebook
 
-Each app has a **⤢ Full screen** button (Esc to exit) when the host offers
-fullscreen display mode; the grid and explorer then use the full height.
+**Cells**
 
-**↗ Open in browser** reopens the current view (same database, query or
-table) full-window in your normal browser, for when the chat column is too
-narrow. Each app's result also carries this link (`browser_url`), which
-Claude posts under the app, and the `browser_link` tool creates one on
-request. If the host won't open links itself, the button shows the link with
-Copy / "Put link in chat". The server starts a small web server on `127.0.0.1` on first use and
-gives each run a secret link; it only accepts calls from its own page and
-only runs the apps' tools plus start/stop/test pipeline. Links stop working
-when the MCP server restarts. Actions taken there (e.g. Start/Stop) don't go
-through Claude's approval prompt — the apps' own confirmations still apply —
-and "Ask Claude" is only available inside Claude.
+- **SQL cells** run against SingleStore. The result shows as a grid and
+  becomes the pandas DataFrame `df` (and a named variable if you fill in
+  *result →*). Several statements per cell are fine; writes ask first.
+- **Python cells** run on an IPython (Jupyter) kernel with pandas (`pd`),
+  matplotlib (inline charts) and `conn` (a SingleStore connection).
+- **Text cells** are Markdown with embedded HTML, as in Jupyter (styled
+  headers, images, alert boxes); scripts are stripped.
+- **Shift+Enter** runs and moves on, **Ctrl+Enter** runs, **Alt+Enter** runs
+  and adds a cell. The header has **Run all**, interrupt **■** and restart
+  **↻**, plus the kernel's status.
 
-Notes:
-- `TEST PIPELINE` loads no data, but a failed test is recorded in the
-  pipeline's batch history and error log like a real batch.
-- Each button that calls a tool goes through the host, which may ask you to
-  approve app-initiated tool calls.
+**SQL from Python (SingleStore Notebooks compatible)**
 
-### Developing apps
+- `rows = %sql SELECT …` returns rows (`rows[0][1]`, `pd.DataFrame(rows)`,
+  `rows.DataFrame()`); `%sql name << SELECT …` stores the result in `name`.
+- `%%sql [name <<]` cells, and `{{ variable }}` to insert Python values.
+- `connection_url` (and `SINGLESTOREDB_URL`, used by `s2.connect()` /
+  `s2.create_engine()`) follows the database selected in the notebook.
+- Magics and Python writes run without the app's confirmation, as in Jupyter.
 
-`scripts/dev_host.py` is a local stand-in for Claude: it starts the real
-server over stdio, renders an app in a sandboxed iframe and speaks the MCP
-Apps protocol to it, against your real cluster.
+**Notebooks and files**
+
+- Several notebooks open as **tabs**, each with its own kernel. **New** opens
+  a new tab; **Open** loads into a new tab unless the current one is empty.
+  Closing a tab stops its kernel (unsaved tabs need a second click).
+- Saved as standard `.ipynb` files, with SQL cells as `%%sql` cells, so they
+  open in Jupyter / VS Code and SingleStore Notebooks, and SingleStore's
+  example notebooks open here.
+
+**Python environment and packages**
+
+- Python runs in its own environment, `~/.singlestore-mcp/notebook-env`,
+  installed with `uv` the first time (the notebook offers an **Install**
+  button). It has what SingleStore's examples expect: pandas, matplotlib,
+  singlestoredb, SQLAlchemy with the SingleStore dialect, ibis, scikit-learn.
+- **Packages** lists what's installed (with filter) and installs more. `%pip
+  install …` and `!pip install …` in a cell also install into this
+  environment. Restart the kernel (↻) after installing.
+- The environment is shared by every notebook, by Claude and by the desktop
+  window, and survives restarts.
+- Windows specifics handled for you: `pandarallel`'s `parallel_apply` runs as
+  plain `apply`, and Hugging Face downloads use plain HTTPS (its newer
+  download method stalls on some corporate networks).
+- Code runs with your user rights on this machine, like any local Jupyter.
+  Kernels stop after 30 idle minutes; SQL cells fetch at most 100,000 rows.
+
+**Claude**
+
+- The **Claude** button opens a chat panel that sees the notebook's cells and
+  outputs, checks the database (read-only) and answers with SQL or Python
+  you insert as a new cell, or use to replace the selected one.
+
+### Schema Explorer, Pipeline Monitor, Cluster Monitor, Query Grid
+
+| App (tool) | What it shows and does |
+|---|---|
+| **Schema Explorer** `schema_explorer(database?, table?)` | Databases → tables with row counts and sizes; per table the columns, DDL (shard / sort keys) and a row preview. **Ask Claude** and **Query in grid**. |
+| **Pipeline Monitor** `pipeline_monitor(database?)` | Every pipeline's state, source → table, progress (files loaded / Kafka lag), latest batches and errors. Start / Stop (with confirmation), Test, error details, **Ask Claude**, auto-refresh. |
+| **Cluster Monitor** `cluster_monitor()` | Per node SingleStore CPU (against its core limit), memory and disk with a 15-minute CPU chart (all / aggregators / leaves), plus the queries running now. Refreshes every 5 s. |
+| **Query Grid** `query_grid(sql, database?, max_rows=1000)` | Read-only results as a sortable, filterable grid with CSV export; the SQL can be edited and re-run. Writes are refused. |
+
+`TEST PIPELINE` loads no data, but a failed test is still recorded in the
+pipeline's batch history and error log.
+
+### Claude in the apps
+
+The chat panels in the SQL Editor and the Notebook are answered by the
+server itself, by running Claude Code headless with your own Claude login:
+no API key, no Send click in the chat, and it also works in the browser and
+desktop window.
+
+- **What it can do:** read the schema and run read-only queries (through its
+  own MCP server with only `list_databases`, `list_tables`, `describe_table`
+  and `read_query`). It has no shell or file access and can't change data:
+  it gives you statements to review and run.
+- **Speed:** *Fast* (Haiku), *Balanced* (Sonnet, medium effort; default) or
+  *Thorough* (Opus, high effort).
+- **Knows SingleStore:** every question includes the SingleStore SQL skill
+  ([`SKILL.md`](src/singlestore_mcp/skills/singlestore-sql/SKILL.md)), key
+  learnings such as case-sensitive names and procedure syntax. Add to it as
+  you find pitfalls.
+- **Quick answers:** each editor / notebook keeps one Claude process running
+  (started when you open the panel), so questions don't wait for Claude Code to
+  start; follow-ups keep the conversation. Idle processes close after 10
+  minutes. Progress and a **Stop** button show while it works.
+- **Needs** Claude Code installed and logged in (`claude`, then `/login`,
+  once). It uses your Claude plan like any other Claude Code session.
+
+### Browser and desktop window
+
+**↗ Open in browser** reopens the current view full-window in your browser,
+for when the chat column is too narrow. Claude also posts this link under each
+app, and the `browser_link` tool makes one on request. Links work on this
+machine only and stop working when the server restarts.
+
+The workspace also runs **without Claude**, in its own window:
+
+```bash
+uv run python scripts/make_shortcut.py --database SASDP
+```
+
+creates a **SingleStore Workspace** desktop shortcut. It starts the app server
+on `127.0.0.1` and opens the workspace in an Edge app window (`--browser` for
+your default browser). Clicking it again opens another window; after a code
+update it replaces the running server; it stops 5 minutes after the last
+window closes. It needs the `SINGLESTORE_*` settings as user environment
+variables.
+
+In the browser and desktop window, actions such as Start / Stop pipeline don't
+go through Claude's approval prompt (the apps' own confirmations still apply),
+and chat answers come from the in-app assistant.
+
+### Settings
+
+All optional, as environment variables of the MCP server:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `SINGLESTORE_MCP_SQL_DIR` | `Documents\SingleStore SQL` | Folder the file browser starts in |
+| `SINGLESTORE_MCP_FILE_ROOTS` | your user folder | Extra folders Open / Save may use (separated by `;`) |
+| `SINGLESTORE_MCP_HOME` | `~/.singlestore-mcp` | Where the notebook environment and app state live |
+| `SINGLESTORE_MCP_NOTEBOOK_PYTHON` | (own environment) | Use an existing Python for notebooks instead |
+| `SINGLESTORE_MCP_NOTEBOOK_FETCH_LIMIT` | `100000` | Max rows a notebook SQL cell fetches |
+| `SINGLESTORE_MCP_IMAGE_DOMAINS` | GitHub raw hosts | Image hosts allowed in notebook text cells inside Claude |
+| `SINGLESTORE_MCP_CLAUDE` | `claude` on PATH | Claude Code executable for the in-app assistant |
+| `SINGLESTORE_MCP_ASSISTANT_MODEL` / `_EFFORT` | `sonnet` / `medium` | The *Balanced* assistant profile |
+| `SINGLESTORE_MCP_ASSISTANT_TIMEOUT` | `300` | Seconds before an answer is abandoned |
+| `SINGLESTORE_MCP_POOL_SIZE` | `8` | Database connections in the server's pool |
+| `SINGLESTORE_MCP_NO_SUPERVISOR` | off | Run without the restart relay |
+
+`~/.singlestore-mcp` is used rather than `%LOCALAPPDATA%` because Windows gives
+the Claude desktop app a private copy of that folder, so Claude and the desktop
+window would otherwise use different notebook environments.
+
+### How the apps work (for developers)
+
+- The model gets a compact text summary of each app's result (e.g. the
+  first 20 rows); the full data goes to the app only. Helper tools the apps
+  call for refreshes and drill-downs are app-only, so they don't clutter the
+  model's tool list.
+- Layout: [`src/singlestore_mcp/apps/`](src/singlestore_mcp/apps) has one
+  `<name>.py` (tools) + `<name>.html` (UI) per app, shared `shared.js` /
+  `shared.css`, and vendored libraries in `vendor/` (the official ext-apps
+  client and a CodeMirror bundle built by `scripts/build_codemirror`), inlined
+  so the apps need no internet access.
+- The workspace is a small MCP Apps host for its views: each view runs in its
+  own sandboxed iframe (loaded through a tool call, so hosts can't serve a
+  stale page after a restart), and the workspace relays its tool calls,
+  messages and model context to the real host.
+- Notebook kernels run in the notebook environment through
+  [`notebook_bridge.py`](src/singlestore_mcp/notebook_bridge.py), driven by
+  [`notebook_kernel.py`](src/singlestore_mcp/notebook_kernel.py).
+- Every page carries a build stamp (hover the Notebook title) to spot an
+  outdated page.
+
+**Dev host:** `scripts/dev_host.py` is a local stand-in for Claude. It starts
+the real server over stdio, renders an app and speaks the MCP Apps protocol
+to it, against your real cluster.
 
 ```bash
 uv run python scripts/dev_host.py --port 8765

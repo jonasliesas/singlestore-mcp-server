@@ -5,6 +5,8 @@ const X = globalThis.McpExtApps;
 const S2 = (globalThis.S2 = {});
 
 S2.app = null;
+// Short hash of this page's build (see _core.build_page); shown in tooltips.
+S2.build = document.querySelector('meta[name="s2-build"]')?.content ?? "dev";
 
 // Connect to the host. Handlers are installed before connecting because the
 // host may deliver tool input/result immediately after initialization.
@@ -362,4 +364,79 @@ S2.dataTable = function (columns, rows, opts = {}) {
   draw();
   return S2.h("div", { class: "s2-table-wrap", style: { maxHeight: opts.maxHeight ?? "420px" } },
     S2.h("table", { class: "s2-table" }, S2.h("thead", {}, S2.h("tr", {}, headCells)), tbody));
+};
+
+// File browser shared by the SQL Editor and the Notebook: folders to
+// navigate, shortcuts (SQL folder, Documents, Desktop, Downloads, Home) and
+// the files of one kind. Server side: files_browse (folders inside the
+// user's home folder and SINGLESTORE_MCP_FILE_ROOTS).
+//   S2.fileBrowser(container, { kind: "sql"|"notebook", mode: "open"|"save",
+//     start, name, onOpen(path), onSave(path, overwrite) -> {exists}, onClose, extra: [buttons] })
+S2.fileBrowser = function (box, opts) {
+  const { h } = S2;
+  const key = `s2-browse-${opts.kind}`;
+  let listing = null, error = null;
+  let folder = opts.start || (() => { try { return localStorage.getItem(key); } catch { return null; } })() || null;
+  const filter = h("input", { class: "s2-input", type: "search", placeholder: "Filter…", "aria-label": "Filter", oninput: () => draw() });
+  const nameInput = opts.mode === "save"
+    ? h("input", { class: "s2-input", value: opts.name || "", spellcheck: false, "aria-label": "File name",
+        onkeydown: (e) => { if (e.key === "Enter") save(false); if (e.key === "Escape") opts.onClose?.(); } })
+    : null;
+  const message = h("div", { class: "row" });
+  const ago = (t) => { const s = Date.now() / 1000 - t; return s < 90 ? "just now" : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 129600 ? `${Math.round(s / 3600)} h ago` : new Date(t * 1000).toLocaleDateString(); };
+  const sep = () => (listing?.path?.includes("\\") ? "\\" : "/");
+
+  async function go(path) {
+    try {
+      listing = await S2.callTool("files_browse", { path, kind: opts.kind });
+      folder = listing.path; error = null;
+      try { localStorage.setItem(key, folder); } catch {}
+    } catch (e) {
+      error = String(e?.message ?? e).replace(/^Error executing tool [\w-]+:\s*/, "");
+      if (!listing && path) return go(null);  // remembered folder gone: start at the SQL folder
+    }
+    filter.value = "";
+    draw();
+  }
+  async function save(overwrite) {
+    let name = nameInput.value.trim();
+    if (!name) return;
+    const full = /^([a-zA-Z]:[\/]|[\/])/.test(name) ? name : `${listing.path}${sep()}${name}`;
+    message.replaceChildren(h("span", { class: "s2-spinner" }), " Saving…");
+    try {
+      const res = await opts.onSave(full, overwrite);
+      if (res?.exists) {
+        message.replaceChildren(h("span", { class: "warn" }, `${name} already exists here.`),
+          h("button", { class: "s2-btn", onclick: () => save(true) }, "Replace it"),
+          h("button", { class: "s2-btn ghost", onclick: () => message.replaceChildren() }, "Pick another name"));
+      } else message.replaceChildren();
+    } catch (e) {
+      message.replaceChildren(h("span", { class: "warn" }, `Couldn't save: ${String(e?.message ?? e).replace(/^Error executing tool [\w-]+:\s*/, "")}`));
+    }
+  }
+  function draw() {
+    const q = filter.value.trim().toLowerCase();
+    const match = (n) => !q || n.toLowerCase().includes(q);
+    const items = [];
+    if (listing?.parent) items.push(h("button", { class: "item", onclick: () => go(listing.parent) }, h("span", { class: "n" }, "↑ .."), h("span", { class: "m" }, "up")));
+    for (const f of listing?.folders ?? []) if (match(f.name)) items.push(h("button", { class: "item", onclick: () => go(f.path) }, h("span", { class: "n" }, `📁 ${f.name}`), h("span", { class: "m" }, "")));
+    for (const f of listing?.files ?? []) if (match(f.name)) items.push(h("button", { class: "item",
+      title: f.path,
+      onclick: () => (opts.mode === "open" ? opts.onOpen(f.path) : (nameInput.value = f.name, nameInput.focus())),
+      ondblclick: () => (opts.mode === "save" ? save(false) : null) },
+      h("span", { class: "n" }, `${opts.kind === "notebook" ? "📓" : "📄"} ${f.name}`), h("span", { class: "m" }, `${S2.fmt.bytes(f.size)} · ${ago(f.modified)}`)));
+    if (!items.length) items.push(h("div", { class: "item m" }, error ?? (listing ? (q ? "Nothing matches" : `No ${opts.kind === "notebook" ? ".ipynb" : ".sql"} files or folders here`) : "Loading…")));
+    const shortcuts = (listing?.shortcuts ?? []).map((s) => h("button", { class: `s2-btn ghost${s.path === listing?.path ? " primary" : ""}`, title: s.path, onclick: () => go(s.path) }, s.label));
+    box.replaceChildren(...[
+      h("div", { class: "row" }, h("strong", {}, opts.mode === "open" ? "Open" : "Save as"), ...shortcuts, ...(opts.mode === "open" ? opts.extra ?? [] : []), h("span", { class: "s2-spacer" }),
+        h("button", { class: "s2-btn ghost", onclick: () => opts.onClose?.() }, opts.mode === "open" ? "Close" : "Cancel")),
+      h("div", { class: "row" }, h("span", { class: "s2-muted", title: listing?.path ?? "", style: { fontFamily: "var(--s2-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "60%" } }, listing?.path ?? "…"), filter),
+      h("div", { class: "list" }, ...items),
+      nameInput ? h("div", { class: "row" }, nameInput, h("button", { class: "s2-btn primary", onclick: () => save(false) }, "Save"), ...(opts.mode === "save" ? opts.extra ?? [] : [])) : null,
+      error && listing ? h("div", { class: "row" }, h("span", { class: "warn" }, error)) : null,
+      message].filter(Boolean));
+    if (nameInput && document.activeElement !== filter) { nameInput.focus(); }
+  }
+  draw();
+  go(folder);
 };

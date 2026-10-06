@@ -19,7 +19,7 @@ from mcp.types import CallToolResult, ToolAnnotations
 
 from .. import assistant
 from ..db import db
-from ._core import APP_ONLY, apps, jsonable_rows, register_app, tool_result, with_browser_link
+from ._core import APP_ONLY, apps, jsonable_rows, page_html, register_app, tool_result, with_browser_link
 from .query_grid import MAX_ROWS_LIMIT, ReadOnlyViolation, check_read_only, run_query
 
 URI = "ui://singlestore/sql-editor.html"
@@ -37,13 +37,27 @@ register_app(
 # The workspace shell: SQL editor plus the Schema, Pipelines and Cluster apps
 # as views behind a left-hand rail. sql_editor opens it.
 WORKSPACE_URI = "ui://singlestore/workspace.html"
-WORKSPACE_VIEWS = ("sql", "schema", "pipelines", "cluster")
+WORKSPACE_VIEWS = ("sql", "notebook", "schema", "pipelines", "cluster")
 register_app(
     WORKSPACE_URI,
     "workspace.html",
     name="SingleStore Workspace",
-    description="SQL editor with schema explorer, pipeline monitor and cluster monitor views",
+    description="SQL editor with notebook, schema explorer, pipeline monitor and cluster monitor views",
+    external_images=True,  # the Notebook view renders text cells with images
 )
+
+
+@apps.tool(resource_uri=WORKSPACE_URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def app_page(uri: str) -> CallToolResult:
+    """HTML of one of this server's app pages (the workspace loads its views with this).
+
+    Tool results aren't cached by hosts, unlike resources/read, so views pick
+    up changes right after restart_server.
+    """
+    html = page_html(uri)
+    if html is None:
+        raise LookupError(f"No app page {uri!r}")
+    return tool_result(f"{uri} ({len(html) // 1024} KB)", {"uri": uri, "html": html})
 
 
 def _databases() -> list[str]:
@@ -76,7 +90,7 @@ def sql_editor(
     Args:
         database: Database to start in (case-sensitive).
         sql: SQL to put in the editor (not run automatically).
-        view: View to show first: "sql" (default), "schema", "pipelines" or "cluster".
+        view: View to show first: "sql" (default), "notebook", "schema", "pipelines" or "cluster".
         table: For view="schema": table to pre-select in `database`.
     """
     if view not in WORKSPACE_VIEWS:
@@ -137,9 +151,11 @@ def sql_editor_execute(sql: str, database: str | None = None, max_rows: int = 10
 
 
 # ---------------------------------------------------------------- SQL files
-# Open/Save work on .sql files in one folder on the machine running this
-# server (the user's laptop), so they work inside Claude and in the browser
-# view alike. SINGLESTORE_MCP_SQL_DIR overrides the default folder.
+# Open/Save work on files on the machine running this server (the user's
+# laptop), so they work inside Claude and in the browser view alike. Names
+# are relative to the SQL folder (SINGLESTORE_MCP_SQL_DIR) or absolute paths;
+# either way they must be inside an allowed root: the user's home folder, the
+# SQL folder, and any SINGLESTORE_MCP_FILE_ROOTS (separated by os.pathsep).
 _SQL_SUFFIX = ".sql"
 _MAX_FILE_BYTES = 2_000_000
 _MAX_LISTED = 500
@@ -153,22 +169,116 @@ def sql_dir() -> Path:
     return (documents if documents.is_dir() else Path.home()) / "SingleStore SQL"
 
 
-def _sql_path(name: str) -> Path:
-    """Resolve a file name inside the SQL folder; subfolders allowed, nothing outside it."""
-    root = sql_dir().resolve()
-    name = name.strip().replace("\\", "/")
-    if not name or name.endswith("/"):
+def file_roots() -> list[Path]:
+    roots = [Path.home(), sql_dir()]
+    roots += [Path(r).expanduser() for r in os.environ.get("SINGLESTORE_MCP_FILE_ROOTS", "").split(os.pathsep) if r.strip()]
+    out: list[Path] = []
+    for r in roots:
+        r = r.resolve()
+        if not any(r.is_relative_to(o) for o in out):
+            out = [o for o in out if not o.is_relative_to(r)] + [r]
+    return out
+
+
+def _check_allowed(path: Path) -> Path:
+    path = path.resolve()
+    if not any(path.is_relative_to(r) for r in file_roots()):
+        raise ValueError(f"{path} is outside the folders the editor may use (your user folder"
+                         " and SINGLESTORE_MCP_FILE_ROOTS).")
+    return path
+
+
+def _sql_path(name: str, suffix: str = _SQL_SUFFIX) -> Path:
+    """Resolve a file name: relative to the SQL folder, or absolute inside an allowed root."""
+    name = name.strip()
+    if not name or name.endswith(("/", "\\")):
         raise ValueError("Give the file a name.")
-    if not name.lower().endswith(_SQL_SUFFIX):
-        name += _SQL_SUFFIX
-    path = (root / name).resolve()
-    if not path.is_relative_to(root) or path == root:
-        raise ValueError("Files must stay inside the SQL folder.")
+    if not name.lower().endswith(suffix):
+        name += suffix
+    raw = Path(name).expanduser()
+    path = _check_allowed(raw if raw.is_absolute() else sql_dir() / name.replace("\\", "/"))
+    if path in file_roots():
+        raise ValueError("Give the file a name.")
     return path
 
 
 def _relative(path: Path) -> str:
-    return path.relative_to(sql_dir().resolve()).as_posix()
+    """Display name: relative to the SQL folder when inside it, else the full path."""
+    root = sql_dir().resolve()
+    return path.relative_to(root).as_posix() if path.is_relative_to(root) else str(path)
+
+
+def _known_folders() -> list[dict[str, str]]:
+    """Shortcuts for the file browser: the SQL folder plus Documents, Desktop, Downloads, Home."""
+    found: dict[str, Path] = {"SQL folder": sql_dir()}
+    if os.name == "nt":
+        try:
+            import winreg
+
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders")
+            for label, value in (("Documents", "Personal"), ("Desktop", "Desktop"),
+                                 ("Downloads", "{374DE290-123F-4565-9164-39C4925E467B}")):
+                try:
+                    found[label] = Path(os.path.expandvars(winreg.QueryValueEx(key, value)[0]))
+                except OSError:
+                    pass
+        except OSError:
+            pass
+    for label in ("Documents", "Desktop", "Downloads"):
+        found.setdefault(label, Path.home() / label)
+    found["Home"] = Path.home()
+    return [{"label": k, "path": str(v)} for k, v in found.items() if v.is_dir()]
+
+
+def _hidden(path: Path) -> bool:
+    if path.name.startswith((".", "$")) or path.name in ("AppData", "node_modules", "__pycache__"):
+        return True
+    attrs = getattr(path.stat(), "st_file_attributes", 0)
+    return bool(attrs & 0x2)  # FILE_ATTRIBUTE_HIDDEN
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def files_browse(path: str | None = None, kind: str = "sql") -> CallToolResult:
+    """List a folder for the file browser: subfolders and .sql (kind="sql") or .ipynb (kind="notebook") files.
+
+    ``path`` defaults to the SQL folder. Only folders inside the allowed roots
+    (the user's home folder, the SQL folder, SINGLESTORE_MCP_FILE_ROOTS) can be browsed.
+    """
+    suffix = ".ipynb" if kind == "notebook" else _SQL_SUFFIX
+    folder = _check_allowed(Path(path).expanduser() if path else sql_dir())
+    if not folder.is_dir():
+        if folder == sql_dir().resolve():
+            folder.mkdir(parents=True, exist_ok=True)
+        else:
+            raise LookupError(f"{folder} isn't a folder.")
+    folders, files = [], []
+    try:
+        entries = list(folder.iterdir())
+    except PermissionError as exc:
+        raise ValueError(f"No access to {folder}.") from exc
+    for entry in entries:
+        try:
+            if _hidden(entry):
+                continue
+            if entry.is_dir():
+                folders.append({"name": entry.name, "path": str(entry)})
+            elif entry.suffix.lower() == suffix:
+                st = entry.stat()
+                files.append({"name": entry.name, "path": str(entry), "size": st.st_size, "modified": round(st.st_mtime)})
+        except OSError:
+            continue
+    folders.sort(key=lambda f: f["name"].lower())
+    files.sort(key=lambda f: f["modified"], reverse=True)
+    parent = folder.parent
+    data = {
+        "path": str(folder),
+        "parent": str(parent) if parent != folder and any(parent.is_relative_to(r) for r in file_roots()) else None,
+        "folders": folders[:_MAX_LISTED],
+        "files": files[:_MAX_LISTED],
+        "shortcuts": _known_folders(),
+        "sql_folder": str(sql_dir()),
+    }
+    return tool_result(f"{len(folders)} folder(s), {len(files)} file(s) in {folder}", data)
 
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
@@ -199,7 +309,7 @@ def sql_editor_open_file(name: str) -> CallToolResult:
         sql = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
         sql = raw.decode("cp1252", errors="replace")
-    return tool_result(f"Opened {_relative(path)}", {"name": _relative(path), "sql": sql, "folder": str(sql_dir())})
+    return tool_result(f"Opened {_relative(path)}", {"name": _relative(path), "path": str(path), "sql": sql, "folder": str(sql_dir())})
 
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))

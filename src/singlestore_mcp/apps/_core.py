@@ -13,6 +13,8 @@ Each app is one HTML template in this directory. ``register_app`` expands its
 
 from __future__ import annotations
 
+import hashlib
+import os
 import datetime
 import decimal
 import functools
@@ -28,7 +30,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 import singlestoredb as s2
-from mcp.server.apps import Apps, ResourcePermissions
+from mcp.server.apps import Apps, ResourceCsp, ResourcePermissions
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
 
@@ -130,7 +132,9 @@ def build_page(template: str) -> str:
     if _HEAD_MARKER not in html:
         raise RuntimeError(f"{template} is missing the {_HEAD_MARKER} marker")
     html = _VENDOR_MARKER.sub(_vendor_inline, html)
-    return html.replace(_HEAD_MARKER, _head(), 1)
+    html = html.replace(_HEAD_MARKER, _head(), 1)
+    build = hashlib.sha1(html.encode("utf-8")).hexdigest()[:8]
+    return html.replace("<head>", f'<head>\n<meta name="s2-build" content="{build}">', 1)
 
 
 _browser_url_factory: Callable[[str, dict[str, Any]], str] | None = None
@@ -163,7 +167,15 @@ def with_browser_link(summary: str, data: dict[str, Any], tool: str, arguments: 
 _PAGES: dict[str, str] = {}
 
 
-def register_app(uri: str, template: str, *, name: str, description: str) -> None:
+# Hosts allowed to serve images into apps that render user content (notebook
+# text cells). Hosts like Claude enforce this CSP on the app's sandbox.
+IMAGE_DOMAINS = [d.strip() for d in os.environ.get(
+    "SINGLESTORE_MCP_IMAGE_DOMAINS",
+    "https://raw.githubusercontent.com,https://*.githubusercontent.com,https://github.com",
+).split(",") if d.strip()]
+
+
+def register_app(uri: str, template: str, *, name: str, description: str, external_images: bool = False) -> None:
     _PAGES[uri] = build_page(template)
     apps.add_html_resource(
         uri,
@@ -171,6 +183,7 @@ def register_app(uri: str, template: str, *, name: str, description: str) -> Non
         name=name,
         description=description,
         prefers_border=True,
+        csp=ResourceCsp(resource_domains=IMAGE_DOMAINS) if external_images else None,
         # Lets "Copy" put the browser link on the clipboard where the host allows it.
         permissions=ResourcePermissions(clipboard_write={}),
     )

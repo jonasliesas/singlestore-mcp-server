@@ -14,6 +14,13 @@
   .sq-body { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 10px; height: 640px; }
   .sq-body.no-tree { grid-template-columns: minmax(0, 1fr); }
   .sq-body.no-tree .sq-tree { display: none; }
+  .sq-body.chat-open { grid-template-columns: 230px minmax(0, 1fr) 340px; }
+  .sq-body.no-tree.chat-open { grid-template-columns: minmax(0, 1fr) 340px; }
+  @media (max-width: 900px) { .sq-body.chat-open, .sq-body.no-tree.chat-open { grid-template-columns: minmax(0, 1fr) 300px; } .sq-body.chat-open .sq-tree { display: none; } }
+  .sq-chat { border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); overflow: hidden; }
+  .sq-chat-top { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--s2-border-2); background: var(--s2-bg-2); font-size: var(--s2-fs-xs); }
+  .sq-chat-top strong { flex: 1; }
+  .sq-claude-btn .count { background: var(--s2-info); color: #fff; border-radius: 999px; font-size: 10px; padding: 0 6px; font-weight: 600; margin-left: 4px; }
   html[data-display-mode="fullscreen"] .sq-body { height: calc(100vh - 70px); }
   .sq-filebtns { display: inline-flex; align-items: center; gap: 2px; margin-left: 4px; }
   .sq-file { font-size: var(--s2-fs-xs); color: var(--s2-text-2); margin-left: 6px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -146,7 +153,9 @@ const profileSelect = h("select", { class: "s2-input sq-mode", "aria-label": "As
   h("option", { value: "fast" }, "Fast"), h("option", { value: "balanced" }, "Balanced"), h("option", { value: "thorough" }, "Thorough"));
 try { profileSelect.value = localStorage.getItem("s2-sql-chat-profile") || "balanced"; } catch { profileSelect.value = "balanced"; }
 const profileLabel = h("label", {}, "Speed ", profileSelect);
-const chatView = h("div", { class: "sq-chat", role: "tabpanel", hidden: true },
+const chatView = h("aside", { class: "sq-chat", hidden: true, "aria-label": "Chat with Claude" },
+  h("div", { class: "sq-chat-top" }, h("strong", {}, "Chat with Claude"),
+    h("button", { class: "s2-btn ghost", title: "Close", "aria-label": "Close chat", onclick: () => toggleChat(false) }, "✕")),
   msgsEl,
   h("div", { class: "sq-ask" }, askBox, h("button", { class: "s2-btn primary", onclick: () => ask() }, "Send")),
   h("div", { class: "sq-ask-opts" },
@@ -154,10 +163,10 @@ const chatView = h("div", { class: "sq-chat", role: "tabpanel", hidden: true },
     h("label", {}, "Answer ", modeSelect), profileLabel, modeHint));
 const fileLabel = h("span", { class: "sq-file" });
 const filePanel = h("div", { class: "sq-files", hidden: true });
-const tabsEl = h("div", { class: "sq-tabs", role: "tablist" });
-const resultsEl = h("section", { class: "sq-results", "aria-label": "Results and chat" }, tabsEl, resultView, chatView);
+const claudeBtn = h("button", { class: "s2-btn sq-claude-btn", title: "Chat with Claude about this SQL", onclick: () => toggleChat() });
+const resultsEl = h("section", { class: "sq-results", "aria-label": "Results" }, resultView);
 const mainEl = h("div", { class: "sq-main" }, editorBox, splitEl, resultsEl);
-const bodyEl = h("div", { class: "sq-body" }, treeEl, mainEl);
+const bodyEl = h("div", { class: "sq-body" }, treeEl, mainEl, chatView);
 root.replaceChildren(headEl, filePanel, bodyEl);
 
 function applySplit() { editorBox.style.flex = `0 0 ${(state.editorFrac * 100).toFixed(1)}%`; }
@@ -423,7 +432,6 @@ async function run() {
   const sql = statementAtCursor();
   if (!sql || state.running) return;
   state.running = true; state.error = null; state.confirm = null;
-  if (chat.tab !== "results") { chat.tab = "results"; renderTabs(); }
   renderResults(); renderHeader();
   try {
     const data = await S2.callTool("sql_editor_query", { sql, database: state.database, max_rows: MAX_ROWS });
@@ -450,8 +458,29 @@ async function runConfirmed() {
   }
 }
 
+
+// Database list: refreshed when the dropdown is opened (at most every few
+// seconds), with the ↻ button, and after statements that create or drop a
+// database, so databases made by code show up without reopening the app.
+const DB_DDL = /\b(CREATE|DROP)\s+(DATABASE|SCHEMA)\b/i;
+let dbListLoadedAt = 0;
+async function refreshDatabases({ force = false } = {}) {
+  if (!force && Date.now() - dbListLoadedAt < 4000) return;
+  dbListLoadedAt = Date.now();
+  try {
+    const res = await S2.callTool("schema_explorer_databases", {});
+    const names = (res.databases ?? []).map((d) => d.name ?? d);
+    if (JSON.stringify(names) === JSON.stringify(state.databases)) return;
+    state.databases = names;
+    if (state.database && !names.includes(state.database)) S2.toast(`Database ${state.database} no longer exists`, "err");
+    onDatabasesChanged();
+  } catch (e) { if (force) S2.toast(`Couldn't refresh databases: ${cleanError(e).message}`, "err"); }
+}
+function onDatabasesChanged() { renderHeader(); renderTree(); }
+
 function accept(data) {
   state.result = data;
+  if (DB_DDL.test(data.sql ?? "")) refreshDatabases({ force: true });
   state.history = [data.sql, ...state.history.filter((s) => s !== data.sql)].slice(0, 25);
   report(data.sql, data.kind === "write" && !data.has_result_set
     ? `executed, ${data.affected_rows ?? "?"} row(s) affected`
@@ -522,6 +551,7 @@ function renderResults() {
 
 function renderHeader() {
   const dbSelect = h("select", { class: "s2-input", "aria-label": "Current database", title: "Current database",
+    onfocus: () => refreshDatabases(), onmousedown: () => refreshDatabases(),
     onchange: (e) => chooseDatabase(e.target.value) },
     h("option", { value: "", selected: !state.database }, "(default database)"),
     state.databases.filter((d) => state.showSystem || !SYSTEM.has(d) || d === state.database)
@@ -537,6 +567,7 @@ function renderHeader() {
     h("button", { class: "s2-btn ghost", "aria-pressed": String(state.treeOpen), title: "Show or hide the schema tree",
       onclick: () => { state.treeOpen = !state.treeOpen; bodyEl.classList.toggle("no-tree", !state.treeOpen); renderHeader(); } }, state.treeOpen ? "◧ Hide schema" : "◧ Schema"),
     dbSelect,
+    h("button", { class: "s2-btn ghost", title: "Refresh the database list", "aria-label": "Refresh databases", onclick: () => refreshDatabases({ force: true }) }, "↻"),
     h("button", { class: "s2-btn primary", onclick: run, disabled: state.running, title: "Run the statement at the cursor or the selection (Ctrl+Enter)" },
       state.running ? h("span", { class: "s2-spinner" }) : null, "▶ Run"),
     historySelect,
@@ -546,6 +577,7 @@ function renderHeader() {
       h("button", { class: "s2-btn ghost", title: "Save under a new name", onclick: () => showFilePanel("save") }, "Save as"),
       fileLabel),
     h("span", { class: "s2-spacer" }),
+    claudeBtn,
     S2.openInBrowserButton("sql_editor", () => ({ database: state.database, sql: view.state.doc.toString() })),
     S2.fullscreenButton(),
   ].filter(Boolean));
@@ -563,7 +595,7 @@ document.body.append(fileInput);
 const isDirty = () => view.state.doc.toString() !== file.savedText;
 function renderFileLabel() {
   const name = file.name ?? "untitled";
-  fileLabel.title = file.name ? (file.external ? `${file.name} (opened from your computer; Save stores a copy in the SQL folder)` : `${file.folder ?? "SQL folder"}\\${file.name}`) : "Not saved yet";
+  fileLabel.title = file.name ? (file.external ? `${file.name} (opened from your computer; Save stores a copy in the SQL folder)` : (file.path ?? `${file.folder ?? "SQL folder"}\\${file.name}`)) : "Not saved yet";
   fileLabel.replaceChildren(name, isDirty() && (file.name || view.state.doc.length) ? h("span", { class: "dirty", title: "Unsaved changes" }, "●") : "");
 }
 function setFile(name, text, { external = false } = {}) {
@@ -575,72 +607,36 @@ function setFile(name, text, { external = false } = {}) {
 const ago = (t) => { const s = Date.now() / 1000 - t; return s < 90 ? "just now" : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 129600 ? `${Math.round(s / 3600)} h ago` : new Date(t * 1000).toLocaleDateString(); };
 
 function hideFilePanel() { filePanel.hidden = true; filePanel.replaceChildren(); }
+const dirOf = (p) => (p ? p.replace(/[\\/][^\\/]*$/, "") : null);
+const baseOf = (p) => (p ? p.split(/[\\/]/).pop() : null);
 
-async function showFilePanel(mode, message) {
+function showFilePanel(mode) {
   filePanel.hidden = false;
-  if (mode === "save") return renderSavePanel(message);
-  filePanel.replaceChildren(h("div", { class: "row" }, h("span", { class: "s2-spinner" }), " Loading files…"));
-  let listing;
-  try { listing = await S2.callTool("sql_editor_files", {}); }
-  catch (e) { listing = { files: [], error: cleanError(e).message }; }
-  file.folder = listing.folder ?? file.folder;
-  const filter = h("input", { class: "s2-input", type: "search", placeholder: "Filter files…", "aria-label": "Filter files" });
-  const list = h("div", { class: "list", role: "listbox", "aria-label": "SQL files" });
-  const renderList = () => {
-    const q = filter.value.trim().toLowerCase();
-    const shown = listing.files.filter((f) => !q || f.name.toLowerCase().includes(q));
-    list.replaceChildren(...(shown.length ? shown.map((f) => h("button", { class: "item", role: "option", onclick: () => openServerFile(f.name) },
-      h("span", { class: "n" }, f.name), h("span", { class: "m" }, `${fmt.bytes(f.size)} · ${ago(f.modified)}`)))
-      : [h("div", { class: "item m" }, listing.error ?? (listing.files.length ? "No matching files" : "No .sql files in the folder yet — use Save to add one."))]));
-  };
-  filter.oninput = renderList;
-  filter.onkeydown = (e) => { if (e.key === "Escape") hideFilePanel(); if (e.key === "Enter") list.querySelector("button.item")?.click(); };
-  renderList();
-  filePanel.replaceChildren(
-    h("div", { class: "row" }, h("strong", {}, "Open"), filter,
-      h("button", { class: "s2-btn", title: "Pick any file on your computer", onclick: () => fileInput.click() }, "Browse computer…"),
-      h("span", { class: "s2-spacer" }), h("button", { class: "s2-btn ghost", onclick: hideFilePanel }, "Close")),
-    list,
-    h("div", { class: "row s2-muted" }, `Folder: ${listing.folder ?? "?"}`));
-  filter.focus();
+  S2.fileBrowser(filePanel, {
+    kind: "sql", mode, start: dirOf(file.path), name: baseOf(file.name) ?? "query.sql",
+    onOpen: (path) => openServerFile(path),
+    onSave: (path, overwrite) => saveAs(path, overwrite),
+    onClose: hideFilePanel,
+    extra: mode === "open"
+      ? [h("button", { class: "s2-btn", title: "Pick a file with your browser's file picker", onclick: () => fileInput.click() }, "Browse computer…")]
+      : [h("button", { class: "s2-btn", title: "Download the SQL as a file (browser view)", onclick: () => S2.download(baseOf(file.name) || "query.sql", view.state.doc.toString(), "application/sql") }, "Download")],
+  });
 }
 
-function renderSavePanel(message) {
-  const nameInput = h("input", { class: "s2-input", value: file.name ?? "query.sql", "aria-label": "File name", spellcheck: false });
-  const go = (overwrite) => saveAs(nameInput.value, overwrite);
-  nameInput.onkeydown = (e) => { if (e.key === "Enter") go(false); if (e.key === "Escape") hideFilePanel(); };
-  filePanel.replaceChildren(
-    h("div", { class: "row" }, h("strong", {}, "Save as"), nameInput,
-      h("button", { class: "s2-btn primary", onclick: () => go(false) }, "Save"),
-      h("button", { class: "s2-btn", title: "Download the SQL as a file (browser view)", onclick: () => S2.download(nameInput.value.trim() || "query.sql", view.state.doc.toString(), "application/sql") }, "Download"),
-      h("span", { class: "s2-spacer" }), h("button", { class: "s2-btn ghost", onclick: hideFilePanel }, "Cancel")),
-    message ?? h("div", { class: "row s2-muted" }, `Saved in ${file.folder ?? "the SQL folder"}. Use / for subfolders, e.g. reports/sales.sql.`));
-  nameInput.focus();
-  nameInput.setSelectionRange(0, nameInput.value.replace(/\.sql$/i, "").length);
-}
-
+// Returns the tool result ({exists} asks the browser to confirm); throws on errors.
 async function saveAs(name, overwrite) {
-  name = name.trim();
-  if (!name) return;
-  try {
-    const res = await S2.callTool("sql_editor_save_file", { name, sql: view.state.doc.toString(), overwrite });
-    if (res.exists) {
-      return renderSavePanel(h("div", { class: "row" }, h("span", { class: "warn" }, `${res.name} already exists.`),
-        h("button", { class: "s2-btn", onclick: () => saveAs(res.name, true) }, "Replace it"),
-        h("button", { class: "s2-btn ghost", onclick: () => renderSavePanel() }, "Pick another name")));
-    }
-    file.name = res.name; file.external = false; file.folder = res.folder; file.savedText = view.state.doc.toString();
-    renderFileLabel(); hideFilePanel();
-    S2.toast(`Saved ${res.name}`, "ok");
-    view.focus();
-  } catch (e) {
-    renderSavePanel(h("div", { class: "row" }, h("span", { class: "warn" }, `Couldn't save: ${cleanError(e).message}`)));
-  }
+  const res = await S2.callTool("sql_editor_save_file", { name, sql: view.state.doc.toString(), overwrite });
+  if (res.exists) return res;
+  file.name = res.name; file.path = res.path; file.external = false; file.folder = res.folder; file.savedText = view.state.doc.toString();
+  renderFileLabel(); hideFilePanel();
+  S2.toast(`Saved ${res.name}`, "ok");
+  view.focus();
+  return res;
 }
 
 async function saveFile() {
   if (!file.name || file.external) return showFilePanel("save");
-  await saveAs(file.name, true);
+  try { await saveAs(file.path ?? file.name, true); } catch (e) { S2.toast(`Couldn't save: ${cleanError(e).message}`, "err"); }
 }
 
 // Opening replaces the editor; ask first if there are unsaved changes.
@@ -656,7 +652,7 @@ function openServerFile(name) {
   confirmDiscard(async () => {
     try {
       const res = await S2.callTool("sql_editor_open_file", { name });
-      file.folder = res.folder;
+      file.folder = res.folder; file.path = res.path;
       setFile(res.name, res.sql);
       hideFilePanel();
     } catch (e) { S2.toast(`Couldn't open ${name}: ${cleanError(e).message}`, "err"); }
@@ -703,18 +699,17 @@ function renderModeOptions() {
 }
 
 function renderTabs() {
-  const tab = (key, label, extra) => h("button", { class: "sq-tab", role: "tab", "aria-selected": String(chat.tab === key),
-    onclick: () => {
-      chat.tab = key;
-      if (key === "chat") chat.unread = 0;
-      renderTabs();
-      if (key === "chat") { askBox.focus(); msgsEl.scrollTop = msgsEl.scrollHeight; warmAssistant(); }
-    } }, label, extra);
-  tabsEl.replaceChildren(
-    tab("results", "Results"),
-    tab("chat", "Chat with Claude", chat.waiting ? h("span", { class: "s2-spinner" }) : chat.unread ? h("span", { class: "count" }, chat.unread) : null));
-  resultView.hidden = chat.tab !== "results";
-  chatView.hidden = chat.tab !== "chat";
+  claudeBtn.className = `s2-btn sq-claude-btn${chat.open ? " primary" : ""}`;
+  claudeBtn.replaceChildren(...["Claude",
+    chat.waiting ? h("span", { class: "s2-spinner", style: { marginLeft: "4px" } }) : chat.unread ? h("span", { class: "count" }, chat.unread) : null].filter(Boolean));
+}
+// The chat lives in a panel on the right, like the Notebook's.
+function toggleChat(open = !chat.open) {
+  chat.open = open;
+  chatView.hidden = !open;
+  bodyEl.classList.toggle("chat-open", open);
+  if (open) { chat.unread = 0; askBox.focus(); msgsEl.scrollTop = msgsEl.scrollHeight; warmAssistant(); }
+  renderTabs();
 }
 
 // Inline **bold** and `code` only; everything else stays plain text (no HTML).
@@ -849,7 +844,7 @@ async function pollInbox() {
       }
     }
     if (!job) chat.waiting = false;
-    if (chat.tab !== "chat") chat.unread += messages.length;
+    if (!chat.open) chat.unread += messages.length;
     renderChat(); renderTabs();
   } catch {
     // Transient (host busy, server restarting); the next poll retries.
@@ -870,7 +865,7 @@ async function loadAssistantStatus() {
   try { chat.assistant = await S2.callTool("sql_editor_assistant", {}); }
   catch (e) { chat.assistant = { available: false, reason: cleanError(e).message }; }
   renderChat();
-  if (chat.tab === "chat") warmAssistant();
+  if (chat.open) warmAssistant();
 }
 // Poll faster while waiting for an answer.
 (function schedulePoll() {

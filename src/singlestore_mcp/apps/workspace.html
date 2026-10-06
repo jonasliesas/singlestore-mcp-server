@@ -24,6 +24,22 @@
   .ws-main { position: relative; min-width: 0; }
   .ws-main iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: var(--s2-bg); }
   .ws-main iframe[hidden] { display: none; }
+  .ws-main.has-tabs iframe { top: 32px; height: calc(100% - 32px); }
+  .ws-tabs { position: absolute; top: 0; left: 0; right: 0; height: 32px; display: flex; align-items: flex-end; gap: 2px; padding: 0 8px;
+    border-bottom: 1px solid var(--s2-border-2); background: var(--s2-bg-2); overflow-x: auto; z-index: 1; }
+  .ws-tabs[hidden] { display: none; }
+  .ws-tab { display: flex; align-items: center; border: 1px solid var(--s2-border-2); border-bottom: 0; border-radius: 6px 6px 0 0;
+    background: var(--s2-bg-3); max-width: 220px; height: 27px; }
+  .ws-tab.on { background: var(--s2-bg); position: relative; top: 1px; }
+  .ws-tab button { border: 0; background: none; cursor: pointer; color: var(--s2-text-2); font: inherit; font-size: var(--s2-fs-xs); }
+  .ws-tab .name { padding: 0 6px 0 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ws-tab.on .name { color: var(--s2-text); font-weight: var(--font-weight-semibold, 600); }
+  .ws-tab .dirty { color: var(--s2-warn); }
+  .ws-tab .x { padding: 0 8px 0 2px; font-size: 14px; }
+  .ws-tab .x:hover, .ws-tab .x.armed { color: var(--s2-err); }
+  .ws-tab .x.armed { font-size: var(--s2-fs-xs); font-weight: 600; }
+  .ws-tab-add { border: 0; background: none; cursor: pointer; color: var(--s2-text-2); font-size: 16px; padding: 0 8px; height: 27px; }
+  .ws-tab-add:hover { color: var(--s2-info); }
   .ws-loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--s2-text-2); font-size: var(--s2-fs-xs); }
   .ws-loading[hidden] { display: none; }
   .ws-loading .s2-error { max-width: 420px; }
@@ -48,6 +64,7 @@ const svg = (paths) => {
 };
 const ICONS = {
   sql: '<polyline points="8 7 3 12 8 17"/><polyline points="16 7 21 12 16 17"/><line x1="13.5" y1="5" x2="10.5" y2="19"/>',
+  notebook: '<path d="M6 3h11a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6z"/><line x1="6" y1="3" x2="6" y2="21"/><line x1="10" y1="8" x2="15" y2="8"/><line x1="10" y1="12" x2="15" y2="12"/>',
   schema: '<rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="9.5" x2="21" y2="9.5"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="9.5" x2="9" y2="20"/>',
   pipelines: '<rect x="3" y="3.5" width="7" height="6" rx="1.5"/><rect x="14" y="14.5" width="7" height="6" rx="1.5"/><path d="M6.5 9.5v2.5a3 3 0 0 0 3 3h4.5"/><polyline points="12 13 14 15 12 17"/>',
   cluster: '<rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><line x1="7" y1="7.5" x2="7.01" y2="7.5"/><line x1="7" y1="16.5" x2="7.01" y2="16.5"/><line x1="11" y1="7.5" x2="17" y2="7.5"/><line x1="11" y1="16.5" x2="17" y2="16.5"/>',
@@ -56,10 +73,16 @@ const ICONS = {
 };
 const VIEWS = {
   sql: { label: "SQL", title: "SQL Editor", uri: "ui://singlestore/sql-editor.html", tool: "sql_editor" },
+  notebook: { label: "Notebook", title: "Notebook", uri: "ui://singlestore/notebook.html", tool: "notebook" },
   schema: { label: "Schema", title: "Schema Explorer", uri: "ui://singlestore/schema-explorer.html", tool: "schema_explorer" },
   pipelines: { label: "Pipelines", title: "Pipeline Monitor", uri: "ui://singlestore/pipeline-monitor.html", tool: "pipeline_monitor" },
   cluster: { label: "Cluster", title: "Cluster Monitor", uri: "ui://singlestore/cluster-monitor.html", tool: "cluster_monitor" },
 };
+
+// Notebook tabs: each is its own view keyed "notebook", "notebook:2", … with its own kernel.
+const viewDef = (key) => VIEWS[String(key).split(":")[0]];
+const isNotebook = (key) => String(key).startsWith("notebook");
+let notebookSeq = 1;
 
 const ws = {
   args: {},            // the workspace's own tool arguments (sql_editor)
@@ -67,6 +90,8 @@ const ws = {
   current: null,
   frames: {},          // view -> {iframe, args, result, pending: [messages after init]}
   contexts: {},        // view -> latest model-context text from that view
+  titles: {},          // notebook tab -> title reported by the notebook
+  lastNotebook: null,
 };
 const railButtons = {};
 const mainEl = h("div", { class: "ws-main" });
@@ -75,7 +100,8 @@ const mainEl = h("div", { class: "ws-main" });
 function buildShell() {
   const rail = h("nav", { class: "ws-rail", "aria-label": "Workspace views" });
   for (const [key, v] of Object.entries(VIEWS)) {
-    railButtons[key] = h("button", { title: v.title, "aria-label": v.title, onclick: () => openView(key) }, svg(ICONS[key]), v.label);
+    railButtons[key] = h("button", { title: v.title, "aria-label": v.title,
+      onclick: () => openView(key === "notebook" ? (ws.lastNotebook ?? "notebook") : key) }, svg(ICONS[key]), v.label);
     rail.append(railButtons[key]);
   }
   rail.append(h("div", { class: "gap" }));
@@ -90,14 +116,19 @@ function buildShell() {
   if (S2.canFullscreen() && !S2.inBrowserView()) {
     rail.append(h("button", { class: "tool", title: "Full screen (Esc to exit)", "aria-label": "Full screen", onclick: () => S2.toggleFullscreen() }, svg(ICONS.fullscreen)));
   }
+  mainEl.append(tabsEl);
   root.replaceChildren(h("div", { class: "ws" }, rail, mainEl));
 }
 
 // ---------------------------------------------------------------- views
 function openView(view, handoff) {
-  if (!VIEWS[view]) return;
+  // "notebook:new" (from a notebook's New / Open): a fresh notebook tab.
+  if (view === "notebook:new") view = `notebook:${++notebookSeq}`;
+  if (!viewDef(view)) return;
   ws.current = view;
-  for (const [key, btn] of Object.entries(railButtons)) btn.setAttribute("aria-current", key === view ? "page" : "false");
+  if (isNotebook(view)) ws.lastNotebook = view;
+  const base = String(view).split(":")[0];
+  for (const [key, btn] of Object.entries(railButtons)) btn.setAttribute("aria-current", key === base ? "page" : "false");
   if (!ws.frames[view]) createFrame(view, handoff);
   else if (handoff) deliver(view, { ...handoff, type: "s2-set-sql" });
   for (const [key, f] of Object.entries(ws.frames)) {
@@ -106,11 +137,45 @@ function openView(view, handoff) {
     f.iframe.contentWindow?.postMessage({ type: "s2-visibility", hidden: key !== view }, "*");
   }
   for (const el of mainEl.querySelectorAll(".ws-loading")) el.hidden = el.dataset.view !== view;
+  renderTabs();
   pushContext();
 }
 
+// ---------------------------------------------------------------- notebook tabs
+const tabsEl = h("div", { class: "ws-tabs", role: "tablist", "aria-label": "Notebooks" });
+function renderTabs() {
+  const show = isNotebook(ws.current);
+  tabsEl.hidden = !show;
+  mainEl.classList.toggle("has-tabs", show);
+  if (!show) return;
+  const keys = Object.keys(ws.frames).filter(isNotebook);
+  tabsEl.replaceChildren(...keys.map((key) => {
+    const t = ws.titles[key] ?? { title: "untitled", dirty: false };
+    return h("div", { class: `ws-tab${key === ws.current ? " on" : ""}`, role: "tab", "aria-selected": String(key === ws.current) },
+      h("button", { class: "name", title: t.path ?? t.title, onclick: () => { ws.closeArmed = null; openView(key); } }, t.title, t.dirty ? h("span", { class: "dirty" }, " ●") : null),
+      ws.closeArmed === key
+        ? h("button", { class: "x armed", title: "Unsaved changes: click again to close without saving", onclick: () => closeNotebook(key) }, "Discard ×")
+        : h("button", { class: "x", title: "Close this notebook (its Python kernel stops)", "aria-label": `Close ${t.title}`, onclick: () => closeNotebook(key) }, "×"));
+  }), h("button", { class: "ws-tab-add", title: "New notebook tab", "aria-label": "New notebook", onclick: () => openView(`notebook:${++notebookSeq}`) }, "+"));
+}
+function closeNotebook(key) {
+  const t = ws.titles[key];
+  // Dialogs are blocked in the sandbox: an unsaved tab needs a second click on ×.
+  if (t?.dirty && ws.closeArmed !== key) { ws.closeArmed = key; renderTabs(); return; }
+  ws.closeArmed = null;
+  send(key, { type: "s2-close" });  // the notebook stops its kernel
+  const f = ws.frames[key];
+  setTimeout(() => f?.iframe?.remove(), 300);
+  mainEl.querySelector(`.ws-loading[data-view="${key}"]`)?.remove();
+  delete ws.frames[key]; delete ws.titles[key]; delete ws.contexts[key];
+  const rest = Object.keys(ws.frames).filter(isNotebook);
+  if (ws.lastNotebook === key) ws.lastNotebook = rest[rest.length - 1] ?? null;
+  if (ws.current === key) openView(ws.lastNotebook ?? "notebook");
+  else renderTabs();
+}
+
 async function createFrame(view, handoff) {
-  const v = VIEWS[view];
+  const v = viewDef(view);
   const loading = h("div", { class: "ws-loading", dataset: { view } }, h("span", {}, h("span", { class: "s2-spinner" }), ` Loading ${v.title}…`));
   mainEl.append(loading);
   const f = (ws.frames[view] = { iframe: null, pending: [], args: {}, result: null, ready: false });
@@ -118,12 +183,18 @@ async function createFrame(view, handoff) {
     f.args = { database: ws.args.database ?? null, sql: handoff?.sql ?? ws.args.sql ?? null };
     f.result = ws.sqlResult;
     if (handoff?.run) f.pending.push({ ...handoff, type: "s2-set-sql" });
+  } else if (isNotebook(view)) {
+    f.args = { database: handoff?.database ?? ws.args.database ?? null, name: handoff?.name ?? null };
+    ws.titles[view] = { title: "untitled", dirty: false };
   } else if (view === "schema") {
     f.args = ws.args.table ? { database: ws.args.database, table: ws.args.table } : ws.args.database ? { database: ws.args.database } : {};
   }
   try {
-    const res = await S2.app.readServerResource({ uri: v.uri });
-    const html = res?.contents?.[0]?.text;
+    // Fetched with a tool call rather than resources/read: hosts may cache
+    // resources for the session, which would keep an old view after a restart.
+    let html = null;
+    try { html = (await S2.callTool("app_page", { uri: v.uri })).html; }
+    catch { html = (await S2.app.readServerResource({ uri: v.uri }))?.contents?.[0]?.text; }
     if (!html) throw new Error("empty page");
     const debugSameOrigin = Boolean(S2.app.getHostContext()?.s2DebugSameOrigin);
     f.iframe = h("iframe", { title: v.title, srcdoc: html, allow: "clipboard-write",
@@ -157,8 +228,8 @@ function innerContext(view) {
     displayMode: "fullscreen", availableDisplayModes: ["fullscreen"],
     containerDimensions: { width: Math.round(rect.width), height: Math.round(rect.height) },
     // The App SDK validates toolInfo.tool as a full MCP Tool (inputSchema required).
-    toolInfo: { tool: outer.toolInfo?.tool?.name === VIEWS[view].tool
-      ? outer.toolInfo.tool : { name: VIEWS[view].tool, inputSchema: { type: "object" } } },
+    toolInfo: { tool: outer.toolInfo?.tool?.name === viewDef(view).tool
+      ? outer.toolInfo.tool : { name: viewDef(view).tool, inputSchema: { type: "object" } } },
   };
 }
 
@@ -166,7 +237,7 @@ async function openingResult(view) {
   const f = ws.frames[view];
   if (f.result) return f.result;
   try {
-    return await S2.app.callServerTool({ name: VIEWS[view].tool, arguments: f.args });
+    return await S2.app.callServerTool({ name: viewDef(view).tool, arguments: f.args });
   } catch (e) {
     return { isError: true, content: [{ type: "text", text: String(e?.message ?? e) }] };
   }
@@ -179,6 +250,7 @@ window.addEventListener("message", async (ev) => {
   const [view, f] = hit;
   const msg = ev.data;
   if (msg?.type === "s2-open-view") { openView(msg.view, msg); return; }
+  if (msg?.type === "s2-title") { ws.titles[view] = { title: String(msg.title || "untitled"), dirty: Boolean(msg.dirty), path: msg.path }; renderTabs(); return; }
   if (msg?.jsonrpc !== "2.0" || !msg.method) return;
   const { id, method, params } = msg;
   try {
@@ -194,7 +266,7 @@ window.addEventListener("message", async (ev) => {
             ...(outerCaps.message ? { message: outerCaps.message } : {}),
             ...(outerCaps.updateModelContext ? { updateModelContext: outerCaps.updateModelContext } : {}),
           },
-          hostInfo: { name: "singlestore-workspace", version: "0.4.0" },
+          hostInfo: { name: "singlestore-workspace", version: "0.5.0" },
           hostContext: innerContext(view),
         });
       }
@@ -236,8 +308,9 @@ let ctxTimer = null;
 function pushContext() {
   clearTimeout(ctxTimer);
   ctxTimer = setTimeout(() => {
-    const parts = [`SingleStore Workspace is open; the user is on the ${VIEWS[ws.current]?.title ?? "?"} view.`];
-    for (const [view, text] of Object.entries(ws.contexts)) if (text) parts.push(`[${VIEWS[view].title}]\n${text}`);
+    const label = (key) => `${viewDef(key)?.title ?? "?"}${isNotebook(key) ? ` "${ws.titles[key]?.title ?? "untitled"}"` : ""}`;
+    const parts = [`SingleStore Workspace is open; the user is on the ${label(ws.current)} view.`];
+    for (const [view, text] of Object.entries(ws.contexts)) if (text) parts.push(`[${label(view)}]\n${text}`);
     S2.updateModelContext(parts.join("\n\n"));
   }, 250);
 }
@@ -256,7 +329,7 @@ await S2.connect({
       ws.sqlResult = result;
       ws.args = { ...ws.args, database: data.database ?? ws.args.database, sql: data.sql ?? ws.args.sql, table: data.table ?? ws.args.table };
       buildShell();
-      openView(VIEWS[data.view] ? data.view : "sql");
+      openView(viewDef(data.view) ? data.view : "sql");
     } catch (e) {
       root.replaceChildren(S2.errorBox(e));
     }

@@ -32,6 +32,7 @@ import time
 import uuid
 from collections import deque
 from pathlib import Path
+from .paths import data_dir
 from typing import Any, Callable
 
 READONLY_SERVER = "singlestore_ro"
@@ -94,10 +95,7 @@ def find_claude() -> str | None:
 def _workdir() -> Path:
     # A neutral folder, so the assistant doesn't pick up a project's CLAUDE.md;
     # Claude Code keeps the editor sessions under this folder's project entry.
-    base = Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir())
-    path = base / "singlestore-mcp" / "assistant"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return data_dir("assistant")
 
 
 def _mcp_config(workdir: Path) -> Path:
@@ -123,13 +121,37 @@ def _profile(name: str | None) -> tuple[str | None, str | None]:
     return PROFILES[name]
 
 
-def _system_prompt() -> str:
+_NOTEBOOK_PROMPT = """\
+You are the assistant inside a SingleStore notebook app. The notebook has \
+SQL cells (run against SingleStore; each result becomes the pandas DataFrame \
+`df`, or a named variable if the cell sets one) and Python cells (an IPython \
+kernel with pandas as pd, matplotlib (inline charts), and `conn`, a \
+singlestoredb connection). Your reply is shown in the notebook's chat panel as \
+plain text; every ```sql block gets an "Insert SQL cell" button and every \
+```python block an "Insert Python cell" button. So:
+- Answer with ready-to-run cells: SQL in ```sql blocks (no %%sql line), \
+Python in ```python blocks that use `df` / named results, pandas and \
+matplotlib. Keep each block to one cell's worth of code.
+- Keep the prose short: a few sentences or "- " bullets. The panel only \
+renders plain text, **bold**, `inline code` and fenced code blocks, so never \
+use Markdown tables or headings.
+- Write SingleStore SQL. Database and table names are case-sensitive.
+- You can inspect the database with the singlestore_ro tools: list_databases, \
+list_tables, describe_table and read_query (read-only statements only). Check \
+names before using them and test SQL when that is cheap; tables can be very \
+large. You can't run Python yourself; write it carefully.
+- You cannot change data or schema yourself; give such statements as SQL \
+cells for the user to review and run."""
+
+
+def _system_prompt(kind: str = "sql_editor") -> str:
+    base = _NOTEBOOK_PROMPT if kind == "notebook" else _SYSTEM_PROMPT
     # The SingleStore skill (key learnings) rides along with every question.
     try:
         skill = SKILL_FILE.read_text(encoding="utf-8").split("---", 2)[-1].strip()
     except OSError:
-        return _SYSTEM_PROMPT
-    return f"{_SYSTEM_PROMPT}\n\n{skill}"
+        return base
+    return f"{base}\n\n{skill}"
 
 
 def status() -> dict[str, Any]:
@@ -154,9 +176,10 @@ _MAX_WORKERS = 4
 
 
 class _Job:
-    def __init__(self, editor_id: str, profile: str | None):
+    def __init__(self, editor_id: str, profile: str | None, kind: str = "sql_editor"):
         self.editor_id = editor_id
         self.profile = profile
+        self.kind = kind
         self.started = time.time()
         self.activity = "Thinking…"
         self.queries = 0
@@ -165,7 +188,7 @@ class _Job:
 
 
 class _Worker:
-    def __init__(self, claude: str, editor_id: str, profile: str | None, session: str | None):
+    def __init__(self, claude: str, editor_id: str, profile: str | None, session: str | None, kind: str = "sql_editor"):
         workdir = _workdir()
         self.editor_id = editor_id
         self.profile = profile
@@ -179,7 +202,7 @@ class _Worker:
             "--allowedTools", f"mcp__{READONLY_SERVER}",
             "--setting-sources", "",
             "--disable-slash-commands",
-            "--append-system-prompt", _system_prompt(),
+            "--append-system-prompt", _system_prompt(kind),
         ]
         args += ["--resume", session] if session else ["--session-id", self.session]
         model, effort = _profile(profile)
@@ -252,7 +275,7 @@ _slots = threading.Semaphore(_MAX_CONCURRENT)
 _reaper_started = False
 
 
-def _worker_for(claude: str, editor_id: str, profile: str | None) -> _Worker:
+def _worker_for(claude: str, editor_id: str, profile: str | None, kind: str = "sql_editor") -> _Worker:
     """The editor's running worker for this profile, starting one if needed. Call with _lock held."""
     worker = _workers.pop(editor_id, None)
     if worker and worker.alive() and worker.profile == profile:
@@ -265,7 +288,7 @@ def _worker_for(claude: str, editor_id: str, profile: str | None) -> _Worker:
         oldest = idle.pop(0)
         oldest.close()
         _workers.pop(oldest.editor_id, None)
-    worker = _Worker(claude, editor_id, profile, _sessions.get(editor_id))
+    worker = _Worker(claude, editor_id, profile, _sessions.get(editor_id), kind)
     _workers[editor_id] = worker
     _start_reaper()
     return worker
@@ -298,14 +321,14 @@ def _close_all() -> None:
             pass
 
 
-def warm(editor_id: str, profile: str | None = None) -> bool:
+def warm(editor_id: str, profile: str | None = None, kind: str = "sql_editor") -> bool:
     """Start the editor's worker ahead of its first question (no model call)."""
     claude = find_claude()
     if not claude:
         return False
     with _lock:
         if editor_id not in _jobs:
-            _worker_for(claude, editor_id, profile).last_used = time.time()
+            _worker_for(claude, editor_id, profile, kind).last_used = time.time()
     return True
 
 
@@ -349,8 +372,9 @@ def ask(
     prompt: str,
     deliver: Callable[[str, str, str], Any],
     profile: str | None = None,
+    kind: str = "sql_editor",
 ) -> None:
-    """Start answering ``prompt`` for one editor in the background.
+    """Start answering ``prompt`` for one editor (or notebook) in the background.
 
     ``deliver(editor_id, text, kind)`` posts the answer ("claude") or a
     problem ("error"/"note") to the editor's inbox.
@@ -361,7 +385,7 @@ def ask(
     with _lock:
         if editor_id in _jobs:
             raise ValueError("Claude is still answering the previous question in this editor.")
-        _jobs[editor_id] = _Job(editor_id, profile)
+        _jobs[editor_id] = _Job(editor_id, profile, kind)
     threading.Thread(target=_run, args=(claude, editor_id, prompt, deliver), daemon=True).start()
 
 
@@ -386,12 +410,12 @@ def _run(claude: str, editor_id: str, prompt: str, deliver: Callable[[str, str, 
     deliver(editor_id, text, kind)
     if job.cancelled:
         # Stop ended the process; have a fresh one ready for the next question.
-        warm(editor_id, job.profile)
+        warm(editor_id, job.profile, job.kind)
 
 
 def _attach(claude: str, job: _Job) -> _Worker:
     with _lock:
-        worker = _worker_for(claude, job.editor_id, job.profile)
+        worker = _worker_for(claude, job.editor_id, job.profile, job.kind)
         job.worker = worker
         worker.job = job
         worker.result = None
