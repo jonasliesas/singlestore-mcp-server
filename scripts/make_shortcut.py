@@ -71,10 +71,13 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--database", default="")
     parser.add_argument("--name", default="SingleStore Workspace")
+    parser.add_argument("--view", default="", help="view to open: sql, notebook, schema, pipelines or cluster")
     opts = parser.parse_args()
     write_icon(ICON)
     pythonw = ROOT / ".venv" / "Scripts" / "pythonw.exe"
     arguments = "-m singlestore_mcp.workspace_app" + (f" --database {opts.database}" if opts.database else "")
+    if opts.view:
+        arguments += f" --view {opts.view}"
     ps = f"""
 $desktop = [Environment]::GetFolderPath('Desktop')
 $s = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $desktop '{opts.name}.lnk'))

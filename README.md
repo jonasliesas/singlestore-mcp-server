@@ -26,7 +26,8 @@ self-managed clusters** alike.
   `/singlestore-table-report`, `/singlestore-pipeline-health`, … and
   `/singlestore-restart` to reload the server without reconnecting.
 - **Standalone workspace**: the same apps in their own window from a desktop
-  shortcut, without Claude.
+  shortcut, with no Claude subscription needed (only the Claude chat needs
+  Claude); see [Using the workspace without Claude](#using-the-workspace-without-claude).
 
 ## How it's built
 
@@ -291,7 +292,8 @@ on `127.0.0.1` and opens the workspace in an Edge app window (`--browser` for
 your default browser). Clicking it again opens another window; after a code
 update it replaces the running server; it stops 5 minutes after the last
 window closes. It needs the `SINGLESTORE_*` settings as user environment
-variables.
+variables. Full guide, including installing on a new machine:
+[Using the workspace without Claude](#using-the-workspace-without-claude).
 
 In the browser and desktop window, actions such as Start / Stop pipeline don't
 go through Claude's approval prompt (the apps' own confirmations still apply),
@@ -353,6 +355,145 @@ starts a fresh server, so Python and HTML edits show up on reload. The right
 panel shows the protocol log and anything the app sends to the chat. Add
 `&debug=1` to the URL to give the iframe same-origin access (`appDoc()` in
 the console returns the app's document) for scripted testing.
+
+## Using the workspace without Claude
+
+The SingleStore Workspace also runs as a **standalone desktop app**: a small
+local web server plus a browser window, talking directly to SingleStore. No
+Claude subscription, Claude app or MCP client is needed for it. Only the
+Claude chat panels need Claude.
+
+### What works and what doesn't
+
+| Feature | Without Claude |
+|---|---|
+| SQL Editor: autocomplete, run SQL, results, history, CSV export | ✅ |
+| SQL files: Open / Save / Save as, file browser | ✅ |
+| Notebook: SQL, Python and text cells, charts, `%sql` / `%%sql`, `.ipynb` files, tabs | ✅ |
+| Notebook Python environment and the **Packages** panel | ✅ (installed with `uv`) |
+| Schema Explorer, Pipeline Monitor (incl. Start / Stop / Test), Cluster Monitor, Query Grid | ✅ |
+| Database list refresh, full-window layout | ✅ |
+| **Claude** chat panels (SQL Editor, Notebook) | ❌ need Claude Code logged in to a Claude account; without it the panel shows a message and nothing else is affected |
+| **Ask Claude** buttons (Schema Explorer, Pipeline Monitor) | ❌ hand the question to the Claude chat, which the standalone window doesn't have; the button says so |
+| Slash commands, asking Claude in a chat | ❌ need a Claude client |
+
+Other MCP clients (e.g. VS Code with GitHub Copilot) can still use the
+server's tools, but show plain text results instead of the apps.
+
+### What you need
+
+- **Windows** with **Microsoft Edge** (for the app window). On macOS / Linux the
+  standalone app also works with `--browser`, but the desktop shortcut
+  script is Windows-only.
+- **[uv](https://docs.astral.sh/uv/)**, which installs Python 3.12 and all
+  dependencies for you. No separate Python installation is needed.
+- **Git**, or download the repository as a ZIP from GitHub.
+- Network access to your SingleStore cluster (default port 3306) and, for the
+  first notebook setup, to the Python package index (PyPI).
+
+### 1. Install
+
+```bash
+git clone https://github.com/jonasliesas/singlestore-mcp-server.git
+```
+
+```bash
+cd singlestore-mcp-server
+```
+
+```bash
+uv sync
+```
+
+`uv sync` creates `.venv` in the project folder with Python 3.12 and the
+server's dependencies.
+
+### 2. Connection settings
+
+The app reads the same settings as the MCP server, from **user environment
+variables** (Windows: *Settings → System → About → Advanced system settings →
+Environment Variables → User variables*):
+
+| Variable | Example | Required |
+|---|---|---|
+| `SINGLESTORE_HOST` | `svc-xxxx.svc.singlestore.com` or your cluster's host | yes (or `SINGLESTORE_URL`) |
+| `SINGLESTORE_USER` | `admin` | yes |
+| `SINGLESTORE_PASSWORD` | your password | yes |
+| `SINGLESTORE_PORT` | `3306` | no (default 3306) |
+| `SINGLESTORE_DATABASE` | `SASDP` | no: default database |
+| `SINGLESTORE_SSL_DISABLED` | `1` | no: only if your cluster has no TLS |
+| `SINGLESTORE_URL` | `user:password@host:3306/db` | no: instead of the separate variables |
+
+Enter the password in the Environment Variables dialog rather than with
+`setx` in a terminal, so it doesn't end up in your shell history. Windows
+picks up new variables in newly started programs, so set them before creating
+the shortcut, or sign out and in again afterwards.
+
+### 3. Create the desktop shortcut
+
+```bash
+uv run python scripts/make_shortcut.py --database SASDP
+```
+
+This creates a **SingleStore Workspace** shortcut with a database icon on your
+desktop. To find it from the Start menu too, copy it to
+`%APPDATA%\Microsoft\Windows\Start Menu\Programs`. Options:
+
+- `--database SASDP`: database to start in
+- `--view notebook`: open on another view (`sql`, `notebook`, `schema`,
+  `pipelines`, `cluster`)
+- `--name "SingleStore Notebook"`: shortcut name (make several shortcuts for
+  different databases or views)
+
+Without a shortcut, start it from the project folder with
+`.venv\Scripts\pythonw.exe -m singlestore_mcp.workspace_app --database SASDP`
+(add `--browser` to use your default browser instead of an Edge window).
+
+### 4. First start
+
+1. Double-click the shortcut. A window opens with the workspace, usually on
+   the SQL view. The first start takes a few seconds; the server runs in the
+   background without a console window.
+2. Open the **Notebook** view. The first time, it offers to **Install** the
+   notebook's Python environment (about 150 MB, a minute or two). Later
+   starts skip this.
+3. Pick your database in the dropdowns and start working.
+
+Everything you create is stored on your machine: SQL files and notebooks in
+`Documents\SingleStore SQL` (or wherever you save them), the notebook
+environment in `~/.singlestore-mcp`.
+
+### Day to day
+
+- **Several windows:** clicking the shortcut again while it runs opens
+  another window on the same server (fast; notebooks and kernels are shared).
+- **Stopping:** close the windows. The server stops by itself 5 minutes after
+  the last window closes, along with any notebook kernels.
+- **Updating:** run `git pull` and `uv sync` in the project folder. The next
+  click on the shortcut notices the new code and restarts the server (this
+  also restarts notebook kernels).
+- **Packages for notebooks:** use the notebook's **Packages** panel or
+  `%pip install …` in a cell; restart the kernel (↻) afterwards.
+
+### Troubleshooting
+
+| Symptom | What to do |
+|---|---|
+| Nothing happens on double-click | Run the command from step 3 with `python.exe` instead of `pythonw.exe` in a terminal to see the error (often missing `SINGLESTORE_*` variables). |
+| "Couldn't connect" / errors in every view | Check the `SINGLESTORE_*` variables and that the cluster is reachable from this machine. |
+| Window shows "Not found" | An old server is still running from an earlier version; close all windows, wait a few seconds and click the shortcut again. |
+| Notebook says the environment is missing | Click **Install** in the notebook; it needs `uv` on PATH (or set `SINGLESTORE_MCP_NOTEBOOK_PYTHON` to a Python that has ipykernel). |
+| A new package isn't found in a notebook | Restart the kernel (↻); check `import sys; print(sys.executable)` shows `…\.singlestore-mcp\notebook-env\…`. |
+| Model downloads (Hugging Face) hang | Already handled: downloads use plain HTTPS. If you're behind a proxy, set `HTTPS_PROXY` as a user environment variable. |
+
+### Security notes
+
+- The server listens on `127.0.0.1` only, and every window uses a secret
+  link; other machines and other web sites can't use it.
+- It uses your SingleStore user's permissions. Statements that change data
+  ask for confirmation in the SQL Editor and in SQL cells; Python cells and
+  `%sql` run as written, as in Jupyter.
+- Notebook code runs with your Windows user rights, like any local Jupyter.
 
 ## Setup
 
