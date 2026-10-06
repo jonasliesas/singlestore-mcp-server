@@ -461,7 +461,7 @@ Claude chat panels need Claude.
 Open PowerShell (or press Win+R) and run:
 
 ```bash
-powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/jonasliesas/singlestore-mcp-server/main/install.ps1 | iex"
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/jonasliesas/singlestore-mcp-server/master/install.ps1 | iex"
 ```
 
 No administrator rights needed. [`install.ps1`](install.ps1):

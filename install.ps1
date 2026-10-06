@@ -9,11 +9,11 @@
 
     One-line install (PowerShell or the Windows Run box):
 
-        powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/jonasliesas/singlestore-mcp-server/main/install.ps1 | iex"
+        powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/jonasliesas/singlestore-mcp-server/master/install.ps1 | iex"
 
     With options:
 
-        & ([scriptblock]::Create((irm https://raw.githubusercontent.com/jonasliesas/singlestore-mcp-server/main/install.ps1))) -Notebook -Database SASDP
+        & ([scriptblock]::Create((irm https://raw.githubusercontent.com/jonasliesas/singlestore-mcp-server/master/install.ps1))) -Notebook -Database SASDP
 
     No administrator rights are needed: everything goes to your user profile.
     Connections (host, user, password or SSO) are set up in the workspace's
@@ -56,7 +56,7 @@ param(
     [string]$Source = "",
     [string]$ShortcutName = "SingleStore Workspace",
     [string]$Repo = "https://github.com/jonasliesas/singlestore-mcp-server",
-    [string]$Branch = "main"
+    [string]$Branch = "master"
 )
 
 $ErrorActionPreference = "Stop"
