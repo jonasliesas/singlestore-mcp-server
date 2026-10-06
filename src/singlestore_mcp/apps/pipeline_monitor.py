@@ -39,7 +39,7 @@ def _query(sql: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
 def collect(database: str | None) -> dict[str, Any]:
     where, params = _where(database)
     # Only selected CONFIG_JSON fields: the full document contains credentials.
-    pipelines = _query(
+    q_pipelines = lambda: _query(  # noqa: E731
         "SELECT DATABASE_NAME, PIPELINE_NAME, STATE,"
         " UNIX_TIMESTAMP(CREATE_TIME) AS CREATE_UNIX, UNIX_TIMESTAMP(ALTER_TIME) AS ALTER_UNIX,"
         " JSON_EXTRACT_STRING(CONFIG_JSON, 'source_type') AS SOURCE_TYPE,"
@@ -48,14 +48,14 @@ def collect(database: str | None) -> dict[str, Any]:
         f" FROM information_schema.PIPELINES{where} ORDER BY DATABASE_NAME, PIPELINE_NAME",
         params,
     )
-    last_batches = _query(
+    q_last_batches = lambda: _query(  # noqa: E731
         "SELECT DATABASE_NAME, PIPELINE_NAME, BATCH_ID, BATCH_STATE,"
         " UNIX_TIMESTAMP(START_TIME) AS START_UNIX, BATCH_TIME,"
         " ROWS_INSERTED, ROWS_UPDATED, ROWS_DELETED, ROWS_PER_SEC, MB_STREAMED"
         f" FROM information_schema.PIPELINES_BATCHES_SUMMARY{where}",
         params,
     )
-    recent = _query(
+    q_recent = lambda: _query(  # noqa: E731
         "SELECT DATABASE_NAME, PIPELINE_NAME, BATCH_ID, BATCH_STATE, BATCH_ROWS_WRITTEN,"
         " BATCH_TIME, BATCH_START_UNIX_TIMESTAMP FROM ("
         "  SELECT *, ROW_NUMBER() OVER (PARTITION BY DATABASE_NAME, PIPELINE_NAME ORDER BY BATCH_ID DESC) AS rn"
@@ -63,7 +63,7 @@ def collect(database: str | None) -> dict[str, Any]:
         f") t WHERE rn <= {RECENT_BATCHES} ORDER BY BATCH_ID",
         params,
     )
-    errors = _query(
+    q_errors = lambda: _query(  # noqa: E731
         "SELECT DATABASE_NAME, PIPELINE_NAME, n, ERROR_UNIX_TIMESTAMP, ERROR_TYPE, ERROR_MESSAGE FROM ("
         "  SELECT DATABASE_NAME, PIPELINE_NAME, ERROR_UNIX_TIMESTAMP, ERROR_TYPE, ERROR_MESSAGE,"
         "   COUNT(*) OVER (PARTITION BY DATABASE_NAME, PIPELINE_NAME) AS n,"
@@ -74,18 +74,21 @@ def collect(database: str | None) -> dict[str, Any]:
     )
 
     # Progress through the source: file counts for file sources, offset lag for Kafka.
-    files = _query(
+    q_files = lambda: _query(  # noqa: E731
         "SELECT DATABASE_NAME, PIPELINE_NAME, FILE_STATE, COUNT(*) AS n, SUM(FILE_SIZE) AS bytes"
         f" FROM information_schema.PIPELINES_FILES{where} GROUP BY 1, 2, 3",
         params,
     )
-    kafka = _query(
+    q_kafka = lambda: _query(  # noqa: E731
         "SELECT DATABASE_NAME, PIPELINE_NAME, COUNT(*) AS partitions,"
         " SUM(GREATEST(LATEST_OFFSET - CURSOR_OFFSET, 0)) AS lag, MAX(UPDATED_UNIX_TIMESTAMP) AS updated_unix"
         f" FROM information_schema.PIPELINES_CURSORS{where}{' AND' if where else ' WHERE'} SOURCE_TYPE = 'KAFKA'"
         " GROUP BY 1, 2",
         params,
     )
+
+    # Independent information_schema reads: overlap their round trips.
+    pipelines, last_batches, recent, errors, files, kafka = db.parallel(q_pipelines, q_last_batches, q_recent, q_errors, q_files, q_kafka)
 
     key = lambda r: (r["DATABASE_NAME"], r["PIPELINE_NAME"])  # noqa: E731
     files_by: dict[tuple[str, str], dict[str, Any]] = defaultdict(

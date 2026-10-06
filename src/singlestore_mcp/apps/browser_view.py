@@ -17,6 +17,7 @@ import asyncio
 import json
 import secrets
 import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -34,9 +35,11 @@ _MAX_BODY = 1_000_000
 
 
 class BrowserView:
-    def __init__(self, mcp: Any) -> None:
+    def __init__(self, mcp: Any, port: int = 0, token: str | None = None) -> None:
         self._mcp = mcp
-        self._token = secrets.token_urlsafe(24)
+        self._port = port
+        self._token = token or secrets.token_urlsafe(24)
+        self.last_activity = time.time()  # any request; open pages ping every 30 s
         self._lock = threading.Lock()
         self._httpd: ThreadingHTTPServer | None = None
         self._tools: dict[str, dict[str, Any]] = {}
@@ -58,7 +61,7 @@ class BrowserView:
                 d = t.model_dump(by_alias=True, exclude_none=True, mode="json")
                 if "ui" in d.get("_meta", {}) or t.name in _EXTRA_TOOLS:
                     self._tools[t.name] = d
-            self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
+            self._httpd = ThreadingHTTPServer(("127.0.0.1", self._port), self._handler())
             self._httpd.daemon_threads = True
             threading.Thread(target=self._httpd.serve_forever, name="browser-view", daemon=True).start()
 
@@ -88,6 +91,7 @@ class BrowserView:
                     return False, ""
                 if not secrets.compare_digest(parts.path[: len(prefix)], prefix):
                     return False, ""
+                view.last_activity = time.time()
                 return True, parts.path[len(prefix):]
 
             def _send(self, status: int, body: bytes, content_type: str) -> None:
@@ -109,6 +113,8 @@ class BrowserView:
                 query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
                 if route == "":
                     return self._send(200, _HOST_PAGE.read_bytes(), "text/html; charset=utf-8")
+                if route == "ping":
+                    return self._json(200, {"ok": True})
                 if route == "tool":
                     tool = view._tools.get(query.get("name", [""])[0])
                     return self._json(200, tool) if tool else self._json(404, {"error": "unknown tool"})

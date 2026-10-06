@@ -63,14 +63,13 @@ def _query(sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
 
 
 def _counters() -> dict[int, dict[str, Any]]:
-    cpu = _query(
+    cpu, disk = db.parallel(lambda: _query(
         "SELECT NODE_ID, NUM_CPUS, CFS_QUOTA_NS, CFS_PERIOD_NS, MEMSQL_TOTAL_CUMULATIVE_NS,"
         " TOTAL_USED_CUMULATIVE_NS, IDLE_CUMULATIVE_NS, TIMESTAMP_NS FROM information_schema.MV_SYSINFO_CPU"
-    )
-    disk = _query(
+    ), lambda: _query(
         "SELECT NODE_ID, MOUNT_POINT, MEMSQL_DIRS, MOUNT_TOTAL_B, MOUNT_USED_B, READ_CUMULATIVE_B,"
         " WRITE_CUMULATIVE_B, TIMESTAMP_NS FROM information_schema.MV_SYSINFO_DISK"
-    )
+    ))
     out: dict[int, dict[str, Any]] = {}
     for r in cpu:
         quota, period = r["CFS_QUOTA_NS"] or 0, r["CFS_PERIOD_NS"] or 0
@@ -152,14 +151,33 @@ def _short_host(host: str) -> str:
 
 
 def collect(include_internal: bool = False) -> dict[str, Any]:
-    nodes = _query(
-        "SELECT ID, IP_ADDR, PORT, TYPE, STATE, AVAILABILITY_GROUP, MAX_MEMORY_MB, MEMORY_USED_MB,"
-        " UPTIME, VERSION FROM information_schema.MV_NODES ORDER BY ID"
+    user_filter = "" if include_internal else " AND USER <> 'distributed'"
+    # Independent reads, run concurrently so their round trips overlap.
+    nodes, mem_rows, (rates, measured), queries, idle_rows = db.parallel(
+        lambda: _query(
+            "SELECT ID, IP_ADDR, PORT, TYPE, STATE, AVAILABILITY_GROUP, MAX_MEMORY_MB, MEMORY_USED_MB,"
+            " UPTIME, VERSION FROM information_schema.MV_NODES ORDER BY ID"
+        ),
+        lambda: _query(
+            "SELECT NODE_ID, CGROUP_TOTAL_B, CGROUP_USED_B, HOST_TOTAL_B, MEMSQL_B FROM information_schema.MV_SYSINFO_MEM"
+        ),
+        _rates,
+        lambda: _query(
+            "SELECT NODE_ID, ID, USER, HOST, DB, COMMAND, TIME, STATE, INFO, TRANSACTION_STATE, RESOURCE_POOL,"
+            " REASON_FOR_QUEUEING FROM information_schema.MV_PROCESSLIST"
+            f" WHERE COMMAND <> 'Sleep'{user_filter}"
+            " AND (INFO IS NULL OR INFO NOT LIKE %s)"
+            # Leaf-side fan-out of system-view reads, including this monitor's own.
+            " AND NOT (USER = 'distributed' AND DB = 'information_schema')"
+            " ORDER BY TIME DESC LIMIT 200",
+            (f"%{_MARKER}%",),
+        ),
+        lambda: _query(
+            "SELECT COUNT(*) AS n FROM information_schema.MV_PROCESSLIST WHERE COMMAND = 'Sleep' AND USER <> 'distributed'"
+        ),
     )
-    mem = {r["NODE_ID"]: r for r in _query(
-        "SELECT NODE_ID, CGROUP_TOTAL_B, CGROUP_USED_B, HOST_TOTAL_B, MEMSQL_B FROM information_schema.MV_SYSINFO_MEM"
-    )}
-    rates, measured = _rates()
+    mem = {r["NODE_ID"]: r for r in mem_rows}
+    idle = idle_rows[0]["n"]
 
     node_list = []
     for n in nodes:
@@ -186,20 +204,6 @@ def collect(include_internal: bool = False) -> dict[str, Any]:
         })
     _record_history(node_list)
 
-    user_filter = "" if include_internal else " AND USER <> 'distributed'"
-    queries = _query(
-        "SELECT NODE_ID, ID, USER, HOST, DB, COMMAND, TIME, STATE, INFO, TRANSACTION_STATE, RESOURCE_POOL,"
-        " REASON_FOR_QUEUEING FROM information_schema.MV_PROCESSLIST"
-        f" WHERE COMMAND <> 'Sleep'{user_filter}"
-        " AND (INFO IS NULL OR INFO NOT LIKE %s)"
-        # Leaf-side fan-out of system-view reads, including this monitor's own.
-        " AND NOT (USER = 'distributed' AND DB = 'information_schema')"
-        " ORDER BY TIME DESC LIMIT 200",
-        (f"%{_MARKER}%",),
-    )
-    idle = _query(
-        "SELECT COUNT(*) AS n FROM information_schema.MV_PROCESSLIST WHERE COMMAND = 'Sleep' AND USER <> 'distributed'"
-    )[0]["n"]
     node_names = {n["id"]: n["host"] for n in node_list}
     return {
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),

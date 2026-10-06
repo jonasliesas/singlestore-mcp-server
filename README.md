@@ -42,6 +42,45 @@ Pipelines:
 Interactive apps (see below): `pipeline_monitor`, `query_grid`, `schema_explorer`,
 `cluster_monitor`, `sql_editor`.
 
+## Standalone workspace (desktop shortcut)
+
+The workspace also runs without Claude, in its own window:
+
+```bash
+uv run python scripts/make_shortcut.py --database SASDP
+```
+
+creates a **SingleStore Workspace** shortcut on the desktop. It runs
+`pythonw -m singlestore_mcp.workspace_app` (no console window), which starts
+the app server on `127.0.0.1:8790` and opens the workspace in an Edge app
+window (`--browser` for the default browser). Clicking it again while it runs
+just opens another window; the server stops 5 minutes after the last window
+closes. It uses the `SINGLESTORE_*` environment variables (set them as user
+environment variables), and the editor's chat uses the in-editor assistant.
+
+## Prompts (slash commands)
+
+In Claude Code the server's prompts show up as slash commands:
+
+| Command | What it does |
+|---|---|
+| `/singlestore:workspace` | Open the SingleStore Workspace (optional database, view) |
+| `/singlestore:explain_query` | Explain a query, run `EXPLAIN`, suggest a faster version |
+| `/singlestore:create_pipeline` | Build a pipeline from an S3 path / Kafka topic (asks before creating) |
+| `/singlestore:pipeline_health` | Check all pipelines for errors, stalls and lag |
+| `/singlestore:table_report` | Size, storage, keys and data profile of a table |
+| `/singlestore:restart` | Restart the server so code and app changes load |
+
+### Restarting without reconnecting
+
+The process Claude starts is a small relay ([`supervisor.py`](src/singlestore_mcp/supervisor.py))
+that runs the real server as a child process. The `restart_server` tool (or
+`/singlestore:restart`) replaces that child, replays the MCP handshake and
+tells Claude that the tools, prompts and resources changed, so Python and app
+changes load in a few seconds without touching `/mcp`. Browser links made
+before a restart stop working. Set `SINGLESTORE_MCP_NO_SUPERVISOR=1` to run
+the server without the relay.
+
 ## MCP Apps
 
 In hosts that support [MCP Apps](https://modelcontextprotocol.io/seps/1865-mcp-apps-interactive-user-interfaces-for-mcp)
@@ -54,7 +93,77 @@ instead of plain text. In other hosts they still return a normal text result.
 | `query_grid(sql, database?, max_rows=1000)` | Read-only query results as a sortable, filterable, paginated grid with CSV export. The SQL can be edited and re-run from the grid. Only SELECT / WITH / SHOW / DESCRIBE / EXPLAIN are accepted; writes are rejected before reaching the database. |
 | `schema_explorer(database?, table?)` | Databases → tables tree with row counts and sizes, and per-table columns, DDL (shard/sort keys) and a row preview. "Ask Claude" and "Query in grid" hand the table back to the chat. |
 | `cluster_monitor()` | Every node (aggregators and leaves) with SingleStore CPU (against the node's core limit, with a short history), memory against `max_memory`, and disk space and read/write throughput; plus the queries running right now (expand a row for the full SQL and "Ask Claude"). Auto-refreshes every 5 s. |
-| `sql_editor(database?, sql?)` | Schema tree, SQL editor (CodeMirror) and results pane, split top/bottom with a draggable divider. Autocomplete for SQL and SingleStore keywords, SingleStore built-in functions (with signatures), your functions/procedures, databases, tables and columns (other databases load as you type `db.`). Ctrl+Enter runs the statement at the cursor or the selection. Reads run immediately; statements that change data or schema ask for confirmation first. A **Chat with Claude** tab sends a question (with the editor's SQL and last result) into the Claude chat; Claude answers into the editor with `sql_editor_reply`, and each SQL block gets Replace / Insert / Copy buttons. (Relayed through the chat because Claude doesn't offer MCP sampling to apps or servers; not available in the browser view.) |
+| `sql_editor(database?, sql?, view?, table?)` | Opens the **SingleStore Workspace** (see below) on its SQL view: schema tree, SQL editor (CodeMirror) and results pane, split top/bottom with a draggable divider. Autocomplete for SQL and SingleStore keywords, SingleStore built-in functions (with signatures), your functions/procedures, databases, tables and columns (other databases load as you type `db.`). Ctrl+Enter runs the statement at the cursor or the selection. Reads run immediately; statements that change data or schema ask for confirmation first. A **Chat with Claude** tab answers questions about the editor's SQL; each SQL block in an answer gets Replace / Insert / Copy buttons. Answers come either **here in the editor** (default; see "In-app assistant" below) or **in the Claude chat** (the question goes to the chat box, you click Send, and Claude answers into the editor with `sql_editor_reply`). |
+
+### SingleStore Workspace
+
+`sql_editor` opens a workspace that combines the apps in one window: a slim
+rail on the left switches between **SQL** (the editor), **Schema** (Schema
+Explorer), **Pipelines** (Pipeline Monitor) and **Cluster** (Cluster
+Monitor), with Open in browser / Full screen at the bottom. `view` picks the
+view it opens on (`sql`, `schema`, `pipelines`, `cluster`) and `table`
+pre-selects a table in the Schema view. Each view loads the first time you
+open it and keeps its state when you switch away; hidden views pause their
+auto-refresh. In the Schema view, **Query in grid** opens the table's query in
+the SQL view and runs it. The standalone apps still work on their own.
+
+The workspace acts as a small MCP Apps host for its views: each view runs in
+its own sandboxed iframe, loaded with `resources/read`, and the workspace
+relays its tool calls, chat messages and model-context updates (merged into
+one context, so Claude knows which view you're on) to the real host.
+
+### SQL files (SQL Editor)
+
+**Open** / **Save** (Ctrl+S) / **Save as** in the editor's header work on
+`.sql` files in a folder on the machine running the MCP server, by default
+`Documents\SingleStore SQL` (set `SINGLESTORE_MCP_SQL_DIR` to use another
+folder). Subfolders are allowed (`reports/sales.sql`); paths outside the
+folder are refused, and replacing an existing file asks first. The header
+shows the current file name and a ● for unsaved changes. This works inside
+Claude and in the browser view.
+
+**Browse computer…** (in the Open panel) opens any local file with the
+browser's file picker; saving it stores a copy in the SQL folder. **Download**
+(in Save as) saves the SQL through the browser instead, where the host allows
+downloads (the browser view does; Claude may not).
+
+### In-app assistant (SQL Editor chat)
+
+With "Answer: here in the editor", the server answers editor questions itself
+by running Claude Code headless (`claude -p`) with your own Claude login: no
+API key, no Send click in the chat, and it works in the browser view too.
+Progress ("Looking at the schema…", "Running query 2…") and a Stop button
+show while it works; each editor keeps one Claude session, so follow-up
+questions have context. Each editor keeps one Claude Code process running (streaming
+input), started in the background when you open the chat tab, so questions don't
+wait for Claude Code to start: they go straight to the model and the
+read-only tools. Idle processes close after 10 minutes (at most 4 run
+at once); changing Speed or pressing Stop restarts the process and resumes
+the same conversation.
+
+The headless session has no built-in tools (no shell or file access) and one
+MCP server: this package started with `python -m singlestore_mcp.assistant
+--serve-readonly`, which offers only `list_databases`, `list_tables`,
+`describe_table` and `read_query` (the Query Grid's read-only guard, at most
+200 rows). It can't change data; it gives you statements to review and run.
+
+Requirements and settings:
+- Claude Code installed and logged in (`claude`, then `/login`, once in a
+  terminal). If it's missing, the editor offers only the Claude chat.
+- It uses your Claude plan's usage like any other Claude Code session; its
+  sessions are kept under `%LOCALAPPDATA%\singlestore-mcp\assistant`.
+- **Speed** in the chat options picks the profile: *Fast* (Haiku),
+  *Balanced* (Sonnet, medium effort; default) or *Thorough* (Opus, high effort).
+- Every question also gets the SingleStore skill
+  [`skills/singlestore-sql/SKILL.md`](src/singlestore_mcp/skills/singlestore-sql/SKILL.md):
+  key SingleStore SQL learnings (case-sensitive names, one table per `DROP`,
+  no `GROUP_CONCAT(DISTINCT … ORDER BY)`, procedure syntax, pipelines,
+  monitoring views). Add to it as you find new pitfalls. It's a standard Claude
+  skill, so you can also copy the folder to `~/.claude/skills/` for Claude Code itself.
+- Optional environment variables: `SINGLESTORE_MCP_CLAUDE` (path to the
+  `claude` executable), `SINGLESTORE_MCP_ASSISTANT_MODEL` /
+  `SINGLESTORE_MCP_ASSISTANT_EFFORT` (the Balanced profile; default `sonnet` /
+  `medium`), `SINGLESTORE_MCP_ASSISTANT_TIMEOUT` (seconds, default 300).
 
 The model gets a compact text summary (e.g. the first 20 rows); the full data
 goes to the UI only, via `structuredContent`, which the MCP Apps spec keeps

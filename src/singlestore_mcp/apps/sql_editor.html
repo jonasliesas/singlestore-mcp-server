@@ -15,6 +15,20 @@
   .sq-body.no-tree { grid-template-columns: minmax(0, 1fr); }
   .sq-body.no-tree .sq-tree { display: none; }
   html[data-display-mode="fullscreen"] .sq-body { height: calc(100vh - 70px); }
+  .sq-filebtns { display: inline-flex; align-items: center; gap: 2px; margin-left: 4px; }
+  .sq-file { font-size: var(--s2-fs-xs); color: var(--s2-text-2); margin-left: 6px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sq-file .dirty { color: var(--s2-warn); margin-left: 3px; }
+  .sq-files { border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); padding: 8px 10px; margin-bottom: 8px; background: var(--s2-bg-2); font-size: var(--s2-fs-xs); }
+  .sq-files[hidden] { display: none; }
+  .sq-files .row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .sq-files .row + .row, .sq-files .list + .row { margin-top: 6px; }
+  .sq-files .s2-input { min-width: 220px; }
+  .sq-files .list { margin-top: 6px; max-height: 190px; overflow: auto; border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius-sm); background: var(--s2-bg); }
+  .sq-files .item { display: flex; gap: 10px; width: 100%; border: 0; background: none; text-align: left; padding: 4px 8px; cursor: pointer; font: inherit; color: inherit; }
+  .sq-files .item:hover, .sq-files .item:focus-visible { background: var(--s2-info-bg); }
+  .sq-files .item .n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--s2-mono); }
+  .sq-files .item .m { color: var(--s2-text-3); white-space: nowrap; }
+  .sq-files .warn { color: var(--s2-warn); }
   @media (max-width: 640px) { .sq-body { grid-template-columns: minmax(0, 1fr); } .sq-tree { display: none; } }
 
   .sq-tree { display: flex; flex-direction: column; min-height: 0; border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); overflow: hidden; }
@@ -57,12 +71,16 @@
   .sq-msg.note { align-self: center; color: var(--s2-text-3); font-style: italic; }
   .sq-msg .who { font-size: 11px; color: var(--s2-text-3); margin-bottom: 2px; }
   .sq-msg p { margin: 0 0 4px; white-space: pre-wrap; }
+  .sq-msg p code { font-family: var(--s2-mono); font-size: 11.5px; background: var(--s2-bg-3); border-radius: 3px; padding: 0 3px; }
   .sq-code { margin: 6px 0; border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius-sm); overflow: hidden; background: var(--s2-bg); }
   .sq-code pre { margin: 0; padding: 7px 9px; font-family: var(--s2-mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; }
   .sq-code .bar { display: flex; gap: 4px; padding: 4px 6px; border-top: 1px solid var(--s2-border-2); background: var(--s2-bg-2); }
   .sq-ask { display: flex; gap: 6px; align-items: flex-end; padding: 6px 8px; border-top: 1px solid var(--s2-border-2); }
   .sq-ask textarea { flex: 1; resize: none; min-height: 34px; max-height: 120px; font-size: var(--s2-fs-xs); }
-  .sq-ask-opts { font-size: 11px; color: var(--s2-text-3); padding: 0 8px 6px; display: flex; gap: 12px; align-items: center; }
+  .sq-ask-opts { font-size: 11px; color: var(--s2-text-3); padding: 0 8px 6px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .sq-ask-opts .sq-mode { font-size: 11px; padding: 1px 4px; height: auto; width: auto; }
+  .sq-msg.error { align-self: flex-start; background: var(--s2-err-bg, var(--s2-warn-bg)); border-radius: 10px; padding: 6px 10px; width: 92%; }
+  .sq-msg.note .s2-btn { font-style: normal; margin-left: 6px; }
   .sq-out .s2-table-wrap { border: 0; border-radius: 0; overflow: visible; }
   .sq-placeholder { padding: 18px; color: var(--s2-text-2); font-size: var(--s2-fs-xs); line-height: 1.6; }
   .sq-placeholder kbd { font-family: var(--s2-mono); background: var(--s2-bg-2); border: 1px solid var(--s2-border-2); border-radius: 3px; padding: 0 4px; }
@@ -119,17 +137,28 @@ const msgsEl = h("div", { class: "sq-msgs", "aria-live": "polite" });
 const askBox = h("textarea", { class: "s2-input", rows: 2, placeholder: "Ask Claude about this SQL… (Enter to send, Shift+Enter for a new line)", "aria-label": "Question for Claude",
   onkeydown: (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(); } } });
 const includeSql = h("input", { type: "checkbox", checked: true });
+const modeSelect = h("select", { class: "s2-input sq-mode", "aria-label": "Who answers",
+  onchange: (e) => { chat.mode = e.target.value; try { localStorage.setItem("s2-sql-chat-mode", chat.mode); } catch {} renderChat(); warmAssistant(); } });
+const modeHint = h("span", {});
+const profileSelect = h("select", { class: "s2-input sq-mode", "aria-label": "Assistant speed",
+  title: "Fast: Haiku. Balanced: Sonnet, medium effort. Thorough: Opus, high effort.",
+  onchange: (e) => { try { localStorage.setItem("s2-sql-chat-profile", e.target.value); } catch {} warmAssistant(); } },
+  h("option", { value: "fast" }, "Fast"), h("option", { value: "balanced" }, "Balanced"), h("option", { value: "thorough" }, "Thorough"));
+try { profileSelect.value = localStorage.getItem("s2-sql-chat-profile") || "balanced"; } catch { profileSelect.value = "balanced"; }
+const profileLabel = h("label", {}, "Speed ", profileSelect);
 const chatView = h("div", { class: "sq-chat", role: "tabpanel", hidden: true },
   msgsEl,
   h("div", { class: "sq-ask" }, askBox, h("button", { class: "s2-btn primary", onclick: () => ask() }, "Send")),
   h("div", { class: "sq-ask-opts" },
     h("label", {}, includeSql, " Include the editor's SQL and last result"),
-    h("span", {}, "Answers also appear in the Claude chat.")));
+    h("label", {}, "Answer ", modeSelect), profileLabel, modeHint));
+const fileLabel = h("span", { class: "sq-file" });
+const filePanel = h("div", { class: "sq-files", hidden: true });
 const tabsEl = h("div", { class: "sq-tabs", role: "tablist" });
 const resultsEl = h("section", { class: "sq-results", "aria-label": "Results and chat" }, tabsEl, resultView, chatView);
 const mainEl = h("div", { class: "sq-main" }, editorBox, splitEl, resultsEl);
 const bodyEl = h("div", { class: "sq-body" }, treeEl, mainEl);
-root.replaceChildren(headEl, bodyEl);
+root.replaceChildren(headEl, filePanel, bodyEl);
 
 function applySplit() { editorBox.style.flex = `0 0 ${(state.editorFrac * 100).toFixed(1)}%`; }
 applySplit();
@@ -237,7 +266,11 @@ const view = new CM.EditorView({
   state: CM.EditorState.create({
     doc: "",
     extensions: [
-      CM.Prec.highest(CM.keymap.of([{ key: "Mod-Enter", run: () => { run(); return true; } }])),
+      CM.Prec.highest(CM.keymap.of([
+        { key: "Mod-Enter", run: () => { run(); return true; } },
+        { key: "Mod-s", run: () => { saveFile(); return true; } },
+      ])),
+      CM.EditorView.updateListener.of((u) => { if (u.docChanged) renderFileLabel(); }),
       CM.basicSetup,
       CM.keymap.of([CM.indentWithTab]),
       sqlCompartment.of(sqlExtension()),
@@ -248,10 +281,21 @@ const view = new CM.EditorView({
   }),
 });
 
-// Statement ranges, skipping semicolons inside strings, quoted names and comments.
+// Statement ranges, skipping delimiters inside strings, quoted names and
+// comments, and inside the BEGIN … END body of CREATE PROCEDURE / FUNCTION /
+// TRIGGER. "DELIMITER //" lines (as in MySQL-style scripts) change the
+// delimiter and aren't statements themselves.
+const ROUTINE_HEAD = /^CREATE\s+(OR\s+REPLACE\s+)?(DEFINER\s*=\s*\S+\s+)?(AGGREGATE\s+)?(PROCEDURE|FUNCTION|TRIGGER)\b/i;
+const LEADING_COMMENTS = /^(\s+|--[^\n]*(\n|$)|#[^\n]*(\n|$)|\/\*[\s\S]*?\*\/)*/;
 function statementRanges(text) {
   const ranges = [];
-  let start = 0, i = 0, quote = null;
+  let start = 0, i = 0, quote = null, depth = 0, delim = ";";
+  // A routine's DECLARE section (between AS and BEGIN) also contains
+  // semicolons: inside a routine, only split once its body has closed.
+  let declared = false, opened = false, closed = false;
+  const reset = () => { declared = opened = closed = false; };
+  const head = () => text.slice(start, i).replace(LEADING_COMMENTS, "");
+  const nextWord = (from) => /^\s*([A-Za-z_]+)/.exec(text.slice(from, from + 40))?.[1]?.toUpperCase();
   while (i < text.length) {
     const ch = text[i], next = text[i + 1];
     if (quote) {
@@ -260,11 +304,36 @@ function statementRanges(text) {
     } else if (ch === "'" || ch === '"' || ch === "`") quote = ch;
     else if ((ch === "-" && next === "-") || ch === "#") { while (i < text.length && text[i] !== "\n") i++; }
     else if (ch === "/" && next === "*") { const end = text.indexOf("*/", i + 2); i = end < 0 ? text.length : end + 1; }
-    else if (ch === ";") { ranges.push({ from: start, to: i }); start = i + 1; }
+    else if (/[A-Za-z_]/.test(ch) && !/[\w$]/.test(text[i - 1] ?? "")) {
+      const word = /^[A-Za-z_][\w$]*/.exec(text.slice(i, i + 64))[0];
+      const up = word.toUpperCase();
+      if (up === "DELIMITER" && !head().trim()) {
+        const eol = text.indexOf("\n", i);
+        const lineEnd = eol < 0 ? text.length : eol;
+        delim = text.slice(i + word.length, lineEnd).trim() || ";";
+        start = i = lineEnd;
+        reset();
+        continue;
+      }
+      if (up === "BEGIN" && (depth > 0 || ROUTINE_HEAD.test(head()))) { depth++; opened = true; }
+      else if (up === "DECLARE" && depth === 0 && ROUTINE_HEAD.test(head())) declared = true;
+      else if (up === "CASE" && depth > 0) depth++;
+      else if (up === "END" && depth > 0 && !["IF", "LOOP", "WHILE", "REPEAT", "FOR"].includes(nextWord(i + 3))) {
+        if (--depth === 0) closed = true;
+      }
+      i += word.length;
+      continue;
+    } else if (depth === 0 && text.startsWith(delim, i) && (closed || !(declared || opened))) {
+      ranges.push({ from: start, to: i });
+      start = i + delim.length;
+      i = start;
+      reset();
+      continue;
+    }
     i++;
   }
   ranges.push({ from: start, to: text.length });
-  return ranges.filter((r) => text.slice(r.from, r.to).trim());
+  return ranges.filter((r) => text.slice(r.from, r.to).replace(LEADING_COMMENTS, "").trim());
 }
 
 function statementAtCursor() {
@@ -471,17 +540,167 @@ function renderHeader() {
     h("button", { class: "s2-btn primary", onclick: run, disabled: state.running, title: "Run the statement at the cursor or the selection (Ctrl+Enter)" },
       state.running ? h("span", { class: "s2-spinner" }) : null, "▶ Run"),
     historySelect,
+    h("span", { class: "sq-filebtns" },
+      h("button", { class: "s2-btn ghost", title: "Open a .sql file", onclick: () => showFilePanel("open") }, "Open"),
+      h("button", { class: "s2-btn ghost", title: "Save (Ctrl+S)", onclick: () => saveFile() }, "Save"),
+      h("button", { class: "s2-btn ghost", title: "Save under a new name", onclick: () => showFilePanel("save") }, "Save as"),
+      fileLabel),
     h("span", { class: "s2-spacer" }),
     S2.openInBrowserButton("sql_editor", () => ({ database: state.database, sql: view.state.doc.toString() })),
     S2.fullscreenButton(),
   ].filter(Boolean));
 }
 
+// ---------------------------------------------------------------- SQL files
+// Open / Save use .sql files in a folder on the machine running the MCP
+// server (sql_editor_files / _open_file / _save_file), so they work inside
+// Claude and in the browser view. "Browse computer…" reads any local file
+// with the browser's own file picker; saving it again goes to the folder.
+const file = { name: null, external: false, savedText: "", folder: null };
+const fileInput = h("input", { type: "file", accept: ".sql,.txt,text/plain", hidden: true, onchange: (e) => openLocalFile(e.target.files?.[0]) });
+document.body.append(fileInput);
+
+const isDirty = () => view.state.doc.toString() !== file.savedText;
+function renderFileLabel() {
+  const name = file.name ?? "untitled";
+  fileLabel.title = file.name ? (file.external ? `${file.name} (opened from your computer; Save stores a copy in the SQL folder)` : `${file.folder ?? "SQL folder"}\\${file.name}`) : "Not saved yet";
+  fileLabel.replaceChildren(name, isDirty() && (file.name || view.state.doc.length) ? h("span", { class: "dirty", title: "Unsaved changes" }, "●") : "");
+}
+function setFile(name, text, { external = false } = {}) {
+  setSql(text);
+  file.name = name; file.external = external; file.savedText = text;
+  renderFileLabel();
+  view.focus();
+}
+const ago = (t) => { const s = Date.now() / 1000 - t; return s < 90 ? "just now" : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 129600 ? `${Math.round(s / 3600)} h ago` : new Date(t * 1000).toLocaleDateString(); };
+
+function hideFilePanel() { filePanel.hidden = true; filePanel.replaceChildren(); }
+
+async function showFilePanel(mode, message) {
+  filePanel.hidden = false;
+  if (mode === "save") return renderSavePanel(message);
+  filePanel.replaceChildren(h("div", { class: "row" }, h("span", { class: "s2-spinner" }), " Loading files…"));
+  let listing;
+  try { listing = await S2.callTool("sql_editor_files", {}); }
+  catch (e) { listing = { files: [], error: cleanError(e).message }; }
+  file.folder = listing.folder ?? file.folder;
+  const filter = h("input", { class: "s2-input", type: "search", placeholder: "Filter files…", "aria-label": "Filter files" });
+  const list = h("div", { class: "list", role: "listbox", "aria-label": "SQL files" });
+  const renderList = () => {
+    const q = filter.value.trim().toLowerCase();
+    const shown = listing.files.filter((f) => !q || f.name.toLowerCase().includes(q));
+    list.replaceChildren(...(shown.length ? shown.map((f) => h("button", { class: "item", role: "option", onclick: () => openServerFile(f.name) },
+      h("span", { class: "n" }, f.name), h("span", { class: "m" }, `${fmt.bytes(f.size)} · ${ago(f.modified)}`)))
+      : [h("div", { class: "item m" }, listing.error ?? (listing.files.length ? "No matching files" : "No .sql files in the folder yet — use Save to add one."))]));
+  };
+  filter.oninput = renderList;
+  filter.onkeydown = (e) => { if (e.key === "Escape") hideFilePanel(); if (e.key === "Enter") list.querySelector("button.item")?.click(); };
+  renderList();
+  filePanel.replaceChildren(
+    h("div", { class: "row" }, h("strong", {}, "Open"), filter,
+      h("button", { class: "s2-btn", title: "Pick any file on your computer", onclick: () => fileInput.click() }, "Browse computer…"),
+      h("span", { class: "s2-spacer" }), h("button", { class: "s2-btn ghost", onclick: hideFilePanel }, "Close")),
+    list,
+    h("div", { class: "row s2-muted" }, `Folder: ${listing.folder ?? "?"}`));
+  filter.focus();
+}
+
+function renderSavePanel(message) {
+  const nameInput = h("input", { class: "s2-input", value: file.name ?? "query.sql", "aria-label": "File name", spellcheck: false });
+  const go = (overwrite) => saveAs(nameInput.value, overwrite);
+  nameInput.onkeydown = (e) => { if (e.key === "Enter") go(false); if (e.key === "Escape") hideFilePanel(); };
+  filePanel.replaceChildren(
+    h("div", { class: "row" }, h("strong", {}, "Save as"), nameInput,
+      h("button", { class: "s2-btn primary", onclick: () => go(false) }, "Save"),
+      h("button", { class: "s2-btn", title: "Download the SQL as a file (browser view)", onclick: () => S2.download(nameInput.value.trim() || "query.sql", view.state.doc.toString(), "application/sql") }, "Download"),
+      h("span", { class: "s2-spacer" }), h("button", { class: "s2-btn ghost", onclick: hideFilePanel }, "Cancel")),
+    message ?? h("div", { class: "row s2-muted" }, `Saved in ${file.folder ?? "the SQL folder"}. Use / for subfolders, e.g. reports/sales.sql.`));
+  nameInput.focus();
+  nameInput.setSelectionRange(0, nameInput.value.replace(/\.sql$/i, "").length);
+}
+
+async function saveAs(name, overwrite) {
+  name = name.trim();
+  if (!name) return;
+  try {
+    const res = await S2.callTool("sql_editor_save_file", { name, sql: view.state.doc.toString(), overwrite });
+    if (res.exists) {
+      return renderSavePanel(h("div", { class: "row" }, h("span", { class: "warn" }, `${res.name} already exists.`),
+        h("button", { class: "s2-btn", onclick: () => saveAs(res.name, true) }, "Replace it"),
+        h("button", { class: "s2-btn ghost", onclick: () => renderSavePanel() }, "Pick another name")));
+    }
+    file.name = res.name; file.external = false; file.folder = res.folder; file.savedText = view.state.doc.toString();
+    renderFileLabel(); hideFilePanel();
+    S2.toast(`Saved ${res.name}`, "ok");
+    view.focus();
+  } catch (e) {
+    renderSavePanel(h("div", { class: "row" }, h("span", { class: "warn" }, `Couldn't save: ${cleanError(e).message}`)));
+  }
+}
+
+async function saveFile() {
+  if (!file.name || file.external) return showFilePanel("save");
+  await saveAs(file.name, true);
+}
+
+// Opening replaces the editor; ask first if there are unsaved changes.
+function confirmDiscard(then) {
+  if (!isDirty() || !view.state.doc.toString().trim()) return then();
+  filePanel.hidden = false;
+  filePanel.replaceChildren(h("div", { class: "row" }, h("span", { class: "warn" }, `Discard unsaved changes in ${file.name ?? "the editor"}?`),
+    h("button", { class: "s2-btn", onclick: then }, "Discard and open"),
+    h("button", { class: "s2-btn ghost", onclick: () => showFilePanel("open") }, "Back")));
+}
+
+function openServerFile(name) {
+  confirmDiscard(async () => {
+    try {
+      const res = await S2.callTool("sql_editor_open_file", { name });
+      file.folder = res.folder;
+      setFile(res.name, res.sql);
+      hideFilePanel();
+    } catch (e) { S2.toast(`Couldn't open ${name}: ${cleanError(e).message}`, "err"); }
+  });
+}
+
+async function openLocalFile(picked) {
+  fileInput.value = "";
+  if (!picked) return;
+  if (picked.size > 2_000_000) { S2.toast("That file is larger than 2 MB", "err"); return; }
+  const text = await picked.text();
+  confirmDiscard(() => { setFile(picked.name, text, { external: true }); hideFilePanel(); });
+}
+
 // ---------------------------------------------------------------- chat with Claude
-// Questions go to the Claude chat as a user message tagged with this editor's
-// id; Claude answers with the sql_editor_reply tool, which this editor polls.
+// Two ways to get an answer, both landing in this editor's inbox (polled):
+//  - "app":  the server runs headless Claude Code with read-only database
+//            tools (sql_editor_ask). No Send click; works in the browser view.
+//  - "chat": the question goes to the Claude chat as a user message tagged
+//            with this editor's id; Claude answers with sql_editor_reply.
 const editorId = "e-" + Array.from(crypto.getRandomValues(new Uint8Array(3)), (b) => b.toString(16).padStart(2, "0")).join("");
-const chat = { tab: "results", unread: 0, waiting: false, lastSeq: 0, messages: [] };
+let savedMode = null;
+try { savedMode = localStorage.getItem("s2-sql-chat-mode"); } catch {}
+const chat = { tab: "results", unread: 0, waiting: false, lastSeq: 0, messages: [],
+               mode: savedMode === "chat" ? "chat" : "app", assistant: null, job: null };
+const chatAvailable = () => !S2.inBrowserView();
+const appAvailable = () => chat.assistant?.available !== false;
+function effectiveMode() {
+  if (chat.mode === "chat" && chatAvailable()) return "chat";
+  return appAvailable() ? "app" : chatAvailable() ? "chat" : null;
+}
+function renderModeOptions() {
+  const opts = [];
+  if (appAvailable()) opts.push(h("option", { value: "app" }, "here in the editor"));
+  if (chatAvailable()) opts.push(h("option", { value: "chat" }, "in the Claude chat"));
+  modeSelect.replaceChildren(...opts);
+  modeSelect.value = effectiveMode() ?? "";
+  modeSelect.disabled = opts.length < 2;
+  const mode = effectiveMode();
+  profileLabel.hidden = mode !== "app";
+  modeHint.textContent = mode === "app" ? "Claude can run read-only queries to check its answer."
+    : mode === "chat" ? "Claude will put your question in the chat box; click Send there."
+    : chat.assistant?.reason ?? "";
+}
 
 function renderTabs() {
   const tab = (key, label, extra) => h("button", { class: "sq-tab", role: "tab", "aria-selected": String(chat.tab === key),
@@ -489,7 +708,7 @@ function renderTabs() {
       chat.tab = key;
       if (key === "chat") chat.unread = 0;
       renderTabs();
-      if (key === "chat") { askBox.focus(); msgsEl.scrollTop = msgsEl.scrollHeight; }
+      if (key === "chat") { askBox.focus(); msgsEl.scrollTop = msgsEl.scrollHeight; warmAssistant(); }
     } }, label, extra);
   tabsEl.replaceChildren(
     tab("results", "Results"),
@@ -498,7 +717,20 @@ function renderTabs() {
   chatView.hidden = chat.tab !== "chat";
 }
 
-const textPart = (t) => (t.trim() ? h("p", {}, t.trim()) : null);
+// Inline **bold** and `code` only; everything else stays plain text (no HTML).
+function inline(text) {
+  const out = [];
+  const re = /\*\*([^*\n]+)\*\*|`([^`\n]+)`/g;
+  let last = 0, m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    out.push(m[1] !== undefined ? h("strong", {}, m[1]) : h("code", {}, m[2]));
+    last = re.lastIndex;
+  }
+  out.push(text.slice(last));
+  return out;
+}
+const textPart = (t) => (t.trim() ? h("p", {}, ...inline(t.trim())) : null);
 function codePart(code) {
   return h("div", { class: "sq-code" }, h("pre", {}, code),
     h("div", { class: "bar" },
@@ -523,72 +755,142 @@ function messageBody(text) {
   return parts.filter(Boolean);
 }
 
+function waitingNote() {
+  if (chat.waitingMode === "chat") {
+    return h("div", { class: "sq-msg note" }, h("span", { class: "s2-spinner" }), " Waiting for Claude… (your question is in the Claude chat box; click Send there)");
+  }
+  const j = chat.job;
+  const detail = j ? `${j.activity}${j.seconds >= 5 ? ` · ${j.seconds}s` : ""}` : "Starting Claude…";
+  return h("div", { class: "sq-msg note" }, h("span", { class: "s2-spinner" }), ` ${detail}`,
+    h("button", { class: "s2-btn ghost", onclick: stopAsking }, "Stop"));
+}
+
 function renderChat() {
+  renderModeOptions();
   const items = chat.messages.map((msg) =>
     msg.from === "you" ? h("div", { class: "sq-msg you" }, msg.text)
     : msg.from === "note" ? h("div", { class: "sq-msg note" }, msg.text)
+    : msg.from === "error" ? h("div", { class: "sq-msg error" }, h("div", { class: "who" }, "Couldn't answer"), messageBody(msg.text))
     : h("div", { class: "sq-msg claude" }, h("div", { class: "who" }, "Claude"), messageBody(msg.text)));
   if (!items.length) {
     items.push(h("div", { class: "sq-msg note" }, "Ask about the SQL in the editor, e.g. “make this faster”, “add a filter for 2024” or “explain this query”."));
   }
-  if (chat.waiting) items.push(h("div", { class: "sq-msg note" }, h("span", { class: "s2-spinner" }), " Waiting for Claude… (your question was sent to the Claude chat)"));
+  if (chat.waiting) items.push(waitingNote());
   msgsEl.replaceChildren(...items);
   msgsEl.scrollTop = msgsEl.scrollHeight;
 }
 
+function editorContext() {
+  if (!includeSql.checked) return { sql: null, selected: false, lastResult: null };
+  const sel = view.state.selection.main;
+  const sql = (sel.empty ? view.state.doc.toString() : view.state.sliceDoc(sel.from, sel.to)).trim() || null;
+  const r = state.result;
+  let lastResult = null;
+  if (state.error) lastResult = `failed: ${state.error.message}`;
+  else if (r) {
+    const what = r.has_result_set ? `${r.row_count} row(s); columns ${r.columns.join(", ")}` : `${r.affected_rows ?? 0} row(s) affected`;
+    lastResult = `${what}${r.sql ? `, for: ${r.sql.replace(/\s+/g, " ").slice(0, 300)}` : ""}`;
+  }
+  return { sql, selected: !sel.empty, lastResult };
+}
+
 async function ask() {
   const question = askBox.value.trim();
-  if (!question) return;
-  if (S2.inBrowserView()) { S2.toast("Chatting with Claude only works inside Claude", "err"); return; }
-  const parts = [`[SQL Editor ${editorId} · database ${state.database ?? "default"}] ${question}`];
-  if (includeSql.checked) {
-    const sel = view.state.selection.main;
-    const sql = (sel.empty ? view.state.doc.toString() : view.state.sliceDoc(sel.from, sel.to)).trim();
-    if (sql) parts.push(`${sel.empty ? "Editor SQL" : "Selected SQL"}:\n\`\`\`sql\n${sql.slice(0, 8000)}\n\`\`\``);
-    const r = state.result;
-    if (state.error) parts.push(`Last run failed: ${state.error.message}`);
-    else if (r) {
-      const what = r.has_result_set ? `${r.row_count} row(s); columns ${r.columns.join(", ")}` : `${r.affected_rows ?? 0} row(s) affected`;
-      parts.push(`Last result: ${what}${r.sql ? `, for: ${r.sql.replace(/\s+/g, " ").slice(0, 300)}` : ""}`);
-    }
-  }
-  parts.push(`(Answer with sql_editor_reply, editor_id "${editorId}", so it appears in the editor.)`);
+  if (!question || chat.waiting) return;
+  const mode = effectiveMode();
+  if (!mode) { S2.toast(chat.assistant?.reason ?? "Chat isn't available here", "err"); return; }
+  const ctx = editorContext();
   chat.messages.push({ from: "you", text: question });
   askBox.value = "";
-  chat.waiting = true;
+  chat.waiting = true; chat.waitingMode = mode; chat.job = null;
   renderChat(); renderTabs();
-  if (!(await S2.sendPrompt(parts.join("\n\n"), { quiet: true }))) {
+  let failed = null;
+  if (mode === "app") {
+    try {
+      await S2.callTool("sql_editor_ask", { editor_id: editorId, question, database: state.database,
+        sql: ctx.sql, selected: ctx.selected, last_result: ctx.lastResult, profile: profileSelect.value });
+    } catch (e) { failed = cleanError(e).message; }
+  } else {
+    const parts = [`[SQL Editor ${editorId} · database ${state.database ?? "default"}] ${question}`];
+    if (ctx.sql) parts.push(`${ctx.selected ? "Selected SQL" : "Editor SQL"}:\n\`\`\`sql\n${ctx.sql.slice(0, 8000)}\n\`\`\``);
+    if (ctx.lastResult) parts.push(`Last result: ${ctx.lastResult}`);
+    parts.push(`(Answer with sql_editor_reply, editor_id "${editorId}", so it appears in the editor.)`);
+    if (!(await S2.sendPrompt(parts.join("\n\n"), { quiet: true }))) failed = "Couldn't send the question to the Claude chat.";
+  }
+  if (failed) {
     chat.waiting = false;
-    chat.messages.push({ from: "note", text: "Couldn't send the question to the Claude chat." });
+    chat.messages.push({ from: "error", text: failed });
     renderChat(); renderTabs();
   }
 }
 
+async function stopAsking() {
+  warmedProfile = null;  // Stop ends the process; warm a new one next time
+  try { await S2.callTool("sql_editor_ask_cancel", { editor_id: editorId }); }
+  catch (e) { S2.toast(`Couldn't stop: ${cleanError(e).message}`, "err"); }
+}
+
 async function pollInbox() {
   try {
-    const { messages } = await S2.callTool("sql_editor_inbox", { editor_id: editorId, after: chat.lastSeq });
-    if (!messages.length) return;
+    const { messages, job } = await S2.callTool("sql_editor_inbox", { editor_id: editorId, after: chat.lastSeq });
+    const jobChanged = JSON.stringify(job) !== JSON.stringify(chat.job);
+    chat.job = job ?? null;
+    if (!messages.length) { if (chat.waiting && jobChanged) renderChat(); return; }
     for (const m of messages) {
-      chat.messages.push({ from: "claude", text: m.text });
+      const from = m.kind === "error" ? "error" : m.kind === "note" ? "note" : "claude";
+      chat.messages.push({ from, text: m.text });
       chat.lastSeq = Math.max(chat.lastSeq, m.seq);
+      // An empty editor gets the answer's first SQL block straight away;
+      // otherwise the user picks Replace / Insert, so nothing is overwritten.
+      const firstSql = from === "claude" && /```[\w-]*\n?([\s\S]*?)```/.exec(m.text)?.[1]?.trim();
+      if (firstSql && !view.state.doc.toString().trim()) {
+        setSql(firstSql);
+        S2.toast("Claude's SQL is in the editor", "ok");
+      }
     }
-    chat.waiting = false;
+    if (!job) chat.waiting = false;
     if (chat.tab !== "chat") chat.unread += messages.length;
     renderChat(); renderTabs();
   } catch {
     // Transient (host busy, server restarting); the next poll retries.
   }
 }
+
+// Start the editor's Claude process while the user types, so the first
+// answer doesn't wait for Claude Code to start. Cheap: no model call.
+let warmedProfile = null;
+function warmAssistant() {
+  if (effectiveMode() !== "app" || !chat.assistant?.available || chat.waiting) return;
+  if (warmedProfile === profileSelect.value) return;
+  warmedProfile = profileSelect.value;
+  S2.callTool("sql_editor_assistant_warm", { editor_id: editorId, profile: profileSelect.value }).catch(() => { warmedProfile = null; });
+}
+
+async function loadAssistantStatus() {
+  try { chat.assistant = await S2.callTool("sql_editor_assistant", {}); }
+  catch (e) { chat.assistant = { available: false, reason: cleanError(e).message }; }
+  renderChat();
+  if (chat.tab === "chat") warmAssistant();
+}
 // Poll faster while waiting for an answer.
 (function schedulePoll() {
   setTimeout(async () => {
-    if (S2.app && (chat.waiting || !document.hidden)) await pollInbox();
+    if (S2.app && (chat.waiting || !S2.isHidden())) await pollInbox();
     schedulePoll();
   }, chat.waiting ? 2000 : 5000);
 })();
 
+// Hand-off from another workspace view (e.g. the Explorer's "Query in grid").
+window.addEventListener("s2:set-sql", (e) => {
+  const { sql, database, run: runIt } = e.detail;
+  if (database && database !== state.database && state.databases.includes(database)) chooseDatabase(database);
+  if (sql) setSql(sql);
+  view.focus();
+  if (runIt) run();
+});
+
 // ---------------------------------------------------------------- host wiring
-renderHeader(); renderTree(); renderResults(); renderTabs(); renderChat();
+renderHeader(); renderTree(); renderResults(); renderTabs(); renderChat(); renderFileLabel();
 S2.onDisplayModeChange = () => renderHeader();
 await S2.connect({
   name: "singlestore-sql-editor",
@@ -608,6 +910,7 @@ await S2.connect({
     }
     renderHeader();
     view.focus();
+    loadAssistantStatus();
   },
 });</script>
 </body>

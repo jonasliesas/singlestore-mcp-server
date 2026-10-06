@@ -86,9 +86,25 @@ S2.toggleFullscreen = async function () {
 // True when running in the server's own full-window browser page.
 S2.inBrowserView = () => S2.app?.getHostVersion?.()?.name === "singlestore-browser-view";
 
+// ---- Embedded in the SingleStore Workspace ----
+// The workspace hosts the apps as views; it owns the full-screen and
+// browser buttons, tells views when they're hidden, and handles hand-offs
+// between views (custom "s2-*" postMessages, only to/from the parent).
+S2.embedded = () => S2.app?.getHostVersion?.()?.name === "singlestore-workspace";
+let embeddedHidden = false;
+S2.isHidden = () => document.hidden || embeddedHidden;
+// Ask the workspace to switch view, e.g. S2.openView("sql", {sql, database, run: true}).
+S2.openView = (view, args = {}) => window.parent.postMessage({ type: "s2-open-view", view, ...args }, "*");
+window.addEventListener("message", (ev) => {
+  if (ev.source !== window.parent || !S2.embedded()) return;
+  const msg = ev.data;
+  if (msg?.type === "s2-visibility") embeddedHidden = Boolean(msg.hidden);
+  else if (msg?.type === "s2-set-sql") window.dispatchEvent(new CustomEvent("s2:set-sql", { detail: msg }));
+});
+
 // Header button; null when the host doesn't offer fullscreen.
 S2.fullscreenButton = function () {
-  if (!S2.canFullscreen() || S2.inBrowserView()) return null;
+  if (!S2.canFullscreen() || S2.inBrowserView() || S2.embedded()) return null;
   const full = S2.displayMode === "fullscreen";
   return S2.h("button", {
     class: "s2-btn ghost", onclick: () => S2.toggleFullscreen(),
@@ -134,7 +150,7 @@ function showLinkPanel(url) {
 // Header button that reopens this app, with its current arguments, full-window
 // in the user's browser. `getArgs` returns the tool arguments for the current view.
 S2.openInBrowserButton = function (tool, getArgs) {
-  if (!S2.app || S2.inBrowserView()) return null;
+  if (!S2.app || S2.inBrowserView() || S2.embedded()) return null;
   return S2.h("button", {
     class: "s2-btn ghost", title: "Open this view full-window in your browser",
     onclick: async (e) => {

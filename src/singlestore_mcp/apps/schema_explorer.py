@@ -60,12 +60,14 @@ def _num(v: Any) -> float | int | None:
 
 
 def list_databases() -> list[dict[str, Any]]:
-    schemata = _query("SELECT SCHEMA_NAME FROM information_schema.SCHEMATA")
-    counts = _query(
-        "SELECT TABLE_SCHEMA,"
-        " SUM(TABLE_TYPE = 'BASE TABLE') AS n_tables,"
-        " SUM(TABLE_TYPE <> 'BASE TABLE') AS n_views"
-        " FROM information_schema.TABLES GROUP BY TABLE_SCHEMA"
+    schemata, counts = db.parallel(
+        lambda: _query("SELECT SCHEMA_NAME FROM information_schema.SCHEMATA"),
+        lambda: _query(
+            "SELECT TABLE_SCHEMA,"
+            " SUM(TABLE_TYPE = 'BASE TABLE') AS n_tables,"
+            " SUM(TABLE_TYPE <> 'BASE TABLE') AS n_views"
+            " FROM information_schema.TABLES GROUP BY TABLE_SCHEMA"
+        ),
     )
     by_db = {r["TABLE_SCHEMA"]: r for r in counts}
     out = []
@@ -111,11 +113,15 @@ _TABLES_SQL = (
 
 def _table_entries(database: str, table: str | None = None) -> list[dict[str, Any]]:
     extra, params = ("", (database,)) if table is None else (" AND TABLE_NAME = %s", (database, table))
-    tables = _query(_TABLES_SQL.format(extra=extra), params)
+    tables, stats_rows, disk_rows = db.parallel(
+        lambda: _query(_TABLES_SQL.format(extra=extra), params),
+        lambda: _query(_STATS_SQL.format(extra=extra), params),
+        lambda: _query(_DISK_SQL.format(extra=extra), params),
+    )
     if not tables:
         return []
-    stats = {r["TABLE_NAME"]: r for r in _query(_STATS_SQL.format(extra=extra), params)}
-    disk = {r["TABLE_NAME"]: r for r in _query(_DISK_SQL.format(extra=extra), params)}
+    stats = {r["TABLE_NAME"]: r for r in stats_rows}
+    disk = {r["TABLE_NAME"]: r for r in disk_rows}
     out = []
     for t in tables:
         name = t["TABLE_NAME"]
@@ -249,8 +255,25 @@ def parse_keys(ddl: str) -> dict[str, Any]:
     return keys
 
 
+def _show_create(database: str, table: str) -> tuple[str | None, str | None]:
+    try:
+        cols, rows, _ = db.execute(f"SHOW CREATE TABLE {quote_identifier(database)}.{quote_identifier(table)}")
+        return (rows[0][cols[1]] if rows and len(cols) > 1 else None), None
+    except Exception as exc:  # noqa: BLE001 - DDL is optional; show the reason in the UI
+        return None, str(exc)
+
+
 def table_detail(database: str, table: str) -> dict[str, Any]:
-    entries = _table_entries(database, table)
+    entries, column_rows, (ddl, ddl_error) = db.parallel(
+        lambda: _table_entries(database, table),
+        lambda: _query(
+            "SELECT ORDINAL_POSITION, COLUMN_NAME, COLUMN_TYPE, DATA_TYPE, IS_NULLABLE, COLUMN_KEY,"
+            " COLUMN_DEFAULT, EXTRA, COLUMN_COMMENT FROM information_schema.COLUMNS"
+            " WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s ORDER BY ORDINAL_POSITION",
+            (database, table),
+        ),
+        lambda: _show_create(database, table),
+    )
     if not entries:
         _require_database(database)
         raise NotFoundError(f"Table {table!r} not found in database {database!r} (names are case-sensitive).")
@@ -267,21 +290,8 @@ def table_detail(database: str, table: str) -> dict[str, Any]:
             "extra": r["EXTRA"] or None,
             "comment": r["COLUMN_COMMENT"] or None,
         }
-        for r in _query(
-            "SELECT ORDINAL_POSITION, COLUMN_NAME, COLUMN_TYPE, DATA_TYPE, IS_NULLABLE, COLUMN_KEY,"
-            " COLUMN_DEFAULT, EXTRA, COLUMN_COMMENT FROM information_schema.COLUMNS"
-            " WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s ORDER BY ORDINAL_POSITION",
-            (database, table),
-        )
+        for r in column_rows
     ]
-    ddl = None
-    ddl_error = None
-    try:
-        cols, rows, _ = db.execute(f"SHOW CREATE TABLE {quote_identifier(database)}.{quote_identifier(table)}")
-        if rows and len(cols) > 1:
-            ddl = rows[0][cols[1]]
-    except Exception as exc:  # noqa: BLE001 - DDL is optional; show the reason in the UI
-        ddl_error = str(exc)
     is_view = info["type"] != "BASE TABLE"
     keys = parse_keys(ddl) if ddl and not is_view else None
     return {

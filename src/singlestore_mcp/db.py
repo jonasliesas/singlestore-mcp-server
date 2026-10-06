@@ -10,6 +10,7 @@ port, user and password.
 from __future__ import annotations
 
 import os
+import re
 import threading
 from dataclasses import dataclass, field
 from typing import Any
@@ -104,23 +105,89 @@ def _is_connection_error(exc: BaseException) -> bool:
     return False
 
 
+# Statements that change session state behind our back (USE, SET ...).
+_SESSION_CHANGE = re.compile(r"^\s*(USE|SET)\b", re.IGNORECASE)
+_UNKNOWN = object()
+
+
+class _PooledConnection:
+    """A connection plus the session state we last set on it.
+
+    Every round trip to the cluster costs real time (~120 ms over a WAN), so
+    ``USE`` and ``SET sql_select_limit`` are only sent when they change.
+    """
+
+    def __init__(self, conn: Any, database: str | None) -> None:
+        self.conn = conn
+        self.database: Any = database      # current database, or _UNKNOWN
+        self.select_limit: Any = None      # None = DEFAULT, int, or _UNKNOWN
+
+
 class Database:
-    """Thread-safe, lazily-connecting wrapper around a singlestoredb connection."""
+    """Thread-safe, lazily-connecting pool of singlestoredb connections.
+
+    Up to SINGLESTORE_MCP_POOL_SIZE (default 8) connections, so a slow query
+    in one app doesn't hold up the others. Connections use autocommit (the
+    SingleStore default), so no extra COMMIT round trip per statement.
+    """
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._conn: Any | None = None
+        self._max = max(1, int(os.environ.get("SINGLESTORE_MCP_POOL_SIZE", "8")))
+        self._idle: list[_PooledConnection] = []
+        self._open = 0
+        self._cond = threading.Condition()
         self._default_db: str | None = None
 
-    def _connect(self) -> Any:
+    def _connect(self) -> _PooledConnection:
         settings = ConnectionSettings.from_env()
         self._default_db = settings.database
-        return s2.connect(**settings.connect_kwargs())
+        conn = s2.connect(**settings.connect_kwargs(), autocommit=True)
+        return _PooledConnection(conn, settings.database)
 
-    def _get_conn(self) -> Any:
-        if self._conn is None:
-            self._conn = self._connect()
-        return self._conn
+    def _acquire(self) -> _PooledConnection:
+        with self._cond:
+            while True:
+                if self._idle:
+                    return self._idle.pop()
+                if self._open < self._max:
+                    self._open += 1
+                    break
+                self._cond.wait()
+        try:
+            return self._connect()
+        except BaseException:
+            with self._cond:
+                self._open -= 1
+                self._cond.notify()
+            raise
+
+    def _release(self, pc: _PooledConnection | None) -> None:
+        with self._cond:
+            if pc is None:
+                self._open -= 1
+            else:
+                self._idle.append(pc)
+            self._cond.notify()
+
+    @staticmethod
+    def _discard(pc: _PooledConnection) -> None:
+        try:
+            pc.conn.close()
+        except Exception:  # noqa: BLE001 - it's already broken
+            pass
+
+    def warm(self, connections: int = 4) -> None:
+        """Open a few connections in the background (each takes 1-2 s over a WAN),
+        so the first tool calls, and the monitors' parallel queries, don't wait."""
+
+        def run() -> None:
+            try:
+                self._release(self._acquire())
+            except Exception:  # noqa: BLE001 - the first real call reports the problem
+                pass
+
+        for _ in range(min(connections, self._max)):
+            threading.Thread(target=run, name="db-warm", daemon=True).start()
 
     def execute(
         self,
@@ -136,54 +203,90 @@ class Database:
         transparently, if the cached connection has gone stale (idle
         timeout, cluster failover, etc).
 
-        The connection is shared, so a call without ``database`` switches
-        back to the configured default rather than inheriting whatever an
+        Connections are pooled, so a call without ``database`` switches
+        to the configured default rather than inheriting whatever an
         earlier call selected.
 
         ``max_rows`` caps the rows a SELECT returns server-side (via the
         session's sql_select_limit), so an unbounded query against a huge
         table never streams the whole result to the client.
         """
-        with self._lock:
-            for attempt in range(2):
+        limit = None if max_rows is None else max(0, int(max_rows))
+        for attempt in range(2):
+            pc = self._acquire()
+            try:
+                cur = pc.conn.cursor()
                 try:
-                    conn = self._get_conn()
-                    cur = conn.cursor()
+                    target_db = database or self._default_db
+                    if target_db and pc.database != target_db:
+                        pc.database = _UNKNOWN
+                        cur.execute(f"USE {quote_identifier(target_db)}")
+                        pc.database = target_db
+                    if pc.select_limit != limit:
+                        pc.select_limit = _UNKNOWN
+                        cur.execute(f"SET SESSION sql_select_limit = {'DEFAULT' if limit is None else limit}")
+                        pc.select_limit = limit
                     try:
-                        target_db = database or self._default_db
-                        if target_db:
-                            cur.execute(f"USE {quote_identifier(target_db)}")
-                        if max_rows is not None:
-                            cur.execute(f"SET SESSION sql_select_limit = {max(0, int(max_rows))}")
-                        try:
-                            cur.execute(sql, params or ())
-                            rowcount = cur.rowcount
-                            if fetch and cur.description is not None:
-                                rows = cur.fetchall()
-                                columns = [d[0] for d in cur.description]
-                            else:
-                                rows = []
-                                columns = []
-                        finally:
-                            if max_rows is not None:
-                                cur.execute("SET SESSION sql_select_limit = DEFAULT")
-                        conn.commit()
-                        return columns, rows, rowcount
+                        cur.execute(sql, params or ())
                     finally:
-                        cur.close()
-                except (s2.Error, OSError) as exc:
-                    if attempt == 1 or not _is_connection_error(exc):
-                        raise
-                    self._conn = None
-            raise AssertionError("unreachable")
+                        if _SESSION_CHANGE.match(sql):
+                            pc.database = pc.select_limit = _UNKNOWN
+                    rowcount = cur.rowcount
+                    if fetch and cur.description is not None:
+                        rows = cur.fetchall()
+                        columns = [d[0] for d in cur.description]
+                    else:
+                        rows = []
+                        columns = []
+                finally:
+                    cur.close()
+            except (s2.Error, OSError) as exc:
+                if _is_connection_error(exc):
+                    self._discard(pc)
+                    self._release(None)
+                    if attempt == 0:
+                        continue  # stale connection (idle timeout, failover): retry once on a fresh one
+                else:
+                    self._release(pc)
+                raise
+            self._release(pc)
+            return columns, rows, rowcount
+        raise AssertionError("unreachable")
 
     def close(self) -> None:
-        with self._lock:
-            if self._conn is not None:
-                try:
-                    self._conn.close()
-                finally:
-                    self._conn = None
+        with self._cond:
+            idle, self._idle = self._idle, []
+            self._open -= len(idle)
+        for pc in idle:
+            self._discard(pc)
+
+
+    def parallel(self, *calls: Any) -> list[Any]:
+        """Run independent zero-argument callables (each doing its own queries) concurrently.
+
+        Monitors that need several information_schema queries use this so the
+        round trips overlap instead of adding up.
+        """
+        if len(calls) <= 1:
+            return [c() for c in calls]
+        results: list[Any] = [None] * len(calls)
+        errors: list[BaseException] = []
+
+        def run(i: int) -> None:
+            try:
+                results[i] = calls[i]()
+            except BaseException as exc:  # noqa: BLE001 - re-raised below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=run, args=(i,), daemon=True) for i in range(1, len(calls))]
+        for t in threads:
+            t.start()
+        run(0)
+        for t in threads:
+            t.join()
+        if errors:
+            raise errors[0]
+        return results
 
 
 db = Database()

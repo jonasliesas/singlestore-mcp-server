@@ -97,7 +97,9 @@ window.addEventListener("message", async (ev) => {
           hostContext: { theme: $("theme").value, displayMode: "inline", availableDisplayModes: ["inline", "fullscreen"],
                          containerDimensions: { width: $("frame-box").clientWidth, maxHeight: 4000 },
                          locale: navigator.language, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-                         platform: "web", toolInfo: { tool: current.tool } },
+                         platform: "web", toolInfo: { tool: current.tool },
+                         // debug=1: lets the workspace give its nested views same-origin access too.
+                         ...(debugMode ? { s2DebugSameOrigin: true } : {}) },
         });
       case "ui/notifications/initialized": {
         send({ jsonrpc: "2.0", method: "ui/notifications/tool-input", params: { arguments: current.args } });

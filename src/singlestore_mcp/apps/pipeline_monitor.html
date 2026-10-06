@@ -145,7 +145,7 @@ async function refresh({ silent = false } = {}) {
 function setAuto(on) {
   state.auto = on;
   clearInterval(state.timer);
-  state.timer = on ? setInterval(() => { if (!document.hidden) refresh({ silent: true }); }, AUTO_REFRESH_MS) : null;
+  state.timer = on ? setInterval(() => { if (!S2.isHidden()) refresh({ silent: true }); }, AUTO_REFRESH_MS) : null;
   render();
 }
 

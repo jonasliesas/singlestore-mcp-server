@@ -69,7 +69,7 @@ async function open() {
       case "ui/initialize":
         return reply(id, {
           protocolVersion: p.protocolVersion,
-          hostCapabilities: { openLinks: {}, downloadFile: {}, serverTools: {}, logging: {} },
+          hostCapabilities: { openLinks: {}, downloadFile: {}, serverTools: {}, serverResources: {}, logging: {} },
           hostInfo: { name: "singlestore-browser-view", version: "0.2.0" },
           hostContext: {
             theme: theme(), displayMode: "fullscreen", availableDisplayModes: ["fullscreen"],
@@ -82,6 +82,11 @@ async function open() {
         send({ jsonrpc: "2.0", method: "ui/notifications/tool-input", params: { arguments: args } });
         return send({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: await callTool(toolName, args) });
       case "tools/call": return reply(id, await callTool(p.name, p.arguments));
+      case "resources/read": {
+        const res = await fetch(`resource?uri=${encodeURIComponent(p.uri)}`);
+        if (!res.ok) return replyError(id, `Resource not found: ${p.uri}`);
+        return reply(id, { contents: [{ uri: p.uri, mimeType: "text/html;profile=mcp-app", text: await res.text() }] });
+      }
       case "ui/message":
       case "ui/update-model-context":
         return replyError(id, "Only available inside Claude");
@@ -95,6 +100,8 @@ async function open() {
   });
 
   frame = Object.assign(document.createElement("iframe"), { sandbox: "allow-scripts allow-downloads", srcdoc: html });
+  // Heartbeat: a standalone workspace server shuts down once no page pings it.
+  setInterval(() => fetch("ping").catch(() => {}), 30000);
   status.replaceWith(frame);
   darkQuery.addEventListener("change", () =>
     send({ jsonrpc: "2.0", method: "ui/notifications/host-context-changed", params: { theme: theme() } }));

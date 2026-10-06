@@ -251,6 +251,7 @@ async function queryInGrid() {
   const { db, table } = state.sel;
   const sql = `SELECT * FROM ${fq(db, table)} LIMIT 100`;
   try {
+    if (S2.embedded()) { S2.openView("sql", { sql: `${sql};`, database: db, run: true }); return; }
     if (!S2.inBrowserView() && (await S2.sendPrompt(`Show ${sql} in the query grid`, { quiet: true }))) return;
     await S2.openAppInBrowser("query_grid", { sql, database: db });
   } catch (e) { S2.toast(`Couldn't open the query grid: ${e.message}`, "err"); }
