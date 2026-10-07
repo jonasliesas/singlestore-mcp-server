@@ -452,12 +452,14 @@ def _s2_sas_cell(code, database=None):
 
 
 def sas_to_df(table, libref="WORK"):
-    """A SAS data set as a pandas DataFrame, e.g. sas_to_df("class", "sashelp")."""
+    """A (small) SAS data set as a pandas DataFrame, e.g. sas_to_df("class", "sashelp").
+    For SingleStore data in SAS, use the S2 library in a SAS cell instead: Viya reads it directly."""
     return sas_session().sd2df(table, libref)
 
 
 def df_to_sas(frame, table, libref="WORK"):
-    """Write a pandas DataFrame to a SAS data set, e.g. df_to_sas(df, "mydata")."""
+    """Write a (small, local) pandas DataFrame to a SAS data set, e.g. df_to_sas(df, "mydata").
+    Never use it to bring SingleStore data into SAS: read it in a SAS cell through the S2 library instead."""
     return sas_session().df2sd(frame, table, libref)
 
 

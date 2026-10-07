@@ -260,11 +260,17 @@ left switches between its views:
   `SSTORE`), so a DATA step can `set s2.mytable;` or write `data s2.newtable;`.
   The password isn't echoed to the SAS log. This needs a password connection
   (not JWT / SSO); the libref name can be changed in the settings.
-- **From Python**: `sas_session()` is the saspy session; `sas_to_df("table",
-  "libref")` and `df_to_sas(df, "table", "libref")` move data between SAS and
-  pandas; `cas_session()` gives a swat CAS connection (use it with DLPy) and
-  `sasctl_session()` a sasctl session, all signed in with the same Viya
-  sign-in.
+- **Let Viya read SingleStore directly.** SAS reads and writes SingleStore
+  itself through **S2** (and SAS/ACCESS pushes `WHERE` clauses and PROC SQL
+  down to SingleStore); CAS reads it through a SingleStore-backed caslib (SAS
+  Data Connector to SingleStore / SpeedyStore). Don't pull SingleStore data
+  into the notebook's Python and upload it to Viya: that round trip through
+  your machine is slow and unnecessary. Claude in the notebook follows the
+  same rule.
+- **From Python**: `sas_session()` is the saspy session, `cas_session()` a
+  swat CAS connection (use it with DLPy) and `sasctl_session()` a sasctl
+  session, all signed in with the same Viya sign-in. `sas_to_df` and
+  `df_to_sas` exist for small, local results only.
 - Claude in the notebook knows about SAS cells and suggests them in ```sas
   blocks with an **Insert SAS cell** button.
 

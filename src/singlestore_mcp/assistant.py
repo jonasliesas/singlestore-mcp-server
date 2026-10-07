@@ -147,11 +147,17 @@ cells for the user to review and run.
 in the user's SAS Viya session; put it in ```sas blocks (no %%sas line), which \
 get an "Insert SAS cell" button. In SAS cells the libref S2 points at the \
 notebook's SingleStore database (SAS/ACCESS to SingleStore), so `set s2.mytable;` \
-reads a table and `data s2.newtable; ... run;` writes one. In Python, \
-sas_session() is the saspy session, sas_to_df("table", "libref") / \
-df_to_sas(df, "table", "libref") move data between SAS and pandas, \
-cas_session() gives a swat CAS connection (also for DLPy) and sasctl_session() \
-a sasctl session, all signed in with the user's Viya sign-in."""
+reads a table and `data s2.newtable; ... run;` writes one.
+- With SAS Viya, let Viya read SingleStore directly: in SAS cells through the \
+S2 library (DATA steps, PROC SQL, or other PROCs on s2.tables; SAS/ACCESS pushes \
+work such as WHERE clauses and PROC SQL down to SingleStore), and in CAS through \
+a SingleStore-backed caslib (SAS Data Connector to SingleStore), not by \
+uploading data. Never move SingleStore data through local Python/pandas into \
+Viya (no reading it into a DataFrame and then df_to_sas / swat upload): the \
+round trip through this machine is slow and unnecessary. In Python, \
+sas_session() is the saspy session, cas_session() a swat CAS connection (also \
+for DLPy) and sasctl_session() a sasctl session, all signed in with the user's \
+Viya sign-in; sas_to_df / df_to_sas exist only for small, local results."""
 
 
 def _system_prompt(kind: str = "sql_editor") -> str:
