@@ -399,7 +399,7 @@ def _recommend(name: str, p: dict[str, Any], t: dict[str, Any]) -> dict[str, Any
             add("sort", prio, f"SORT KEY ({', '.join(cols)})",
                 f"{top['queries']} quer{'y' if top['queries'] == 1 else 'ies'} ({_fmt_s(top['ms'])} in total, "
                 f"{share:.0%} of the time spent on this table) filter on {top['column']} ({kinds}). "
-                + (f"The table has no sort key, so every segment is read. " if not current else
+                + ("The table has no sort key, so every segment is read. " if not current else
                    f"The current sort key ({', '.join(sort_key)}) doesn't start with it. ")
                 + "With this sort key SingleStore skips the segments outside the filter."
                 + ("" if big else " The table is small, so the gain is small."),

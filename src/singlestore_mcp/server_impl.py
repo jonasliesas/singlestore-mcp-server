@@ -19,7 +19,7 @@ that starts this module behind the restart supervisor.
 
 from __future__ import annotations
 
-import os
+import json
 import re
 import threading
 from typing import Any
@@ -55,9 +55,12 @@ def _result(columns: list[str], rows: list[dict[str, Any]], rowcount: int) -> di
     return {"columns": columns, "rows": rows, "row_count": rowcount}
 
 
-def _exec(sql: str, database: str | None = None, fetch: bool = True) -> dict[str, Any]:
+def _exec(sql: str, database: str | None = None, fetch: bool = True, fit: bool = True) -> dict[str, Any]:
     columns, rows, rowcount = db.execute(sql, database=database, fetch=fetch)
-    return _result(columns, rows, rowcount)
+    result = _result(columns, rows, rowcount)
+    if fit:
+        _fit_result(result)
+    return result
 
 
 def _pipeline_name_clause(pipeline_name: str) -> str:
@@ -88,11 +91,30 @@ def run_sql(sql: str, database: str | None = None, max_rows: int = _DEFAULT_MAX_
         max_rows: Truncate returned rows to this many (does not affect how
             many rows the statement itself processes).
     """
-    result = _exec(sql, database=database)
+    result = _exec(sql, database=database, fit=False)
     if len(result["rows"]) > max_rows:
         result["rows"] = result["rows"][:max_rows]
         result["truncated"] = True
+    _fit_result(result)
     return result
+
+
+# Claude rejects tool results over ~50,000 characters; keep the SQL tools' results well below that.
+_MAX_RESULT_CHARS = 30_000  # compact JSON; the text Claude sees is indented, ~1.4x
+
+
+def _fit_result(result: dict[str, Any]) -> None:
+    """Drop trailing rows until the result fits ``_MAX_RESULT_CHARS`` (wide rows can blow past it)."""
+    rows = result["rows"]
+    used = len(json.dumps(result["columns"], default=str)) + 200
+    for i, row in enumerate(rows):
+        used += len(json.dumps(row, default=str, ensure_ascii=False)) + 2
+        if used > _MAX_RESULT_CHARS:
+            result["rows"] = rows[:i]
+            result["truncated"] = True
+            result["note"] = (f"Showing {i} of {len(rows)} rows: the result is too large for one tool response. "
+                              "Select fewer columns, add a LIMIT, or open it in query_grid.")
+            return
 
 
 @tool()

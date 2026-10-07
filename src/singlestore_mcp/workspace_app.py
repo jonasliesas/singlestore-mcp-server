@@ -21,7 +21,6 @@ import os
 import secrets
 import shutil
 import subprocess
-import tempfile
 import threading
 import time
 import urllib.parse

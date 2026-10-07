@@ -142,6 +142,13 @@ class _S2LazyConnection:
     _c = None
 
     def _get(self):
+        if self._c is not None:
+            try:
+                alive = self._c.is_connected()  # local check (socket still open), no round trip
+            except Exception:
+                alive = False
+            if not alive:
+                self.reset()
         if self._c is None:
             self._c = _s2_connect()
         return self._c
@@ -155,6 +162,27 @@ class _S2LazyConnection:
         except Exception:
             pass
         self._c = None
+        current = globals().get("_s2_current_db")
+        if current:
+            current[0] = None  # a new connection starts without USE
+
+    def kill_running(self):
+        """After an interrupt: stop this connection's statement on the cluster and drop the connection
+        (an interrupted read leaves it unusable)."""
+        try:
+            thread_id = self._c._conn.thread_id() if self._c is not None else None
+        except Exception:
+            thread_id = None
+        self.reset()
+        if thread_id:
+            try:
+                killer = _s2_connect()
+                try:
+                    killer.cursor().execute("KILL QUERY %d" % int(thread_id))
+                finally:
+                    killer.close()
+            except Exception:
+                pass
 
 
 conn = _S2LazyConnection()
@@ -268,6 +296,35 @@ class _S2Affected:
         return "%s row(s) affected" % self.rowcount
 
 
+def _s2_run_statement(cur, stmt):
+    cur.execute(stmt)
+    if cur.description is None:
+        return _S2Affected(cur.rowcount)
+    return _S2ResultSet(cur.fetchall(), [d[0] for d in cur.description])
+
+
+def _s2_interruptible(fn):
+    """Run fn() on a worker thread and wait in short steps, so the notebook's Interrupt
+    (KeyboardInterrupt) gets through while the driver waits on the cluster: a blocked
+    socket read on Windows only notices it when the query ends."""
+    import threading
+    box = {}
+
+    def work():
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # handed to the waiting thread
+            box["error"] = exc
+
+    worker = threading.Thread(target=work, daemon=True, name="s2-sql")
+    worker.start()
+    while worker.is_alive():
+        worker.join(0.05)
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
+
 def _s2_execute(sql, database=None, ns=None):
     """Run one or more statements on `conn`; returns the last statement's result."""
     ns = ns if ns is not None else globals()
@@ -287,15 +344,18 @@ def _s2_execute(sql, database=None, ns=None):
             _s2_current_db[0] = db
         cur.execute("SET SESSION sql_select_limit = %d" % _S2_FETCH_LIMIT)
         for stmt in _s2_split(sql):
-            cur.execute(stmt)
+            result = _s2_interruptible(lambda: _s2_run_statement(cur, stmt))
             if stmt.split(None, 1)[0].upper() == "USE":
                 _s2_current_db[0] = stmt.split(None, 1)[1].strip().strip("`")
-            if cur.description is None:
-                result = _S2Affected(cur.rowcount)
-            else:
-                result = _S2ResultSet(cur.fetchall(), [d[0] for d in cur.description])
+    except KeyboardInterrupt:
+        conn.kill_running()
+        _s2_current_db[0] = None
+        raise
     finally:
-        cur.close()
+        try:
+            cur.close()
+        except Exception:
+            pass
     return result
 
 
