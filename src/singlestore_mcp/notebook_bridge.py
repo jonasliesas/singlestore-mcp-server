@@ -346,6 +346,148 @@ def sql(line, cell=None):
     if isinstance(result, _S2ResultSet):
         ns["df"] = result.DataFrame()
     return result
+
+
+# ------------------------------------------------------------------ SAS on SAS Viya
+# SAS cells (DATA steps, PROCs) run in a SAS Compute session on Viya through saspy, signed in with the
+# user's own Viya sign-in (a token from the MCP server's Python, renewed as needed). Each session gets a
+# library (default S2) on the notebook's SingleStore database through SAS/ACCESS to SingleStore (SSTORE).
+_S2_SAS_MIME = "application/vnd.s2.sas+json"
+_s2_sas = {"session": None, "lib": None, "lib_note": None}
+
+
+def _s2_sas_token():
+    import subprocess, sys
+    cmd = _s2_os.environ.get("SINGLESTORE_MCP_SAS_TOKEN_CMD")
+    if not cmd:
+        raise RuntimeError("SAS Viya isn't set up for notebooks: in the workspace open Connect > SAS Viya, "
+                           "enter its address and sign in, then restart this kernel.")
+    out = subprocess.run(_s2_json.loads(cmd), capture_output=True, text=True, timeout=60,
+                         creationflags=0x08000000 if sys.platform == "win32" else 0)
+    if out.returncode != 0 or not out.stdout.strip():
+        raise RuntimeError((out.stderr or "Couldn't get a SAS Viya token.").strip())
+    return out.stdout.strip()
+
+
+def _s2_sas_verify():
+    return _s2_os.environ.get("SINGLESTORE_MCP_SAS_VERIFY", "1").lower() not in ("0", "false", "no")
+
+
+def sas_session():
+    """The notebook's SAS session on SAS Viya (saspy), started on first use. Restart the kernel for a new one."""
+    import logging
+    import saspy
+    logging.getLogger("saspy").setLevel(logging.WARNING)
+    token = _s2_sas_token()
+    sess = _s2_sas["session"]
+    if sess is not None:
+        try:
+            sess._io._token = token  # the renewed sign-in
+            return sess
+        except Exception:
+            pass
+    if not _s2_sas_verify():
+        import urllib3
+        urllib3.disable_warnings()
+        import warnings
+        warnings.filterwarnings("ignore", message="Unverified HTTPS request")
+    sess = saspy.SASsession(url=_s2_os.environ["SINGLESTORE_MCP_SAS_URL"],
+                            context=_s2_os.environ.get("SINGLESTORE_MCP_SAS_CONTEXT") or "SAS Studio compute context",
+                            authtoken=token, verify=_s2_sas_verify(), results="HTML")
+    _s2_sas.update(session=sess, lib=None, lib_note=None)
+    return sess
+
+
+def _s2_sas_quote(v):
+    return '"' + str(v).replace('"', '""') + '"'
+
+
+def _s2_sas_libname(sess, database=None):
+    """LIBNAME S2 SSTORE … on the notebook's SingleStore database (re-assigned when the database changes)."""
+    env = _s2_os.environ
+    libref = (env.get("SINGLESTORE_MCP_SAS_LIBREF") or "S2")[:8]
+    db = database or _s2_database or env.get("SINGLESTORE_DATABASE") or ""
+    if env.get("SINGLESTORE_URL") or not env.get("SINGLESTORE_HOST"):
+        _s2_sas["lib_note"] = "No %s library: the active SingleStore connection uses a URL." % libref
+        return
+    if env.get("SINGLESTORE_CREDENTIAL_TYPE"):
+        _s2_sas["lib_note"] = ("No %s library: the active SingleStore connection signs in with a token (JWT / SSO), "
+                               "which SAS/ACCESS can't use; assign a LIBNAME with a password yourself." % libref)
+        return
+    key = (libref, env.get("SINGLESTORE_HOST"), env.get("SINGLESTORE_PORT"), env.get("SINGLESTORE_USER"), db)
+    if _s2_sas["lib"] == key:
+        return
+    opts = "server=%s port=%s user=%s password=%s" % (_s2_sas_quote(env["SINGLESTORE_HOST"]), int(env.get("SINGLESTORE_PORT") or 3306),
+                                                       _s2_sas_quote(env.get("SINGLESTORE_USER", "root")), _s2_sas_quote(_s2_password()))
+    if db:
+        opts += " database=%s" % _s2_sas_quote(db)
+    # nosource: the statement (with the password) isn't echoed to the log; SAS masks password= anyway.
+    res = sess.submit("options nosource;\nlibname %s sstore %s;\noptions source;" % (libref, opts), results="TEXT")
+    errors = [l for l in res.get("LOG", "").splitlines() if l.startswith("ERROR")]
+    if errors:
+        _s2_sas["lib_note"] = "Couldn't assign %s to SingleStore: %s" % (libref, " ".join(errors)[:300])
+        _s2_sas["lib"] = None
+    else:
+        _s2_sas["lib_note"] = "%s = SingleStore %s%s" % (libref, env["SINGLESTORE_HOST"], " / " + db if db else "")
+        _s2_sas["lib"] = key
+
+
+def _s2_sas_cell(code, database=None):
+    """Run a SAS cell: log (errors and warnings counted) and ODS output, shown by the notebook."""
+    from IPython.display import display
+    sess = sas_session()
+    _s2_sas_libname(sess, database)
+    res = sess.submit(code, results="HTML")
+    log = res.get("LOG", "") or ""
+    lst = res.get("LST", "") or ""
+    lines = log.splitlines()
+    errors = [l for l in lines if l.startswith("ERROR")]
+    warnings = [l for l in lines if l.startswith("WARNING")]
+    import re as _re
+    has_output = bool(_re.search(r"<(table|img|svg|pre|p)\b", lst, _re.I))
+    display({_S2_SAS_MIME: {"log": log[-400000:], "listing": lst if has_output else "", "errors": len(errors),
+                            "warnings": len(warnings), "first_error": errors[0] if errors else None,
+                            "library": _s2_sas["lib_note"]},
+             "text/plain": "SAS: %d error(s), %d warning(s)" % (len(errors), len(warnings))}, raw=True)
+
+
+def sas_to_df(table, libref="WORK"):
+    """A SAS data set as a pandas DataFrame, e.g. sas_to_df("class", "sashelp")."""
+    return sas_session().sd2df(table, libref)
+
+
+def df_to_sas(frame, table, libref="WORK"):
+    """Write a pandas DataFrame to a SAS data set, e.g. df_to_sas(df, "mydata")."""
+    return sas_session().df2sd(frame, table, libref)
+
+
+def cas_session(server="cas-shared-default"):
+    """A CAS connection (swat) on the same Viya, signed in with your Viya sign-in. Use it with DLPy too."""
+    import swat
+    url = _s2_os.environ.get("SINGLESTORE_MCP_SAS_URL")
+    if not url:
+        _s2_sas_token()  # raises the set-up message
+    if not _s2_sas_verify():
+        _s2_os.environ.setdefault("CAS_CLIENT_SSL_CA_LIST", "")
+    return swat.CAS("%s/%s-http/" % (url.rstrip("/"), server), password=_s2_sas_token())
+
+
+def sasctl_session():
+    """A sasctl session (model management) on the same Viya, signed in with your Viya sign-in."""
+    from sasctl import Session
+    url = _s2_os.environ.get("SINGLESTORE_MCP_SAS_URL", "")
+    host = url.split("://", 1)[-1].rstrip("/")
+    return Session(host, token=_s2_sas_token(), verify_ssl=_s2_sas_verify(),
+                   protocol=url.split("://", 1)[0] if "://" in url else "https")
+
+
+from IPython.core.magic import register_cell_magic as _s2_register_cell
+
+
+@_s2_register_cell
+def sas(line, cell):
+    """%%sas: run the cell as SAS code (DATA steps, PROCs) in your SAS Viya session."""
+    _s2_sas_cell(cell, _s2_database)
 '''
 
 

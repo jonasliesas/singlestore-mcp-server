@@ -125,6 +125,15 @@
   .nb-ask { display: flex; gap: 6px; align-items: flex-end; padding: 6px 8px; border-top: 1px solid var(--s2-border-2); }
   .nb-ask textarea { flex: 1; resize: none; min-height: 34px; max-height: 120px; font-size: var(--s2-fs-xs); }
   .nb-chat .hint { font-size: 11px; color: var(--s2-text-3); padding: 0 8px 6px; }
+  .cell.sas .badge { background: color-mix(in srgb, #0378cd 18%, transparent); color: #0378cd; }
+  .sas-out { display: grid; gap: 6px; }
+  .sas-head { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: var(--s2-fs-xs); }
+  .sas-lst { background: #fff; color: #111; border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius-sm); padding: 6px; overflow: auto; max-height: 640px; }
+  .sas-logbox summary { cursor: pointer; font-size: var(--s2-fs-xs); color: var(--s2-text-2); }
+  .sas-log { max-height: 360px; overflow: auto; font-size: 11px; margin: 4px 0 0; }
+  .sas-log .e { color: var(--s2-err); font-weight: 600; }
+  .sas-log .w { color: var(--s2-warn); }
+  .sas-log .n { color: var(--s2-info); }
 </style>
 </head>
 <body>
@@ -135,6 +144,7 @@ const CM = globalThis.CM;
 const FUNCTIONS = JSON.parse(document.getElementById("vendor-singlestore_functions")?.textContent || "[]");
 const SYSTEM = new Set(["information_schema", "cluster", "memsql"]);
 const TABLE_MIME = "application/vnd.s2.table+json";
+const SAS_MIME = "application/vnd.s2.sas+json";
 const rid = (p) => p + Array.from(crypto.getRandomValues(new Uint8Array(4)), (b) => b.toString(16).padStart(2, "0")).join("");
 const notebookId = rid("n-");
 const cleanError = (e) => new Error(String(e?.message ?? e).replace(/^Error executing tool [\w-]+:\s*/, ""));
@@ -208,7 +218,8 @@ function makeEditor(cell, parent) {
         lang.of(languageFor(cell.type)),
         theme,
         CM.syntaxHighlighting(highlight),
-        CM.placeholder(cell.type === "sql" ? "SQL: the result becomes a DataFrame (Shift+Enter runs)" : cell.type === "python" ? "Python: use df, pd, plt, conn (Shift+Enter runs)" : "Text (Markdown). Shift+Enter shows it."),
+        CM.placeholder(cell.type === "sql" ? "SQL: the result becomes a DataFrame (Shift+Enter runs)" : cell.type === "python" ? "Python: use df, pd, plt, conn (Shift+Enter runs)"
+          : cell.type === "sas" ? "SAS: DATA steps and PROCs run on SAS Viya; S2 is this notebook's SingleStore database (Shift+Enter runs)" : "Text (Markdown). Shift+Enter shows it."),
         CM.EditorView.updateListener.of((u) => {
           if (u.docChanged) { cell.source = u.state.doc.toString(); markDirty(); }
           if (u.focusChanged && u.view.hasFocus) setActive(cell);
@@ -527,7 +538,7 @@ function cellEl(cell) {
   return el;
 }
 function renderGutter(cell) {
-  const badge = { sql: "SQL", python: "PY", markdown: "TEXT" }[cell.type];
+  const badge = { sql: "SQL", python: "PY", sas: "SAS", markdown: "TEXT" }[cell.type];
   cell.el.gutter.replaceChildren(...[
     h("span", { class: "badge" }, badge),
     cell.type === "markdown" ? null : h("span", {}, cell.running ? "[*]" : cell.count ? `[${cell.count}]` : "[ ]"),
@@ -539,7 +550,7 @@ function renderCell(cell) {
   el.className = `cell ${cell.type}${state.active === cell ? " active" : ""}${cell.type === "markdown" && !cell.editing ? " rendered" : ""}`;
   renderGutter(cell);
   const typeSelect = h("select", { class: "s2-input", "aria-label": "Cell type", onchange: (e) => changeType(cell, e.target.value) },
-    ["sql", "python", "markdown"].map((t) => h("option", { value: t, selected: t === cell.type }, { sql: "SQL", python: "Python", markdown: "Text" }[t])));
+    ["sql", "python", "sas", "markdown"].map((t) => h("option", { value: t, selected: t === cell.type }, { sql: "SQL", python: "Python", sas: "SAS", markdown: "Text" }[t])));
   const nameInput = cell.type === "sql" ? h("input", { class: "s2-input", value: cell.name, placeholder: "df", spellcheck: false,
     title: "Python variable for the result (always also df)",
     oninput: (e) => { cell.name = e.target.value.trim(); markDirty(); } }) : null;
@@ -571,6 +582,7 @@ function addBar(after) {
   return h("div", { class: "nb-add" },
     h("button", { class: "s2-btn", onclick: () => addCell("sql", after, { focus: true }) }, "+ SQL"),
     h("button", { class: "s2-btn", onclick: () => addCell("python", after, { focus: true }) }, "+ Python"),
+    h("button", { class: "s2-btn", title: "SAS code (DATA steps, PROCs) on SAS Viya", onclick: () => addCell("sas", after, { focus: true }) }, "+ SAS"),
     h("button", { class: "s2-btn", onclick: () => addCell("markdown", after, { focus: true }) }, "+ Text"));
 }
 function setActive(cell) {
@@ -626,6 +638,7 @@ function outputEl(o) {
       tb ? h("details", {}, h("summary", { class: "s2-small" }, "Traceback"), h("pre", {}, tb)) : null);
   }
   const d = o.data ?? {};
+  if (d[SAS_MIME]) return sasOutput(d[SAS_MIME]);
   if (d[TABLE_MIME]) {
     const t = d[TABLE_MIME];
     const rows = t.rows.map((r) => Object.fromEntries(t.columns.map((c, i) => [c, r[i]])));
@@ -642,6 +655,32 @@ function outputEl(o) {
   if (d["text/markdown"]) return h("div", { class: "md-view" }, ...renderMarkdown(joinText(d["text/markdown"])));
   if (d["text/plain"] !== undefined) return h("pre", {}, stripAnsi(joinText(d["text/plain"])));
   return h("pre", { class: "s2-muted" }, `[${Object.keys(d).join(", ") || "empty output"}]`);
+}
+// SAS cells: counts of errors / warnings, the ODS output (in a shadow root, so SAS's own styles stay inside it;
+// scripts and event handlers removed), and the log with ERROR / WARNING lines marked.
+function sasOutput(s) {
+  const head = h("div", { class: "sas-head" },
+    h("span", { class: `s2-badge ${s.errors ? "err" : "ok"}` }, `${s.errors} error${s.errors === 1 ? "" : "s"}`),
+    s.warnings ? h("span", { class: "s2-badge warn" }, `${s.warnings} warning${s.warnings === 1 ? "" : "s"}`) : null,
+    s.library ? h("span", { class: "s2-faint" }, s.library) : null);
+  const parts = [head];
+  if (s.first_error) parts.push(h("div", { class: "err" }, s.first_error));
+  if (s.listing) {
+    const doc = new DOMParser().parseFromString(String(s.listing), "text/html");
+    doc.querySelectorAll("script, iframe, object, embed, link, meta, base, form").forEach((n) => n.remove());
+    for (const el of doc.querySelectorAll("*")) {
+      for (const a of [...el.attributes]) if (a.name.startsWith("on") || /^\s*javascript:/i.test(a.value)) el.removeAttribute(a.name);
+    }
+    const host = h("div", { class: "sas-lst" });
+    const shadow = host.attachShadow({ mode: "open" });
+    shadow.append(...doc.head.querySelectorAll("style"), ...doc.body.childNodes);
+    parts.push(host);
+  }
+  const lines = String(s.log ?? "").split("\n");
+  const logEl = h("pre", { class: "sas-log" }, lines.map((l) => h("span", {
+    class: l.startsWith("ERROR") ? "e" : l.startsWith("WARNING") ? "w" : l.startsWith("NOTE") ? "n" : "" }, l + "\n")));
+  parts.push(h("details", { class: "sas-logbox", open: s.errors > 0 }, h("summary", {}, `Log (${lines.length} lines)`), logEl));
+  return h("div", { class: "sas-out" }, parts.filter(Boolean));
 }
 function renderOutputs(cell) {
   // Merge consecutive stream chunks of the same kind, like Jupyter does.
@@ -770,7 +809,7 @@ function toIpynb() {
   return {
     cells: state.cells.map((c) => {
       if (c.type === "markdown") return { cell_type: "markdown", id: c.id, metadata: {}, source: toLines(c.source) };
-      const src = c.type === "sql" ? `%%sql${c.name ? ` ${c.name} <<` : ""}\n${c.source}` : c.source;
+      const src = c.type === "sql" ? `%%sql${c.name ? ` ${c.name} <<` : ""}\n${c.source}` : c.type === "sas" ? `%%sas\n${c.source}` : c.source;
       return { cell_type: "code", id: c.id, metadata: {}, execution_count: c.count ?? null, outputs: c.outputs, source: toLines(src) };
     }),
     metadata: {
@@ -785,6 +824,8 @@ function fromIpynb(nb) {
   return (nb.cells ?? []).map((c) => {
     const src = joinText(c.source);
     if (c.cell_type === "markdown" || c.cell_type === "raw") return makeCell("markdown", src, { editing: !src.trim() });
+    const sasMagic = /^%%sas\b[^\n]*\n?/i.exec(src);
+    if (sasMagic) return makeCell("sas", src.slice(sasMagic[0].length), { outputs: c.outputs ?? [], count: c.execution_count ?? null });
     const m = /^%%sql\b([^\n]*)\n?/.exec(src);
     if (m) {
       const name = /^\s*([A-Za-z_]\w*)\s*<</.exec(m[1])?.[1] ?? "";
@@ -895,13 +936,14 @@ function warmAssistant(force = false) {
   S2.callTool("notebook_assistant_warm", { notebook_id: notebookId, profile: profileSelect.value }).catch(() => { chat.warmed = null; });
 }
 function codeBlock(code, lang) {
-  const type = /^(sql|mysql)$/i.test(lang) ? "sql" : /^(py|python|ipython)$/i.test(lang) ? "python" : null;
+  const type = /^(sql|mysql)$/i.test(lang) ? "sql" : /^(py|python|ipython)$/i.test(lang) ? "python" : /^sas$/i.test(lang) ? "sas" : null;
+  const label = { sql: "SQL", python: "Python", sas: "SAS" }[type];
   return h("div", { class: "nb-code" }, h("pre", {}, code),
     h("div", { class: "cbar" }, h("span", { class: "lang" }, type ?? (lang || "code")),
       type ? h("button", { class: "s2-btn", title: "Insert as a new cell after the selected cell", onclick: () => {
         const cell = addCell(type, state.active ?? state.cells[state.cells.length - 1], { focus: false, source: code });
-        setActive(cell); cell.el.root.scrollIntoView({ block: "nearest" }); S2.toast(`Inserted ${type === "sql" ? "SQL" : "Python"} cell`, "ok");
-      } }, `Insert ${type === "sql" ? "SQL" : "Python"} cell`) : null,
+        setActive(cell); cell.el.root.scrollIntoView({ block: "nearest" }); S2.toast(`Inserted ${label} cell`, "ok");
+      } }, `Insert ${label} cell`) : null,
       state.active && type && state.active.type === type ? h("button", { class: "s2-btn ghost", title: "Replace the selected cell's code", onclick: () => {
         const c = state.active; c.view.dispatch({ changes: { from: 0, to: c.view.state.doc.length, insert: code } }); S2.toast("Cell replaced", "ok");
       } }, "Replace selected") : null,

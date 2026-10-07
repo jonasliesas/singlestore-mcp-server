@@ -57,7 +57,75 @@ const headEl = h("div", { class: "cx-head" });
 const formEl = h("div", { class: "cx-form", hidden: true });
 const listEl = h("div", { class: "cx-list" });
 const footEl = h("div", { class: "cx-foot" });
-root.replaceChildren(headEl, h("div", { class: "cx-sub" }, "One connection is active at a time: every view, Claude's tools and new notebook kernels use it."), formEl, listEl, footEl);
+const sasEl = h("section", { class: "cx-form", style: { marginTop: "18px" }, "aria-label": "SAS Viya" });
+root.replaceChildren(headEl, h("div", { class: "cx-sub" }, "One connection is active at a time: every view, Claude's tools and new notebook kernels use it."), formEl, listEl, footEl, sasEl);
+
+// ---------------------------------------------------------------- SAS Viya (SAS cells in notebooks)
+const sas = { info: null, busy: null, result: null, awaitingCode: false, authUrl: null };
+async function loadSas() {
+  try { sas.info = await S2.callTool("sas_viya_state", {}); } catch (err) { sas.result = { ok: false, error: cleanError(err) }; }
+  renderSas();
+}
+async function sasCall(name, args, busy) {
+  sas.busy = busy; renderSas();
+  try { return await S2.callTool(name, args); }
+  catch (err) { sas.result = { ok: false, error: cleanError(err) }; return null; }
+  finally { sas.busy = null; renderSas(); }
+}
+function renderSas() {
+  const i = sas.info ?? {};
+  const f = {
+    url: h("input", { class: "s2-input", value: i.url ?? "", placeholder: "https://viya.example.com", spellcheck: false }),
+    ctx: h("input", { class: "s2-input", value: i.compute_context ?? "SAS Studio compute context", spellcheck: false, list: "sas-contexts" }),
+    lib: h("input", { class: "s2-input", value: i.libref ?? "S2", maxlength: 8, spellcheck: false, style: { width: "90px" } }),
+    verify: h("input", { type: "checkbox", checked: i.ssl_verify !== false }),
+    code: h("input", { class: "s2-input", placeholder: "paste the code SAS Logon shows", spellcheck: false, autocomplete: "off" }),
+  };
+  const values = () => ({ url: f.url.value.trim(), compute_context: f.ctx.value.trim(), libref: f.lib.value.trim(), ssl_verify: f.verify.checked });
+  const save = async () => { const r = await sasCall("sas_viya_save", { settings: values() }, "save"); if (r) { sas.info = r; S2.toast("SAS Viya settings saved", "ok"); } };
+  const signIn = async () => {
+    await sasCall("sas_viya_save", { settings: values() }, "signin");
+    const r = await sasCall("sas_viya_sign_in", {}, "signin");
+    if (r) { sas.awaitingCode = true; sas.authUrl = r.authorize_url; renderSas(); }
+  };
+  const finish = async () => {
+    const r = await sasCall("sas_viya_sign_in", { code: f.code.value.trim() }, "code");
+    if (r) { sas.info = r; sas.awaitingCode = false; S2.toast(`Signed in to SAS Viya${r.user ? ` as ${r.user}` : ""}`, "ok"); }
+  };
+  const test = async () => { const r = await sasCall("sas_viya_test", {}, "test"); if (r) { sas.result = r; sas.contexts = r.contexts; renderSas(); } };
+  const signOut = async () => { const r = await sasCall("sas_viya_sign_out", {}, "out"); if (r) sas.info = r; };
+  const spin = (k) => (sas.busy === k ? h("span", { class: "s2-spinner" }) : null);
+  const status = !i.url ? h("span", { class: "s2-faint" }, "Not set up")
+    : i.signed_in ? h("span", { class: "cx-result ok" }, `✓ Signed in${i.user ? ` as ${i.user}` : ""}${i.source && i.source !== "sign-in" ? ` (reusing the ${i.source})` : ""}${i.renewable ? " · renews automatically" : ""}`)
+    : h("span", { class: "cx-result err" }, i.problem ?? "Not signed in");
+  const r = sas.result;
+  sasEl.replaceChildren(...[
+    h("strong", {}, "SAS Viya"),
+    h("div", { class: "s2-small s2-muted", style: { margin: "4px 0 10px" } },
+      "For SAS cells in notebooks (DATA steps, PROCs). The code runs in a SAS Compute session on your Viya, signed in with your own Viya account. " +
+      "Each session gets a library pointing at the active SingleStore connection."),
+    h("div", { class: "cx-grid" },
+      h("label", {}, "Viya address"), f.url,
+      h("label", {}, "Compute context"), f.ctx,
+      h("datalist", { id: "sas-contexts" }, (sas.contexts ?? []).map((n) => h("option", { value: n }))),
+      h("label", {}, "SingleStore libref"), f.lib,
+      h("div", { class: "hint" }, "SAS cells can read and write the notebook's SingleStore database through this library (SAS/ACCESS to SingleStore, engine SSTORE)."),
+      h("label", {}, ""), h("label", {}, f.verify, " Verify Viya's certificate (turn off for self-signed test systems)"),
+      h("label", {}, "Status"), status),
+    sas.awaitingCode ? h("div", { class: "cx-grid", style: { marginTop: "10px" } },
+      h("label", {}, "Code"), f.code,
+      h("div", { class: "hint" }, "Sign in in the browser window that opened; SAS Logon then shows a code. ",
+        sas.authUrl ? h("a", { href: sas.authUrl, target: "_blank", rel: "noopener" }, "Open the sign-in page again") : null)) : null,
+    h("div", { class: "cx-row" },
+      sas.awaitingCode
+        ? h("button", { class: "s2-btn primary", disabled: !!sas.busy, onclick: finish }, spin("code"), "Finish sign-in")
+        : h("button", { class: `s2-btn${i.signed_in ? "" : " primary"}`, disabled: !!sas.busy, onclick: signIn }, spin("signin"), i.signed_in ? "Sign in again" : "Sign in"),
+      h("button", { class: "s2-btn", disabled: !!sas.busy || !i.url, onclick: test }, spin("test"), "Test"),
+      h("button", { class: "s2-btn", disabled: !!sas.busy, onclick: save }, spin("save"), "Save"),
+      i.signed_in ? h("button", { class: "s2-btn ghost", disabled: !!sas.busy, onclick: signOut }, "Sign out") : null),
+    r ? h("div", { class: `cx-result ${r.ok ? "ok" : "err"}` }, r.ok ? `✓ SAS Viya answers · compute context found · ${r.ms} ms` : `✕ ${r.error}`) : null,
+  ].filter(Boolean));
+}
 
 function where(c) {
   if (c.url) return c.url;
@@ -314,6 +382,8 @@ await S2.connect({
   onToolInput() {},
 });
 if (!st.data) load();
+renderSas();
+loadSas();
 </script>
 </body>
 </html>

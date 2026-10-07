@@ -33,7 +33,9 @@ from typing import Any
 
 # What SingleStore's example notebooks expect besides the kernel itself.
 PACKAGES = ["ipykernel", "jupyter_client", "pandas", "matplotlib", "singlestoredb",
-            "sqlalchemy", "sqlalchemy-singlestoredb", "ibis-framework", "scikit-learn"]
+            "sqlalchemy", "sqlalchemy-singlestoredb", "ibis-framework", "scikit-learn",
+            # SAS: SAS cells (saspy), CAS (swat), DLPy, model management (sasctl), optimization (sasoptpy)
+            "saspy", "swat", "sas-dlpy", "sasctl", "sasoptpy"]
 PYTHON_VERSION = "3.12"
 _IDLE_SECONDS = 1800
 _MAX_KERNELS = 8
@@ -219,6 +221,12 @@ def _kernel_env(python: Path) -> dict[str, str]:
         env["SINGLESTORE_MCP_TOKEN_CMD"] = json.dumps([sys.executable, "-m", "singlestore_mcp.connections", "token", active.name])
     else:
         env.pop("SINGLESTORE_MCP_TOKEN_CMD", None)
+    # SAS cells: the SAS Viya address and compute context, and a command that prints a fresh Viya token.
+    from . import sas_viya
+
+    for key in [k for k in env if k.startswith("SINGLESTORE_MCP_SAS_")]:
+        env.pop(key)
+    env.update(sas_viya.kernel_env())
     scripts = python.parent
     env_root = scripts.parent
     env["PATH"] = str(scripts) + os.pathsep + env.get("PATH", "")

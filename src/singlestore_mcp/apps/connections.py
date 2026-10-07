@@ -11,7 +11,7 @@ from typing import Any
 
 from mcp.types import CallToolResult, ToolAnnotations
 
-from .. import connections
+from .. import connections, sas_viya
 from ._core import APP_ONLY, apps, register_app, tool_result, with_browser_link
 
 URI = "ui://singlestore/connections.html"
@@ -101,7 +101,44 @@ def connection_sso_sign_in(name: str) -> CallToolResult:
     return tool_result(f"Signed in for {name}", {**_state(), "token": info, "test": check})
 
 
-HELIOS_CA_URL = "https://portal.singlestore.com/static/ca/singlestore_bundle.pem"
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def sas_viya_state() -> CallToolResult:
+    """SAS Viya settings and sign-in status (for SAS cells in notebooks)."""
+    info = sas_viya.status()
+    return tool_result("signed in" if info.get("signed_in") else info.get("problem") or "not set up", info)
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=CHANGES)
+def sas_viya_save(settings: dict[str, Any]) -> CallToolResult:
+    """Save the SAS Viya address, compute context, certificate check and SingleStore libref."""
+    sas_viya.save_settings(settings)
+    info = sas_viya.status()
+    return tool_result("saved", info)
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=CHANGES)
+def sas_viya_sign_in(code: str | None = None) -> CallToolResult:
+    """Without ``code``: open SAS Logon in the browser. With ``code``: finish signing in with the code SAS Logon shows."""
+    if not code:
+        return tool_result("Sign in in the browser, then paste the code.", sas_viya.sign_in_start())
+    return tool_result("Signed in to SAS Viya.", sas_viya.sign_in_finish(code))
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=CHANGES)
+def sas_viya_sign_out() -> CallToolResult:
+    """Forget the SAS Viya sign-in."""
+    sas_viya.sign_out()
+    return tool_result("Signed out.", sas_viya.status())
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def sas_viya_test() -> CallToolResult:
+    """Check the SAS Viya sign-in and compute context (lists the compute contexts; starts no SAS session)."""
+    res = sas_viya.test()
+    return tool_result("ok" if res["ok"] else res.get("error", "failed"), res)
+
+
+HELIOS_CA_URL ="https://portal.singlestore.com/static/ca/singlestore_bundle.pem"
 
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=CHANGES)

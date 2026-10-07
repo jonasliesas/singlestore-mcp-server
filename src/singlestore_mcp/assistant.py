@@ -142,7 +142,16 @@ list_tables, describe_table and read_query (read-only statements only). Check \
 names before using them and test SQL when that is cheap; tables can be very \
 large. You can't run Python yourself; write it carefully.
 - You cannot change data or schema yourself; give such statements as SQL \
-cells for the user to review and run."""
+cells for the user to review and run.
+- There are also SAS cells: SAS code (DATA steps, PROCs, PROC SQL) that runs \
+in the user's SAS Viya session; put it in ```sas blocks (no %%sas line), which \
+get an "Insert SAS cell" button. In SAS cells the libref S2 points at the \
+notebook's SingleStore database (SAS/ACCESS to SingleStore), so `set s2.mytable;` \
+reads a table and `data s2.newtable; ... run;` writes one. In Python, \
+sas_session() is the saspy session, sas_to_df("table", "libref") / \
+df_to_sas(df, "table", "libref") move data between SAS and pandas, \
+cas_session() gives a swat CAS connection (also for DLPy) and sasctl_session() \
+a sasctl session, all signed in with the user's Viya sign-in."""
 
 
 def _system_prompt(kind: str = "sql_editor") -> str:

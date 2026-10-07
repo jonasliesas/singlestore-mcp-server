@@ -139,6 +139,7 @@ def notebook_run(
     (``df``, and ``name`` if given). Statements that change data or schema
     come back with ``needs_confirmation`` unless ``confirmed``.
     cell_type "python": Python code, run as-is.
+    cell_type "sas": SAS code (DATA steps, PROCs) in the SAS Viya session; libref S2 = the notebook database.
     """
     if cell_type == "sql":
         sql = source.strip()
@@ -159,8 +160,13 @@ def notebook_run(
         code = sql_cell_code(sql, database, name)
     elif cell_type == "python":
         code = source
+    elif cell_type == "sas":
+        if not source.strip():
+            raise ValueError("The SAS cell is empty.")
+        # SAS code (DATA steps, PROCs) in the notebook's SAS Viya session; S2 = its SingleStore database.
+        code = f"_s2_sas_cell({source!r}, database={database!r})"
     else:
-        raise ValueError("cell_type must be sql or python")
+        raise ValueError("cell_type must be sql, python or sas")
     run_id = notebook_kernel.execute(notebook_id, code, database)
     return tool_result(f"Running ({run_id})", {"run_id": run_id})
 
