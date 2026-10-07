@@ -10,9 +10,29 @@
 (function () {
   "use strict";
   const NS = "http://www.w3.org/2000/svg";
-  // Harmonious, clearly distinct neighbours; starts with a SingleStore-like violet.
-  const PALETTE = ["#7c3aed", "#0ea5e9", "#f59e0b", "#10b981", "#f43f5e", "#6366f1", "#14b8a6", "#ec4899", "#84cc16", "#64748b"];
-  const GRID = "#eef1f4", AXIS = "#c9d1d9", TICK = "#6e7781";
+  // Chart styles: palette (clearly distinct neighbours), background, grid, axis, tick labels and text.
+  const LIGHT = { bg: "#ffffff", grid: "#eef1f4", axis: "#c9d1d9", tick: "#6e7781", text: "#1f2328", sliceText: "#ffffff" };
+  const STYLES = {
+    singlestore: { label: "SingleStore", ...LIGHT,
+      palette: ["#7c3aed", "#0ea5e9", "#f59e0b", "#10b981", "#f43f5e", "#6366f1", "#14b8a6", "#ec4899", "#84cc16", "#64748b"] },
+    sas: { label: "SAS", ...LIGHT, grid: "#e6e9ee", axis: "#b8c0cc", tick: "#5b6573",
+      palette: ["#445694", "#d05b5b", "#66a5a0", "#a9865b", "#b689cd", "#ba6c9d", "#6f7eb3", "#94bde1", "#d8a75c", "#7aa86b"] },
+    classic: { label: "Classic", ...LIGHT,
+      palette: ["#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f", "#edc948", "#b07aa1", "#ff9da7", "#9c755f", "#bab0ac"] },
+    colorblind: { label: "Colorblind-safe", ...LIGHT,
+      palette: ["#0072b2", "#e69f00", "#009e73", "#cc79a7", "#56b4e9", "#d55e00", "#f0e442", "#999999", "#332288", "#882255"] },
+    pastel: { label: "Pastel", ...LIGHT, sliceText: "#1f2328",
+      palette: ["#a78bfa", "#7dd3fc", "#fcd34d", "#6ee7b7", "#fda4af", "#a5b4fc", "#5eead4", "#f9a8d4", "#bef264", "#cbd5e1"] },
+    ocean: { label: "Ocean", ...LIGHT,
+      palette: ["#0c4a6e", "#0284c7", "#14b8a6", "#38bdf8", "#0f766e", "#7dd3fc", "#1e3a8a", "#5eead4", "#0369a1", "#99f6e4"] },
+    dark: { label: "Dark", bg: "#161b22", grid: "#262c36", axis: "#3d444d", tick: "#9198a1", text: "#e6edf3", sliceText: "#0d1117",
+      palette: ["#a78bfa", "#38bdf8", "#fbbf24", "#34d399", "#fb7185", "#818cf8", "#2dd4bf", "#f472b6", "#a3e635", "#94a3b8"] },
+  };
+  const STYLE_KEY = "s2-chart-style";
+  const savedStyle = () => { try { return localStorage.getItem(STYLE_KEY); } catch { return null; } };
+  const saveStyle = (v) => { try { localStorage.setItem(STYLE_KEY, v); } catch { /* private window */ } };
+  let T = STYLES.singlestore;  // the style being drawn
+  const color = (i) => T.palette[i % T.palette.length];
   const MAX_SERIES = 10, MAX_CATEGORIES = 60, MAX_PIE = 10, MAX_POINTS = 5000;
 
   // ------------------------------------------------------------ small helpers
@@ -199,7 +219,7 @@
     const pie = s.type === "pie";
     const H = pie ? Math.min(420, Math.max(280, W * 0.45)) : Math.min(460, Math.max(260, W * 0.42));
     const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "img", "font-family": "system-ui, Segoe UI, sans-serif", "font-size": "11" });
-    const visible = data.series.map((sr, i) => ({ ...sr, color: PALETTE[i % PALETTE.length] })).filter((sr) => !hidden.has(sr.name));
+    const visible = data.series.map((sr, i) => ({ ...sr, color: color(i) })).filter((sr) => !hidden.has(sr.name));
     root.setAttribute("aria-label", `${s.type} chart of ${data.series.map((x) => x.name).join(", ")} by ${s.x}`);
     if (!visible.length) { root.append(svg("text", { x: W / 2, y: H / 2, "text-anchor": "middle", fill: "currentColor" }, "All series hidden.")); return root; }
     if (pie) return drawPie(root, W, H, data, visible[0], tip);
@@ -227,8 +247,8 @@
     const ys = niceScale(lo, hi);
     const y = (v) => m.t + ph - ((v - ys.lo) / (ys.hi - ys.lo)) * ph;
     for (let v = ys.lo; v <= ys.hi + ys.step / 2; v += ys.step) {
-      root.append(svg("line", { x1: m.l, x2: m.l + pw, y1: y(v), y2: y(v), stroke: Math.abs(v) < 1e-12 ? AXIS : GRID, "stroke-width": 1, "shape-rendering": "crispEdges" }));
-      root.append(svg("text", { x: m.l - 6, y: y(v) + 4, "text-anchor": "end", fill: TICK }, compact(v)));
+      root.append(svg("line", { x1: m.l, x2: m.l + pw, y1: y(v), y2: y(v), stroke: Math.abs(v) < 1e-12 ? T.axis : T.grid, "stroke-width": 1, "shape-rendering": "crispEdges" }));
+      root.append(svg("text", { x: m.l - 6, y: y(v) + 4, "text-anchor": "end", fill: T.tick }, compact(v)));
     }
     // X scale
     let xPos, band = 0;
@@ -239,7 +259,7 @@
       data.cats.forEach((c, i) => {
         if (i % every) return;
         const label = String(c).length > 24 ? String(c).slice(0, 23) + "…" : String(c);
-        const t = svg("text", { x: xPos(i), y: H - m.b + 14, "text-anchor": rotate ? "end" : "middle", fill: TICK }, label);
+        const t = svg("text", { x: xPos(i), y: H - m.b + 14, "text-anchor": rotate ? "end" : "middle", fill: T.tick }, label);
         if (rotate) t.setAttribute("transform", `rotate(-40 ${xPos(i)} ${H - m.b + 10})`);
         root.append(t);
       });
@@ -252,11 +272,11 @@
         : Array.from({ length: 6 }, (_, k) => xs.lo + ((xs.hi - xs.lo) * k) / 5);
       for (const t of ticks) {
         const px = m.l + ((t - xs.lo) / ((xs.hi - xs.lo) || 1)) * pw;
-        root.append(svg("text", { x: px, y: H - m.b + 16, "text-anchor": "middle", fill: TICK },
+        root.append(svg("text", { x: px, y: H - m.b + 16, "text-anchor": "middle", fill: T.tick },
           data.xKind === "time" ? dateLabel(t, xs.hi - xs.lo) : compact(t)));
       }
     }
-    root.append(svg("line", { x1: m.l, x2: m.l + pw, y1: m.t + ph, y2: m.t + ph, stroke: AXIS, "shape-rendering": "crispEdges" }));
+    root.append(svg("line", { x1: m.l, x2: m.l + pw, y1: m.t + ph, y2: m.t + ph, stroke: T.axis, "shape-rendering": "crispEdges" }));
 
     // series
     if (s.type === "bar") {
@@ -335,23 +355,23 @@
       const a1 = a0 + (v / total) * Math.PI * 2;
       const large = a1 - a0 > Math.PI ? 1 : 0;
       const p = (rad, a) => `${(cx + rad * Math.cos(a)).toFixed(2)},${(cy + rad * Math.sin(a)).toFixed(2)}`;
-      const color = PALETTE[i % PALETTE.length];
+      const sliceColor = color(i);
       const d = vals.filter(Boolean).length === 1
         ? `M${cx - r},${cy}A${r},${r} 0 1 1 ${cx + r},${cy}A${r},${r} 0 1 1 ${cx - r},${cy}M${cx - ri},${cy}A${ri},${ri} 0 1 0 ${cx + ri},${cy}A${ri},${ri} 0 1 0 ${cx - ri},${cy}Z`
         : `M${p(r, a0)}A${r},${r} 0 ${large} 1 ${p(r, a1)}L${p(ri, a1)}A${ri},${ri} 0 ${large} 0 ${p(ri, a0)}Z`;
-      const slice = svg("path", { d, fill: color, stroke: "#fff", "stroke-width": 1.5, "fill-rule": "evenodd" });
-      slice.addEventListener("pointermove", (e) => tip.show(e, full(data.cats[i]), [[color, sr.name, v], [null, "share", `${((v / total) * 100).toFixed(1)} %`]]));
+      const slice = svg("path", { d, fill: sliceColor, stroke: T.bg, "stroke-width": 1.5, "fill-rule": "evenodd" });
+      slice.addEventListener("pointermove", (e) => tip.show(e, full(data.cats[i]), [[sliceColor, sr.name, v], [null, "share", `${((v / total) * 100).toFixed(1)} %`]]));
       slice.addEventListener("pointerleave", () => tip.hide());
       root.append(slice);
       if ((a1 - a0) > 0.25) {
         const mid = (a0 + a1) / 2, lr = (r + ri) / 2;
-        root.append(svg("text", { x: cx + lr * Math.cos(mid), y: cy + lr * Math.sin(mid) + 4, "text-anchor": "middle", fill: "#fff", "font-weight": "600", "pointer-events": "none" },
+        root.append(svg("text", { x: cx + lr * Math.cos(mid), y: cy + lr * Math.sin(mid) + 4, "text-anchor": "middle", fill: T.sliceText, "font-weight": "600", "pointer-events": "none" },
           `${Math.round((v / total) * 100)}%`));
       }
       a0 = a1;
     });
-    root.append(svg("text", { x: cx, y: cy - 2, "text-anchor": "middle", "font-size": "16", "font-weight": "600", fill: "#1f2328" }, compact(total)));
-    root.append(svg("text", { x: cx, y: cy + 15, "text-anchor": "middle", fill: TICK }, sr.name));
+    root.append(svg("text", { x: cx, y: cy - 2, "text-anchor": "middle", "font-size": "16", "font-weight": "600", fill: T.text }, compact(total)));
+    root.append(svg("text", { x: cx, y: cy + 15, "text-anchor": "middle", fill: T.tick }, sr.name));
     return root;
   }
 
@@ -360,6 +380,7 @@
     const cols = profile(columns, rows);
     const sig = columns.join("\u0001");
     let s = settings && settings.sig === sig ? settings : { ...defaults(cols), sig };
+    if (!STYLES[s.style]) s = { ...s, style: STYLES[savedStyle()] ? savedStyle() : "singlestore" };
     const hidden = new Set();
     const box = el("div", { class: "s2c" });
     const controls = el("div", { class: "s2c-controls" });
@@ -414,20 +435,25 @@
         s.type === "bar" || s.type === "pie"
           ? select("Sort", s.sort, [["auto", "Auto"], ["value", "Largest first"], ["label", "By label"], ["none", "As returned"]], (sort) => update({ sort })) : null,
         el("span", { class: "s2c-spacer" }),
+        select("Style", s.style, Object.entries(STYLES).map(([k, v]) => [k, v.label]), (style) => { saveStyle(style); update({ style }); },
+          "Colours and background (remembered for all charts)"),
         el("button", { type: "button", class: "s2c-btn", title: "Download the chart as an SVG image", onclick: download }, "Download SVG"),
       ].filter(Boolean));
     }
 
     let data = null;
     function render() {
+      T = STYLES[s.style] ?? STYLES.singlestore;
+      plot.style.background = T.bg;
+      plot.style.color = T.text;
       renderControls();
       data = shape(cols, rows, s);
       if (data.error) { plot.replaceChildren(el("div", { class: "s2c-empty" }, data.error)); legend.replaceChildren(); notes.replaceChildren(); return; }
       if (!data.cats.length || !data.series.length) { plot.replaceChildren(el("div", { class: "s2c-empty" }, "Nothing to chart: no rows with a value for X.")); legend.replaceChildren(); notes.replaceChildren(); return; }
       plot.replaceChildren(draw(plot, data, s, hidden, tip));
       const pie = s.type === "pie";
-      const items = pie ? data.cats.map((c, i) => [String(c), PALETTE[i % PALETTE.length], false])
-        : data.series.map((sr, i) => [sr.name, PALETTE[i % PALETTE.length], true]);
+      const items = pie ? data.cats.map((c, i) => [String(c), color(i), false])
+        : data.series.map((sr, i) => [sr.name, color(i), true]);
       legend.replaceChildren(...items.map(([name, color, toggle]) => el(toggle ? "button" : "span", {
         type: toggle ? "button" : null, class: "s2c-leg", "aria-pressed": toggle ? String(!hidden.has(name)) : null,
         title: toggle ? "Show / hide this series" : null,
@@ -451,14 +477,14 @@
       names.forEach((name, i) => {
         const w = 18 + name.length * 6.5;
         if (x + w > W) { x = 10; y += 18; }
-        leg.push(svg("rect", { x, y: y - 9, width: 10, height: 10, rx: 2, fill: PALETTE[(s.type === "pie" ? i : data.series.findIndex((sr) => sr.name === name)) % PALETTE.length] }),
-          svg("text", { x: x + 14, y, fill: "#1f2328" }, name));
+        leg.push(svg("rect", { x, y: y - 9, width: 10, height: 10, rx: 2, fill: color(s.type === "pie" ? i : data.series.findIndex((sr) => sr.name === name)) }),
+          svg("text", { x: x + 14, y, fill: T.text }, name));
         x += w + 10;
       });
       const total = y + 10;
       copy.setAttribute("height", total);
       copy.setAttribute("viewBox", `0 0 ${W} ${total}`);
-      copy.insertBefore(svg("rect", { width: W, height: total, fill: "#ffffff" }), copy.firstChild);
+      copy.insertBefore(svg("rect", { width: W, height: total, fill: T.bg }), copy.firstChild);
       for (const n of leg) copy.append(n);
       for (const n of copy.querySelectorAll("rect[fill='transparent'], line[visibility]")) n.remove();
       const text = new XMLSerializer().serializeToString(copy);
@@ -467,7 +493,7 @@
       else { const a = el("a", { href: URL.createObjectURL(new Blob([text], { type: "image/svg+xml" })), download: name }); document.body.append(a); a.click(); a.remove(); }
     }
 
-    new ResizeObserver(() => { if (data && !data.error) { const node = plot.querySelector("svg"); if (node && Math.abs(Number(node.getAttribute("width")) - plot.clientWidth) > 8) plot.replaceChildren(draw(plot, data, s, hidden, tip)); } }).observe(plot);
+    new ResizeObserver(() => { if (data && !data.error) { const node = plot.querySelector("svg"); if (node && Math.abs(Number(node.getAttribute("width")) - plot.clientWidth) > 8) { T = STYLES[s.style] ?? STYLES.singlestore; plot.replaceChildren(draw(plot, data, s, hidden, tip)); } } }).observe(plot);
     render();
     onChange?.(s);
     return box;
@@ -488,7 +514,7 @@
 .s2c-spacer { flex: 1; }
 .s2c-faint { color: var(--s2-text-3, #8c959f); }
 .s2c-stage { position: relative; }
-.s2c-plot { width: 100%; background: #fff; border-radius: 6px; color: #1f2328; }
+.s2c-plot { width: 100%; background: #fff; border-radius: 6px; color: #1f2328; transition: background .15s; }
 .s2c-plot svg { display: block; width: 100%; height: auto; }
 .s2c-empty { padding: 40px 10px; text-align: center; color: #57606a; font-size: 13px; }
 .s2c-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; }
@@ -507,5 +533,5 @@ button.s2c-leg[aria-pressed="false"] { text-decoration: line-through; opacity: .
   style.textContent = css;
   (document.head || document.documentElement).append(style);
 
-  globalThis.S2Charts = { view, profile, defaults, shape };
+  globalThis.S2Charts = { view, profile, defaults, shape, styles: Object.keys(STYLES) };
 })();

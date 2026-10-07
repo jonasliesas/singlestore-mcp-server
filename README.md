@@ -173,7 +173,8 @@ left switches between its views:
   (a date or text column on X, the numeric columns on Y); you can change them,
   combine repeated X values (sum, average, count, min, max), split one measure
   into series by a column, sort, hide series in the legend and download the
-  chart as SVG. Re-running the same query keeps the chart. Drawn as plain SVG,
+  chart as SVG. **Style** picks the look: SingleStore, SAS, Classic,
+  Colorblind-safe, Pastel, Ocean or Dark (remembered for all charts). Re-running the same query keeps the chart. Drawn as plain SVG,
   so it works without internet access.
 
 **Files**
