@@ -168,6 +168,13 @@ left switches between its views:
 - Understands `CREATE PROCEDURE / FUNCTION … BEGIN … END` bodies, `DECLARE`
   sections and `DELIMITER //` scripts as one statement.
 - History of recent statements; results export to CSV.
+- **Chart** (next to *Table* above the results) charts any result: bar
+  (grouped or stacked), line, area, scatter or pie. It picks X and Y for you
+  (a date or text column on X, the numeric columns on Y); you can change them,
+  combine repeated X values (sum, average, count, min, max), split one measure
+  into series by a column, sort, hide series in the legend and download the
+  chart as SVG. Re-running the same query keeps the chart. Drawn as plain SVG,
+  so it works without internet access.
 
 **Files**
 

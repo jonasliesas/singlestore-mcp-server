@@ -394,8 +394,15 @@ function renderEnv() {
   if (envEl.hidden) return;
   const installing = env.state === "installing";
   if (missing.length && !installing) {
-    envEl.replaceChildren(h("strong", {}, "More packages for SingleStore example notebooks"),
-      h("div", {}, `Not installed yet in the notebook environment: ${missing.join(", ")}. `),
+    // Say what the missing packages are for: SAS's Python packages, or general notebook packages.
+    const SAS = new Set(["saspy", "swat", "sas-dlpy", "sasctl", "sasoptpy"]);
+    const sas = missing.filter((p) => SAS.has(p)), other = missing.filter((p) => !SAS.has(p));
+    const title = sas.length && !other.length ? "SAS packages for notebooks"
+      : other.length && !sas.length ? "New packages for notebooks" : "New packages for notebooks, including SAS";
+    envEl.replaceChildren(h("strong", {}, title),
+      h("div", {}, `Not installed yet in the notebook environment: ${missing.join(", ")}.`,
+        sas.length ? " They give you SAS cells on SAS Viya (saspy) and CAS, DLPy, model management and optimization from Python (swat, sas-dlpy, sasctl, sasoptpy)." : "",
+        " Installing takes a minute; restart the kernel (↻) afterwards."),
       h("div", { style: { marginTop: "8px" } }, h("button", { class: "s2-btn primary", onclick: installEnv }, "Install missing packages"),
         h("button", { class: "s2-btn ghost", onclick: () => { envEl.hidden = true; } }, "Not now")));
     return;

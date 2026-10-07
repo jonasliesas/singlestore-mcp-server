@@ -7,6 +7,7 @@
 <!--S2:HEAD-->
 <!--S2:VENDOR:codemirror-bundle.js-->
 <!--S2:VENDOR:singlestore_functions.json-->
+<!--S2:VENDOR:s2-charts.js-->
 <style>
   body { padding: 10px 12px; }
   .sq-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
@@ -100,6 +101,10 @@
   .cm-tooltip.cm-tooltip-autocomplete > ul { font-family: var(--s2-mono); max-height: 16em; }
   .cm-completionDetail { color: var(--s2-text-3); margin-left: .6em; font-style: normal; }
   .cm-tooltip.cm-completionInfo { max-width: 340px; padding: 6px 9px; font-family: var(--s2-font); font-size: var(--s2-fs-xs); white-space: normal; }
+  .sq-seg { display: inline-flex; border: 1px solid var(--s2-border); border-radius: var(--s2-radius-sm); overflow: hidden; }
+  .sq-seg button { border: 0; background: transparent; padding: 2px 10px; font-size: var(--s2-fs-xs); cursor: pointer; color: var(--s2-text-2); }
+  .sq-seg button + button { border-left: 1px solid var(--s2-border); }
+  .sq-seg button[aria-pressed="true"] { background: var(--s2-bg-3); color: var(--s2-text); font-weight: var(--font-weight-semibold, 600); }
 </style>
 </head>
 <body>
@@ -113,6 +118,8 @@ const MAX_ROWS = 1000;
 const SINGLESTORE_KEYWORDS = "pipeline pipelines extractor batch_interval shard sort columnstore rowstore reference link links stage aggregator aggregators leaf leaves partition partitions rebalance attach detach snapshot extension extensions resource_pool workload infer inferred offsets earliest latest skip parser vector autostats sparse unenforced global temporary";
 
 const state = {
+  resultAs: "table",             // results pane: "table" | "chart"
+  chartSettings: null,           // the chart's settings (S2Charts), kept per column set
   databases: [], database: null,
   schemas: new Map(),            // db -> {status: "loading"|"ok"|"error", data, error}
   expanded: new Set(),           // db names and "db\u0000table" keys
@@ -539,13 +546,25 @@ function renderResults() {
     if (r.truncated) parts.push(h("span", { class: "s2-badge warn" }, `first ${fmt.number(r.max_rows)} shown`));
   }
   parts.push(h("span", { class: "s2-faint" }, `${fmt.number(r.elapsed_ms, 1)} ms`), h("span", { class: "s2-spacer" }));
+  const chartable = r.has_result_set && r.rows.length > 0 && globalThis.S2Charts;
+  if (chartable) {
+    parts.push(h("span", { class: "sq-seg", role: "group", "aria-label": "Show the result as" },
+      ["table", "chart"].map((v) => h("button", { "aria-pressed": String(state.resultAs === v),
+        title: v === "chart" ? "Chart the result: bar, line, area, scatter or pie" : "Show the result as a table",
+        onclick: () => { state.resultAs = v; renderResults(); } }, v === "table" ? "Table" : "Chart"))));
+  }
   if (r.has_result_set && r.rows.length) {
     parts.push(h("button", { class: "s2-btn ghost", onclick: () => S2.download("query-result.csv", toCsv(r.columns, r.rows), "text/csv") }, "Export CSV"));
   }
   for (const w of r.warnings ?? []) parts.push(h("span", { class: "s2-badge warn", title: w }, "Warning"));
   statusEl.replaceChildren(...parts);
   outEl.replaceChildren(r.has_result_set
-    ? (r.rows.length ? S2.dataTable(r.columns, r.rows, { maxHeight: "none" }) : h("div", { class: "sq-placeholder" }, "The query returned no rows."))
+    ? (r.rows.length
+      ? (chartable && state.resultAs === "chart"
+        // Settings stay per column set, so re-running the same query keeps the chart as it was.
+        ? S2Charts.view(r.columns, r.rows, { settings: state.chartSettings, onChange: (cs) => { state.chartSettings = cs; } })
+        : S2.dataTable(r.columns, r.rows, { maxHeight: "none" }))
+      : h("div", { class: "sq-placeholder" }, "The query returned no rows."))
     : h("div", { class: "sq-placeholder" }, "The statement ran and returned no result set."));
 }
 
