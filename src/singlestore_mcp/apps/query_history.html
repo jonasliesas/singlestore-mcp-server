@@ -195,7 +195,9 @@ function answerBody(text) {
     const before = text.slice(last, m.index).trim();
     if (before) parts.push(h("div", { class: "txt" }, before));
     const code = m[1].replace(/\s+$/, "");
-    parts.push(h("pre", { class: "s2-pre" }, code), h("button", { class: "s2-btn ghost", onclick: () => copy(code) }, "Copy"));
+    parts.push(h("pre", { class: "s2-pre" }, code), h("button", { class: "s2-btn ghost", onclick: () => copy(code) }, "Copy"),
+      /^\s*(--|\/\*|select|with|create|insert|alter|analyze|drop|update|delete|explain|show|set)/i.test(code)
+        ? editorButton(code, state.data?.events.find((e) => e.key === state.selected)?.database) : null);
     last = re.lastIndex;
   }
   const rest = text.slice(last).trim();
@@ -365,6 +367,15 @@ async function tune(key) {
   reportContext();
 }
 
+// Hand statements to the SQL Editor (added below what's there, not run). In the workspace it switches
+// to the SQL view; on its own it opens the SQL Editor in the browser.
+function toEditor(sql, database) {
+  if (S2.embedded()) { S2.openView("sql", { sql, database: database ?? null, append: true }); return; }
+  S2.openAppInBrowser("sql_editor", { sql, database: database ?? null }).catch((err) => S2.toast(String(err.message ?? err), "err"));
+}
+const editorButton = (sql, database) => h("button", { class: "s2-btn ghost", style: { marginTop: "4px" },
+  title: "Put these statements in the SQL Editor (below what's there; nothing runs)", onclick: () => toEditor(sql, database) }, "Open in SQL Editor");
+
 function copy(text) {
   navigator.clipboard?.writeText(text).then(() => S2.toast("Copied", "ok"), () => S2.toast("Couldn't copy", "err"));
 }
@@ -419,7 +430,8 @@ function renderDetail() {
           rec.severity === "high" ? "High" : rec.severity === "medium" ? "Medium" : "Info"), rec.title),
         h("p", {}, rec.detail),
         rec.sql ? h("div", {}, h("pre", { class: "s2-pre" }, rec.sql),
-          h("button", { class: "s2-btn ghost", style: { marginTop: "4px" }, onclick: () => copy(rec.sql) }, "Copy")) : null)),
+          h("button", { class: "s2-btn ghost", style: { marginTop: "4px" }, onclick: () => copy(rec.sql) }, "Copy"),
+          editorButton(rec.sql, row.database)) : null)),
       r.plan_note ? h("div", { class: "s2-small s2-faint", style: { marginTop: "8px" } }, r.plan_note) : null,
       r.explain.lines.length ? h("details", { class: "qh-more" }, h("summary", {}, "EXPLAIN plan"), h("pre", { class: "s2-pre" }, r.explain.lines.join("\n")))
         : r.explain.error ? h("div", { class: "s2-small s2-faint", style: { marginTop: "8px" } }, r.explain.error) : null,
@@ -695,6 +707,7 @@ function renderAdvisor() {
       h("div", { class: "t" }, h("span", { class: `s2-badge ${PRIO[r.priority][0]}` }, KIND[r.kind] ?? r.kind), r.title),
       h("p", {}, r.detail),
       r.sql ? [h("pre", { class: "s2-pre" }, r.sql), h("button", { class: "s2-btn ghost", style: { marginTop: "4px" }, onclick: () => copy(r.sql) }, "Copy"),
+        editorButton(r.sql, t.database),
         r.new_table ? h("button", { class: "s2-btn ghost", style: { marginTop: "4px" }, title: "Once the copy is built: time the heaviest queries from the history on both tables",
           onclick: () => openCompare(t.table, r.new_table) }, "Compare with new table") : null] : null))
       : h("div", { class: "s2-small s2-faint" }, "No changes suggested for this table."),

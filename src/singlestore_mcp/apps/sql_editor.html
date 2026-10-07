@@ -887,9 +887,15 @@ window.addEventListener("s2:connection-changed", async (e) => {
 
 // Hand-off from another workspace view (e.g. the Explorer's "Query in grid").
 window.addEventListener("s2:set-sql", (e) => {
-  const { sql, database, run: runIt } = e.detail;
+  const { sql, database, run: runIt, append } = e.detail;
   if (database && database !== state.database && state.databases.includes(database)) chooseDatabase(database);
-  if (sql) setSql(sql);
+  if (sql && append && view.state.doc.length) {
+    // Keep what's in the editor: add the statements below it and select them.
+    const doc = view.state.doc.toString();
+    const sep = doc.endsWith("\n\n") ? "" : doc.endsWith("\n") ? "\n" : "\n\n";
+    const from = doc.length + sep.length;
+    view.dispatch({ changes: { from: doc.length, insert: sep + sql }, selection: { anchor: from, head: from + sql.length }, scrollIntoView: true });
+  } else if (sql) setSql(sql);
   view.focus();
   if (runIt) run();
 });
