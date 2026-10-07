@@ -338,10 +338,57 @@ the exact `jwks_endpoint`, `jwks_username_field` and user the cluster needs.
 | **Schema Explorer** `schema_explorer(database?, table?)` | Databases → tables with row counts and sizes; per table the columns, DDL (shard / sort keys) and a row preview. **Ask Claude** and **Query in grid**. |
 | **Pipeline Monitor** `pipeline_monitor(database?)` | Every pipeline's state, source → table, progress (files loaded / Kafka lag), latest batches and errors. Start / Stop (with confirmation), Test, error details, **Ask Claude**, auto-refresh. |
 | **Cluster Monitor** `cluster_monitor()` | Per node SingleStore CPU (against its core limit), memory and disk with a 15-minute CPU chart (all / aggregators / leaves), plus the queries running now. Refreshes every 5 s. |
+| **Query History** `query_history(min_seconds=1, hours?)` | Every finished query the cluster traced: when, how long, user, database, rows, success / error. Filter on runtime (1 s and up), period, user, database, status, type and text; sort by time, duration or rows. Select a query for its full SQL and **Get tuning recommendations**. Its own **History** item in the workspace rail. |
 | **Query Grid** `query_grid(sql, database?, max_rows=1000)` | Read-only results as a sortable, filterable grid with CSV export; the SQL can be edited and re-run. Writes are refused. |
 
 `TEST PIPELINE` loads no data, but a failed test is still recorded in the
 pipeline's batch history and error log.
+
+**Query History** needs SingleStore's query history (event tracing) turned on
+once, by an admin:
+
+```sql
+CREATE EVENT TRACE Query_completion WITH (Query_text = on, Duration_threshold_ms = 1000);
+```
+
+Its **tuning recommendations** work without Claude. For the selected run they
+combine:
+- the run itself: rows returned or written, `SELECT *`, no filter,
+  `CREATE TABLE … AS SELECT` without a shard key, errors such as unreachable
+  Kafka brokers;
+- the plan cache: disk spilling, time queued by workload management, memory,
+  plan warnings, outdated statistics;
+- `EXPLAIN` (compiles the statement without running it): missing column
+  statistics (with the `ANALYZE` commands), broadcasts, reshuffles,
+  nested-loop joins, filtered scans of tables without a sort key;
+- the tables' shard and sort keys.
+
+**Ask Claude** answers right in the panel: like the SQL Editor's assistant,
+Claude Code runs in the background with read-only database access, gets the
+query, the findings, the plan and the table definitions, and can check things
+itself (row counts, cardinality). This also works in the desktop window and the
+browser. Only without Claude Code installed does it fall back to the Claude
+chat.
+
+The **Advisor** tab (also the `query_advisor_report` tool) looks at the whole
+history instead of one query. It `EXPLAIN`s every distinct query (about 5
+seconds for a few hundred) to see which columns each one filters, joins and
+groups on, weights them by how long those queries ran, and suggests per table:
+
+- a **SORT KEY** on the columns most query time filters on, so whole segments
+  are skipped;
+- a **SHARD KEY** on the join / group-by columns when data is reshuffled or
+  broadcast. Only columns with enough distinct values qualify (checked against
+  the optimizer's statistics), so it never suggests a key that would skew the
+  partitions;
+- **REFERENCE tables** for small tables that get broadcast;
+- **indexes** for filtered rowstore tables, and **ANALYZE** for missing statistics.
+
+Keys can't be changed in place, so each suggestion comes with statements that
+build a copy with the new keys from the table's own definition
+(`CREATE TABLE … ; INSERT … SELECT`) and, commented out, swap the names. A
+**Workload** card lists queries returning millions of rows, large `SELECT *`
+queries and the most frequent errors.
 
 ### Claude in the apps
 

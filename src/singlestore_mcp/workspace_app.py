@@ -156,7 +156,7 @@ def _splash(target: str) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Open the SingleStore Workspace in a browser window.")
     parser.add_argument("--database", help="database to start in")
-    parser.add_argument("--view", default="sql", choices=["sql", "notebook", "schema", "pipelines", "cluster", "connections"])
+    parser.add_argument("--view", default="sql", choices=["sql", "notebook", "schema", "pipelines", "cluster", "history", "connections"])
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--browser", action="store_true", help="open in the default browser instead of an Edge app window")
     parser.add_argument("--no-open", action="store_true", help="start the server and print the URL, without opening a window")

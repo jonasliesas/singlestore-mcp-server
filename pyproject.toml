@@ -1,6 +1,6 @@
 [project]
 name = "singlestore-mcp-server"
-version = "0.6.0"
+version = "0.7.0"
 description = "Local MCP server for SingleStore (Helios or self-managed) with first-class pipeline support, built on the official mcp and singlestoredb SDKs."
 readme = "README.md"
 requires-python = "==3.12.*"

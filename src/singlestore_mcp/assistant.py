@@ -183,6 +183,7 @@ class _Job:
         self.kind = kind
         self.started = time.time()
         self.activity = "Thinking…"
+        self.partial = ""  # the answer text so far (streamed), shown while Claude writes
         self.queries = 0
         self.cancelled = False
         self.worker: _Worker | None = None
@@ -197,7 +198,7 @@ class _Worker:
         args = [
             claude, "-p",
             "--input-format", "stream-json",
-            "--output-format", "stream-json", "--verbose",
+            "--output-format", "stream-json", "--verbose", "--include-partial-messages",
             "--tools", "",
             "--strict-mcp-config", "--mcp-config", str(_mcp_config(workdir)),
             "--allowedTools", f"mcp__{READONLY_SERVER}",
@@ -242,7 +243,9 @@ class _Worker:
             except ValueError:
                 continue
             kind = event.get("type")
-            if kind == "assistant" and self.job:
+            if kind == "stream_event" and self.job:
+                _note_stream(self.job, event.get("event") or {})
+            elif kind == "assistant" and self.job:
                 _note_activity(self.job, event)
             elif kind == "result":
                 self.result = event
@@ -354,6 +357,7 @@ def job_state(editor_id: str) -> dict[str, Any] | None:
         return {
             "state": "running",
             "activity": job.activity,
+            "partial": job.partial,
             "queries": job.queries,
             "seconds": round(time.time() - job.started),
         }
@@ -471,6 +475,24 @@ def _call_claude(claude: str, job: _Job, prompt: str) -> tuple[str, bool]:
     with _lock:
         _sessions[job.editor_id] = result.get("session_id") or worker.session
     return text or "(empty answer)", True
+
+
+def _note_stream(job: _Job, event: dict[str, Any]) -> None:
+    """Partial output (--include-partial-messages): the text Claude is writing, and when it's thinking."""
+    etype = event.get("type")
+    with _lock:
+        if etype == "content_block_start":
+            block = (event.get("content_block") or {}).get("type")
+            if block == "thinking":
+                job.activity = "Thinking…"
+            elif block == "text":
+                job.activity = "Writing the answer…"
+                if job.partial and not job.partial.endswith("\n\n"):
+                    job.partial += "\n\n"
+        elif etype == "content_block_delta":
+            delta = event.get("delta") or {}
+            if delta.get("type") == "text_delta":
+                job.partial = (job.partial + delta.get("text", ""))[-20000:]
 
 
 def _note_activity(job: _Job, event: dict[str, Any]) -> None:

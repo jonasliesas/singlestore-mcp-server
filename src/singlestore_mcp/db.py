@@ -200,6 +200,14 @@ class Database:
         if stale:
             self._discard(pc)
 
+    def _drop_idle(self) -> None:
+        with self._cond:
+            idle, self._idle = self._idle, []
+            self._open -= len(idle)
+            self._cond.notify_all()
+        for pc in idle:
+            self._discard(pc)
+
     @staticmethod
     def _discard(pc: _PooledConnection) -> None:
         try:
@@ -291,6 +299,9 @@ class Database:
                 if _is_connection_error(exc):
                     self._discard(pc)
                     self._release(None)
+                    # The idle ones are usually just as dead (the network closed idle connections): drop
+                    # them too, so the retry opens a fresh connection instead of picking another dead one.
+                    self._drop_idle()
                     if attempt == 0:
                         continue  # stale connection (idle timeout, failover): retry once on a fresh one
                 else:

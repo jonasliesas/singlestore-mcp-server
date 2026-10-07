@@ -71,7 +71,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--database", default="")
     parser.add_argument("--name", default="SingleStore Workspace")
-    parser.add_argument("--view", default="", help="view to open: sql, notebook, schema, pipelines or cluster")
+    parser.add_argument("--view", default="", help="view to open: sql, notebook, schema, pipelines, cluster, history or connections")
     opts = parser.parse_args()
     write_icon(ICON)
     pythonw = ROOT / ".venv" / "Scripts" / "pythonw.exe"

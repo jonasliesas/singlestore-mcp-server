@@ -68,6 +68,7 @@ const ICONS = {
   schema: '<rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="9.5" x2="21" y2="9.5"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="9.5" x2="9" y2="20"/>',
   pipelines: '<rect x="3" y="3.5" width="7" height="6" rx="1.5"/><rect x="14" y="14.5" width="7" height="6" rx="1.5"/><path d="M6.5 9.5v2.5a3 3 0 0 0 3 3h4.5"/><polyline points="12 13 14 15 12 17"/>',
   cluster: '<rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><line x1="7" y1="7.5" x2="7.01" y2="7.5"/><line x1="7" y1="16.5" x2="7.01" y2="16.5"/><line x1="11" y1="7.5" x2="17" y2="7.5"/><line x1="11" y1="16.5" x2="17" y2="16.5"/>',
+  history: '<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/>',
   connections: '<path d="M9 7V3"/><path d="M15 7V3"/><path d="M6 7h12v4a6 6 0 0 1-12 0z"/><path d="M12 17v4"/>',
   browser: '<path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
   fullscreen: '<path d="M4 9V4h5"/><path d="M20 9V4h-5"/><path d="M4 15v5h5"/><path d="M20 15v5h-5"/>',
@@ -79,6 +80,7 @@ const VIEWS = {
   pipelines: { label: "Pipelines", title: "Pipeline Monitor", uri: "ui://singlestore/pipeline-monitor.html", tool: "pipeline_monitor" },
   connections: { label: "Connect", title: "Connections", uri: "ui://singlestore/connections.html", tool: "connections_window", bottom: true },
   cluster: { label: "Cluster", title: "Cluster Monitor", uri: "ui://singlestore/cluster-monitor.html", tool: "cluster_monitor" },
+  history: { label: "History", title: "Query History", uri: "ui://singlestore/query-history.html", tool: "query_history" },
 };
 
 // Notebook tabs: each is its own view keyed "notebook", "notebook:2", … with its own kernel.
@@ -159,7 +161,7 @@ async function refreshConnectionLabel() {
 function connectionChanged(name) {
   ws.connection = name;
   for (const key of Object.keys(ws.frames)) {
-    if (["schema", "pipelines", "cluster"].includes(key)) {
+    if (["schema", "pipelines", "cluster", "history"].includes(key)) {
       ws.frames[key].iframe?.remove();
       mainEl.querySelector(`.ws-loading[data-view="${key}"]`)?.remove();
       delete ws.frames[key]; delete ws.contexts[key];

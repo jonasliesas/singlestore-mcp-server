@@ -1,0 +1,568 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Query History</title>
+<!--S2:HEAD-->
+<style>
+  .qh-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 4px 0 10px; }
+  .qh-field { display: inline-flex; align-items: center; gap: 6px; font-size: var(--s2-fs-xs); color: var(--s2-text-2); }
+  .qh-field .s2-input { width: auto; min-width: 0; padding: 3px 7px; font-size: var(--s2-fs-xs); }
+  .qh-field input[type="number"] { width: 72px; }
+  .qh-field input[type="search"] { width: 200px; }
+  .qh-seg { display: inline-flex; border: 1px solid var(--s2-border); border-radius: var(--s2-radius-sm); overflow: hidden; }
+  .qh-seg button { border: 0; background: transparent; padding: 3px 9px; font-size: var(--s2-fs-xs); cursor: pointer; color: var(--s2-text-2); }
+  .qh-seg button + button { border-left: 1px solid var(--s2-border); }
+  .qh-seg button[aria-pressed="true"] { background: var(--s2-bg-3); color: var(--s2-text); font-weight: var(--font-weight-semibold, 600); }
+  .qh-stats { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+  .qh-stat { padding: 7px 12px; min-width: 110px; }
+  .qh-stat .v { font-size: 18px; font-weight: var(--font-weight-semibold, 600); font-variant-numeric: tabular-nums; }
+  .qh-stat .l { font-size: 11px; color: var(--s2-text-3); }
+  .qh-main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .qh-main.with-detail { grid-template-columns: minmax(0, 1.25fr) minmax(340px, 1fr); }
+  @media (max-width: 1000px) { .qh-main.with-detail { grid-template-columns: minmax(0, 1fr); } }
+  .qh-list { max-height: 560px; }
+  html[data-display-mode="fullscreen"] .qh-list { max-height: calc(100vh - 250px); }
+  html[data-display-mode="fullscreen"] .qh-detail { max-height: calc(100vh - 250px); overflow: auto; }
+  .qh-table { width: 100%; }
+  .qh-table tbody tr { cursor: pointer; }
+  .qh-table tbody tr[aria-selected="true"] td { background: var(--s2-info-bg); }
+  .qh-table td.sql { font-family: var(--s2-mono); max-width: 380px; }
+  .qh-table th button { all: unset; cursor: pointer; }
+  .qh-table th button:focus-visible { outline: 2px solid var(--s2-ring); }
+  .qh-dur { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
+  .qh-bar { width: 54px; height: 6px; border-radius: 3px; background: var(--s2-bg-3); overflow: hidden; flex: none; }
+  .qh-bar > span { display: block; height: 100%; background: var(--s2-info); }
+  .qh-bar.warn > span { background: var(--s2-warn); }
+  .qh-bar.crit > span { background: var(--s2-err); }
+  .qh-detail { padding: 12px 14px; align-self: start; }
+  .qh-detail h2 { font-size: var(--font-text-md-size, 14px); margin: 0; font-weight: var(--font-weight-semibold, 600); }
+  .qh-meta { display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; font-size: var(--s2-fs-xs); margin: 10px 0; }
+  .qh-meta dt { color: var(--s2-text-3); }
+  .qh-meta dd { margin: 0; font-variant-numeric: tabular-nums; word-break: break-word; }
+  .qh-sql { max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+  .qh-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+  .qh-rec { border: 1px solid var(--s2-border-2); border-left-width: 4px; border-radius: var(--s2-radius-sm); padding: 8px 10px; margin-top: 8px; }
+  .qh-rec.high { border-left-color: var(--s2-err); }
+  .qh-rec.medium { border-left-color: var(--s2-warn); }
+  .qh-rec.info { border-left-color: var(--s2-info); }
+  .qh-rec .t { display: flex; align-items: center; gap: 6px; font-weight: var(--font-weight-semibold, 600); font-size: var(--s2-fs-sm, 13px); }
+  .qh-rec p { margin: 4px 0 0; font-size: var(--s2-fs-xs); color: var(--s2-text-2); line-height: 1.5; }
+  .qh-rec pre { margin: 6px 0 0; }
+  details.qh-more { margin-top: 10px; font-size: var(--s2-fs-xs); }
+  details.qh-more summary { cursor: pointer; color: var(--s2-text-2); }
+  details.qh-more pre { max-height: 260px; overflow: auto; white-space: pre; }
+  .qh-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--s2-border-2); margin: 2px 0 10px; }
+  .qh-tabs button { border: 0; background: none; padding: 6px 12px; cursor: pointer; color: var(--s2-text-2); font-size: var(--s2-fs-sm, 13px);
+    border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .qh-tabs button[aria-selected="true"] { color: var(--s2-text); font-weight: var(--font-weight-semibold, 600); border-bottom-color: var(--s2-info); }
+  .qh-claude { margin-top: 10px; border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius-sm); padding: 8px 10px; background: var(--s2-bg-2); }
+  .qh-claude .who { font-weight: var(--font-weight-semibold, 600); font-size: var(--s2-fs-xs); margin-bottom: 4px; }
+  .qh-claude .txt { white-space: pre-wrap; font-size: var(--s2-fs-xs); line-height: 1.55; }
+  .qh-claude pre { margin: 6px 0; }
+  .qh-adv-meta { font-size: var(--s2-fs-xs); color: var(--s2-text-2); margin-bottom: 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .qh-adv-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 10px; }
+  .qh-adv-table { padding: 10px 12px; }
+  .qh-adv-table h3 { margin: 0; font-size: var(--s2-fs-sm, 13px); font-family: var(--s2-mono); font-weight: var(--font-weight-semibold, 600); word-break: break-all; }
+  .qh-adv-sub { font-size: 11px; color: var(--s2-text-3); margin: 3px 0 6px; }
+  .qh-chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; font-size: 11px; }
+  .qh-chip { border: 1px solid var(--s2-border-2); border-radius: 10px; padding: 1px 7px; font-family: var(--s2-mono); color: var(--s2-text-2); }
+  .qh-rec.ok { border-left-color: var(--s2-ok); }
+  .qh-rec.low { border-left-color: var(--s2-border); }
+  .qh-adv-work { margin-bottom: 12px; padding: 10px 12px; }
+  .qh-adv-work h2 { font-size: var(--font-text-md-size, 14px); margin: 0 0 6px; }
+  .qh-adv-work li { font-size: var(--s2-fs-xs); margin: 3px 0; }
+  .qh-adv-work code { font-family: var(--s2-mono); font-size: 11px; color: var(--s2-text-2); }
+  .qh-kv { width: 100%; font-size: var(--s2-fs-xs); }
+  .qh-kv td:first-child { color: var(--s2-text-3); padding-right: 12px; white-space: nowrap; }
+</style>
+</head>
+<body>
+<div id="root"><div class="s2-empty"><span class="s2-spinner"></span> Reading the query history…</div></div>
+<script type="module">
+const { h, fmt } = S2;
+const root = document.getElementById("root");
+const PRESETS = [[1, "1 s"], [5, "5 s"], [30, "30 s"], [60, "1 min"], [300, "5 min"]];
+const PERIODS = [["", "All"], ["1", "1 h"], ["24", "24 h"], ["168", "7 days"]];
+const REFRESH_MS = 30000;
+// replaceChildren() would turn null slots into the text "null".
+const fill = (el, ...kids) => el.replaceChildren(...kids.flat().filter((k) => k != null && k !== false));
+
+const state = {
+  data: null, error: null, loading: false,
+  minSeconds: 1, hours: "",
+  user: "", database: "", status: "", category: "", search: "",
+  sort: { key: "finished", dir: -1 },
+  selected: null,        // event key
+  detail: {},            // key -> {event, loading, error}
+  tuning: {},            // key -> {loading, error, result}
+  claude: {},            // key -> {running, job, answer, error}
+  assistant: null,       // {available, reason} — Claude Code for in-app answers
+  tab: "queries",        // "queries" | "advisor"
+  advisor: { loading: false, error: null, data: null },
+  auto: false, timer: null,
+};
+
+// ---------------------------------------------------------------- Claude, in the app
+// Headless Claude Code with read-only database tools answers here (works in the desktop window and the
+// browser). Only without Claude Code does the question go to the Claude chat (inside Claude).
+async function assistantInfo() {
+  if (!state.assistant) {
+    try { state.assistant = await S2.callTool("query_history_assistant", {}); }
+    catch { state.assistant = { available: false, reason: "Couldn't check for Claude Code." }; }
+  }
+  return state.assistant;
+}
+
+async function askInApp(row, ev, tuning) {
+  const info = await assistantInfo();
+  if (!info.available) {
+    if (!S2.inBrowserView() && await S2.sendPrompt(chatPrompt(row, ev, tuning), { quiet: true })) {
+      S2.toast("Sent to the Claude chat", "ok");
+      return;
+    }
+    state.claude[row.key] = { error: `Claude isn't available here: ${info.reason}` };
+    renderDetail();
+    return;
+  }
+  const key = row.key;
+  state.claude[key] = { running: true, job: null };
+  renderDetail();
+  try {
+    await S2.callTool("query_history_ask", { key });
+  } catch (err) {
+    state.claude[key] = { error: err.message };
+    renderDetail();
+    return;
+  }
+  const poll = async () => {
+    const c = state.claude[key];
+    if (!c?.running) return;
+    try {
+      const r = await S2.callTool("query_history_answer", { key });
+      if (r.answer) { state.claude[key] = { answer: r.answer }; }
+      else { c.job = r.job; setTimeout(poll, 1000); }
+    } catch (err) { state.claude[key] = { error: err.message }; }
+    if (state.selected === key) renderDetail();
+  };
+  setTimeout(poll, 1200);
+}
+
+async function stopAsking(key) {
+  try { await S2.callTool("query_history_ask_cancel", { key }); } catch {}
+  state.claude[key] = { answer: { text: "Stopped.", kind: "note" } };
+  renderDetail();
+}
+
+// Plain text with ``` fenced code blocks.
+function answerBody(text) {
+  const parts = [];
+  const re = /```[\w-]*\n?([\s\S]*?)```/g;
+  let last = 0, m;
+  while ((m = re.exec(text))) {
+    const before = text.slice(last, m.index).trim();
+    if (before) parts.push(h("div", { class: "txt" }, before));
+    const code = m[1].replace(/\s+$/, "");
+    parts.push(h("pre", { class: "s2-pre" }, code), h("button", { class: "s2-btn ghost", onclick: () => copy(code) }, "Copy"));
+    last = re.lastIndex;
+  }
+  const rest = text.slice(last).trim();
+  if (rest) parts.push(h("div", { class: "txt" }, rest));
+  return parts;
+}
+
+function claudeBox(key) {
+  const c = state.claude[key];
+  if (!c) return null;
+  if (c.running) {
+    const j = c.job;
+    return h("div", { class: "qh-claude" },
+      h("div", { class: "who" }, h("span", { class: "s2-spinner" }),
+        ` Claude · ${j ? `${j.activity}${j.seconds >= 5 ? ` · ${j.seconds}s` : ""}` : "Starting…"} `,
+        h("button", { class: "s2-btn ghost", onclick: () => stopAsking(key) }, "Stop")),
+      j?.partial ? answerBody(j.partial) : h("div", { class: "txt s2-faint" },
+        "Claude reads the query, the plan and the tables, and may run a few read-only checks. This usually takes 30–90 seconds."));
+  }
+  if (c.error) return h("div", { class: "s2-error", style: { marginTop: "10px" } }, c.error);
+  const a = c.answer;
+  return h("div", { class: "qh-claude" },
+    h("div", { class: "who" }, a.kind === "claude" ? "Claude" : a.kind === "error" ? "Couldn't answer" : "Note"),
+    answerBody(a.text));
+}
+
+// Cluster times have no zone; utc_offset_min says how far the cluster's clock is from UTC.
+function toLocal(v) {
+  if (!v) return null;
+  const d = new Date(String(v).replace(" ", "T").replace(/(\.\d{3})\d*$/, "$1") + "Z");
+  return Number.isNaN(d.getTime()) ? null : new Date(d.getTime() - (state.data?.utc_offset_min ?? 0) * 60000);
+}
+const when = (v) => { const d = toLocal(v); return d ? d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "–"; };
+const secs = (ms) => fmt.duration(ms / 1000);
+
+function filtered() {
+  const d = state.data;
+  if (!d) return [];
+  const q = state.search.trim().toLowerCase();
+  const rows = d.events.filter((e) =>
+    (!state.user || e.user === state.user) &&
+    (!state.database || (e.database ?? "") === state.database) &&
+    (!state.status || (state.status === "ok") === e.ok) &&
+    (!state.category || e.category === state.category) &&
+    (!q || e.sql.toLowerCase().includes(q) || (e.error_code ?? "").toLowerCase().includes(q)));
+  const { key, dir } = state.sort;
+  const val = (e) => key === "finished" ? (toLocal(e.finished)?.getTime() ?? 0) : key === "rows" ? (e.rows ?? -1) : e.ms;
+  return rows.sort((a, b) => (val(a) - val(b)) * dir);
+}
+
+function select(label, value, options, onchange) {
+  return h("label", { class: "qh-field" }, label,
+    h("select", { class: "s2-input", onchange: (e) => onchange(e.target.value) },
+      options.map(([v, text]) => h("option", { value: v, selected: v === value }, text))));
+}
+
+function filters() {
+  const d = state.data;
+  const uniq = (f) => [...new Set(d.events.map(f).filter((v) => v != null && v !== ""))].sort((a, b) => String(a).localeCompare(String(b)));
+  const minInput = h("input", { class: "s2-input", type: "number", min: "1", step: "1", value: state.minSeconds, "aria-label": "Minimum runtime in seconds",
+    onchange: (e) => setMin(Number(e.target.value)) });
+  return h("div", { class: "qh-filters" },
+    h("span", { class: "qh-field" }, "Runtime ≥", minInput, "s",
+      h("span", { class: "qh-seg", role: "group", "aria-label": "Runtime presets" },
+        PRESETS.map(([s, label]) => h("button", { "aria-pressed": String(state.minSeconds === s), onclick: () => setMin(s) }, label)))),
+    h("span", { class: "qh-field" }, "Period",
+      h("span", { class: "qh-seg", role: "group", "aria-label": "Period" },
+        PERIODS.map(([v, label]) => h("button", { "aria-pressed": String(state.hours === v), onclick: () => { state.hours = v; refresh(); } }, label)))),
+    select("User", state.user, [["", "All"], ...uniq((e) => e.user).map((u) => [u, u])], (v) => { state.user = v; render(); }),
+    select("Database", state.database, [["", "All"], ...uniq((e) => e.database).map((x) => [x, x])], (v) => { state.database = v; render(); }),
+    select("Status", state.status, [["", "All"], ["ok", "Succeeded"], ["failed", "Failed"]], (v) => { state.status = v; render(); }),
+    select("Type", state.category, [["", "All"], ...uniq((e) => e.category).map((x) => [x, x])], (v) => { state.category = v; render(); }),
+    h("label", { class: "qh-field" }, h("input", { class: "s2-input", type: "search", placeholder: "Search SQL or error…", value: state.search,
+      "aria-label": "Search SQL", oninput: (e) => { state.search = e.target.value; renderList(); } })));
+}
+
+function setMin(s) {
+  s = Math.max(1, Number.isFinite(s) ? s : 1);
+  if (s === state.minSeconds) return;
+  state.minSeconds = s;
+  refresh();
+}
+
+function stats(rows) {
+  const total = rows.reduce((a, e) => a + e.ms, 0);
+  const failed = rows.filter((e) => !e.ok).length;
+  const longest = rows.reduce((a, e) => Math.max(a, e.ms), 0);
+  const card = (v, l) => h("div", { class: "s2-card qh-stat" }, h("div", { class: "v" }, v), h("div", { class: "l" }, l));
+  return h("div", { class: "qh-stats" },
+    card(fmt.number(rows.length), `queries ≥ ${fmt.duration(state.minSeconds)}`),
+    card(secs(total), "total runtime"),
+    card(rows.length ? secs(longest) : "–", "longest"),
+    card(fmt.number(failed), "failed"));
+}
+
+const listEl = h("div");
+function renderList() {
+  const rows = filtered();
+  const statsSlot = document.getElementById("qh-stats");
+  if (statsSlot) statsSlot.replaceChildren(stats(rows));
+  if (!rows.length) {
+    listEl.replaceChildren(h("div", { class: "s2-empty" }, state.data.enabled_hint ?? `No queries ran ${fmt.duration(state.minSeconds)} or longer${state.hours ? " in this period" : ""} with these filters.`));
+    return;
+  }
+  const max = Math.max(...rows.map((e) => e.ms));
+  const sortHead = (key, label, num) => h("th", { class: num ? "num" : "", "aria-sort": state.sort.key === key ? (state.sort.dir > 0 ? "ascending" : "descending") : "none" },
+    h("button", { onclick: () => { state.sort = { key, dir: state.sort.key === key ? -state.sort.dir : -1 }; renderList(); } },
+      label, state.sort.key === key ? (state.sort.dir > 0 ? " ▲" : " ▼") : ""));
+  const body = h("tbody");
+  for (const e of rows.slice(0, 1000)) {
+    const level = e.ms >= 600000 ? "crit" : e.ms >= 60000 ? "warn" : "";
+    body.append(h("tr", { "aria-selected": String(state.selected === e.key), tabindex: "0",
+      onclick: () => choose(e.key), onkeydown: (ev) => { if (ev.key === "Enter") choose(e.key); } },
+      h("td", { title: `Started ${when(e.started)}` }, when(e.finished)),
+      h("td", { class: "num" }, h("div", { class: "qh-dur" }, secs(e.ms),
+        h("span", { class: `qh-bar ${level}`, "aria-hidden": "true" }, h("span", { style: { width: `${Math.max(3, (e.ms / max) * 100)}%` } })))),
+      h("td", {}, e.user ?? "–"),
+      h("td", { class: e.database ? "" : "null" }, e.database ?? "–"),
+      h("td", {}, e.category ?? "–"),
+      h("td", { class: "num" }, e.rows == null ? "–" : fmt.number(e.rows)),
+      h("td", {}, e.ok ? h("span", { class: "s2-badge ok" }, "OK") : h("span", { class: "s2-badge err", title: e.error_code ?? "" }, "Failed")),
+      h("td", { class: "sql", title: e.sql }, e.sql)));
+  }
+  fill(listEl, h("div", { class: "s2-table-wrap qh-list" },
+    h("table", { class: "s2-table qh-table" },
+      h("thead", {}, h("tr", {}, sortHead("finished", "Finished"), sortHead("ms", "Duration", true), h("th", {}, "User"), h("th", {}, "Database"),
+        h("th", {}, "Type"), sortHead("rows", "Rows", true), h("th", {}, "Status"), h("th", {}, "Query"))),
+      body)),
+    rows.length > 1000 ? h("div", { class: "s2-small s2-faint", style: { marginTop: "4px" } }, `Showing the first 1,000 of ${fmt.number(rows.length)}; narrow the filters to see the rest.`) : null);
+}
+
+// ---------------------------------------------------------------- detail + tuning
+const detailEl = h("section", { class: "s2-card qh-detail", "aria-label": "Selected query" });
+
+async function choose(key) {
+  state.selected = state.selected === key ? null : key;
+  render();
+  if (state.selected) {
+    // Start Claude in the background now, so Ask Claude doesn't wait for it to start.
+    assistantInfo().then((info) => { if (info.available && !state.warmed) { state.warmed = true; S2.callTool("query_history_assistant_warm", {}).catch(() => {}); } });
+  }
+  if (state.selected && !state.detail[key]) {
+    state.detail[key] = { loading: true };
+    renderDetail();
+    try { state.detail[key] = { event: (await S2.callTool("query_history_event", { key })).event }; }
+    catch (err) { state.detail[key] = { error: err }; }
+    renderDetail();
+  }
+}
+
+async function tune(key) {
+  state.tuning[key] = { loading: true };
+  renderDetail();
+  try { state.tuning[key] = { result: await S2.callTool("query_history_tuning", { key }) }; }
+  catch (err) { state.tuning[key] = { error: err }; }
+  renderDetail();
+  reportContext();
+}
+
+function copy(text) {
+  navigator.clipboard?.writeText(text).then(() => S2.toast("Copied", "ok"), () => S2.toast("Couldn't copy", "err"));
+}
+
+function chatPrompt(row, ev, tuning) {
+  const recs = tuning?.result?.recommendations?.map((r) => `- [${r.severity}] ${r.title}: ${r.detail}${r.sql ? `\n  ${r.sql}` : ""}`).join("\n");
+  const plan = tuning?.result?.explain?.lines?.join("\n");
+  return (`This SingleStore query ran ${secs(row.ms)} (user ${row.user}, database ${row.database ?? "none"}, ${row.ok ? "succeeded" : `failed: ${ev.error_message ?? row.error_code}`}, ${row.rows ?? "?"} rows). ` +
+    `How can it be made faster?\n\n${ev.query_text}` +
+    (recs ? `\n\nThe Query History app's analysis:\n${recs}` : "") + (plan ? `\n\nEXPLAIN:\n${plan}` : ""));
+}
+
+function renderDetail() {
+  const key = state.selected;
+  const row = state.data?.events.find((e) => e.key === key);
+  if (!key || !row) { detailEl.replaceChildren(); return; }
+  const d = state.detail[key] ?? {};
+  const ev = d.event;
+  const t = state.tuning[key];
+  const meta = [
+    ["Started", when(ev?.start_time ?? row.started)], ["Finished", when(row.finished)], ["Duration", secs(row.ms)],
+    ["User", row.user ?? "–"], ["Database", row.database ?? "–"], ["Type", row.category ?? "–"],
+    ["Rows", row.rows == null ? "–" : fmt.number(row.rows)], ["Resource pool", row.pool ?? "–"],
+    ["Connection", ev?.connection_id ?? "–"], ["Plan ID", row.plan_id ?? "–"],
+  ];
+  const r = t?.result;
+  fill(detailEl,
+    h("div", { style: { display: "flex", alignItems: "center", gap: "8px" } },
+      h("h2", {}, `${secs(row.ms)} query`),
+      row.ok ? h("span", { class: "s2-badge ok" }, "Succeeded") : h("span", { class: "s2-badge err" }, "Failed"),
+      h("span", { class: "s2-spacer" }),
+      h("button", { class: "s2-btn ghost", "aria-label": "Close details", onclick: () => { state.selected = null; render(); } }, "✕")),
+    h("dl", { class: "qh-meta" }, meta.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, String(v))])),
+    !row.ok && ev?.error_message ? h("div", { class: "s2-error", style: { marginBottom: "8px" } }, `${ev.error_code ?? ""} ${ev.error_message}`) : null,
+    d.loading ? h("div", { class: "s2-small s2-muted" }, h("span", { class: "s2-spinner" }), " Loading the full SQL…")
+      : d.error ? S2.errorBox(d.error)
+      : h("pre", { class: "s2-pre qh-sql" }, ev?.query_text ?? row.sql),
+    h("div", { class: "qh-actions" },
+      h("button", { class: "s2-btn primary", disabled: !ev || t?.loading, onclick: () => tune(key) },
+        t?.loading ? h("span", { class: "s2-spinner" }) : null, r ? "Analyze again" : "Get tuning recommendations"),
+      h("button", { class: "s2-btn", disabled: !ev, onclick: () => copy(ev.query_text ?? "") }, "Copy SQL"),
+      h("button", { class: "s2-btn", disabled: !ev || state.claude[key]?.running, title: "Claude looks at the query, the plan and the tables (read-only) and answers here",
+        onclick: () => askInApp(row, ev, t) }, "Ask Claude")),
+    claudeBox(key),
+    t?.loading ? h("div", { class: "s2-small s2-muted" }, "Analyzing: EXPLAIN, plan statistics and table design (EXPLAIN doesn't run the query)…") : null,
+    t?.error ? S2.errorBox(t.error) : null,
+    r ? h("div", {},
+      h("h2", { style: { marginTop: "6px" } }, "Recommendations"),
+      r.recommendations.map((rec) => h("div", { class: `qh-rec ${rec.severity}` },
+        h("div", { class: "t" }, h("span", { class: `s2-badge ${rec.severity === "high" ? "err" : rec.severity === "medium" ? "warn" : "info"}` },
+          rec.severity === "high" ? "High" : rec.severity === "medium" ? "Medium" : "Info"), rec.title),
+        h("p", {}, rec.detail),
+        rec.sql ? h("div", {}, h("pre", { class: "s2-pre" }, rec.sql),
+          h("button", { class: "s2-btn ghost", style: { marginTop: "4px" }, onclick: () => copy(rec.sql) }, "Copy")) : null)),
+      r.plan_note ? h("div", { class: "s2-small s2-faint", style: { marginTop: "8px" } }, r.plan_note) : null,
+      r.explain.lines.length ? h("details", { class: "qh-more" }, h("summary", {}, "EXPLAIN plan"), h("pre", { class: "s2-pre" }, r.explain.lines.join("\n")))
+        : r.explain.error ? h("div", { class: "s2-small s2-faint", style: { marginTop: "8px" } }, r.explain.error) : null,
+      r.plan ? h("details", { class: "qh-more" }, h("summary", {}, "Plan cache statistics"), planTable(r.plan)) : null,
+      r.tables.length ? h("details", { class: "qh-more" }, h("summary", {}, `Tables (${r.tables.length})`),
+        r.tables.map((tb) => h("div", { style: { marginTop: "6px" } },
+          h("strong", {}, `${tb.database}.${tb.table}`), " ",
+          tb.error ? h("span", { class: "s2-faint" }, tb.error)
+            : h("span", { class: "s2-faint" }, `${tb.reference ? "reference" : tb.rowstore ? "rowstore" : "columnstore"} · shard key ${tb.shard_key == null ? "none" : tb.shard_key === "" ? "() keyless" : `(${tb.shard_key})`} · sort key ${tb.sort_key == null ? "none" : tb.sort_key === "" ? "() unordered" : `(${tb.sort_key})`}`),
+          tb.ddl ? h("pre", { class: "s2-pre" }, tb.ddl) : null))) : null)
+      : null);
+}
+
+function planTable(p) {
+  const runs = Number(p.runs) || 1;
+  const rows = [
+    ["Runs in the plan cache", fmt.number(p.runs)], ["Average time", secs(Number(p.AVERAGE_EXEC_TIME) || 0)],
+    ["Average memory (max)", fmt.bytes(p.AVERAGE_MAX_MEMORY_USE ?? p.AVERAGE_MEMORY_USE)],
+    ["Average disk spilling", fmt.bytes(p.AVERAGE_DISK_SPILLING_USE ?? 0)],
+    ["CPU time / run", secs((Number(p.CPU_TIME) || 0) / runs)],
+    ["Waiting on leaves / run", secs((Number(p.LEAFNETWORK_TIME) || 0) / runs)],
+    ["Queued / run", secs(((Number(p.WORKLOAD_MANAGEMENT_QUEUED_TIME) || 0) + (Number(p.RESOURCE_POOL_QUEUED_TIME) || 0)) / runs)],
+    ["Last run", when(p.LAST_EXECUTED)],
+  ];
+  return h("table", { class: "qh-kv" }, h("tbody", {}, rows.map(([k, v]) => h("tr", {}, h("td", {}, k), h("td", {}, v)))));
+}
+
+// ---------------------------------------------------------------- page
+function render() {
+  if (!state.data) {
+    root.replaceChildren(state.error ? S2.errorBox(state.error) : h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Reading the query history…"));
+    return;
+  }
+  const d = state.data;
+  const hist = d.history;
+  fill(root,
+    h("div", { class: "s2-header" },
+      h("div", {},
+        h("h1", { class: "s2-title" }, "Query History"),
+        h("div", { class: "s2-subtitle" }, hist.events
+          ? `${fmt.number(hist.events)} traced queries since ${when(hist.oldest)} · newest ${when(hist.newest)}${d.limited ? ` · showing the latest ${fmt.number(d.limit)}` : ""}`
+          : "Query history is empty")),
+      h("span", { class: "s2-spacer" }),
+      h("label", { class: "qh-field", title: `Refresh every ${REFRESH_MS / 1000} s` },
+        h("input", { type: "checkbox", checked: state.auto, onchange: (e) => setAuto(e.target.checked) }), "Auto-refresh"),
+      h("button", { class: "s2-btn", onclick: () => refresh(), disabled: state.loading }, state.loading ? h("span", { class: "s2-spinner" }) : null, "Refresh"),
+      S2.openInBrowserButton("query_history", () => ({ min_seconds: state.minSeconds, ...(state.hours ? { hours: Number(state.hours) } : {}), ...(state.tab === "advisor" ? { tab: "advisor" } : {}) })),
+      S2.fullscreenButton()),
+    state.error ? h("div", { class: "s2-error", style: { marginBottom: "10px" } }, `Refresh failed: ${state.error.message}`) : null,
+    h("div", { class: "qh-tabs", role: "tablist" },
+      [["queries", "Queries"], ["advisor", "Advisor"]].map(([k, label]) => h("button", { role: "tab", "aria-selected": String(state.tab === k),
+        onclick: () => setTab(k) }, label))),
+    state.tab === "advisor" ? advisorEl : [
+      filters(),
+      h("div", { id: "qh-stats" }),
+      h("div", { class: `qh-main${state.selected ? " with-detail" : ""}` }, listEl, state.selected ? detailEl : null)]);
+  if (state.tab === "advisor") renderAdvisor();
+  else { renderList(); renderDetail(); }
+}
+
+function setTab(tab) {
+  state.tab = tab;
+  render();
+  if (tab === "advisor" && !state.advisor.data && !state.advisor.loading) loadAdvisor(false);
+}
+
+// ---------------------------------------------------------------- advisor (whole history)
+const advisorEl = h("div");
+const PRIO = { high: ["err", "High"], medium: ["warn", "Medium"], low: ["plain", "Low"], ok: ["ok", "OK"] };
+const KIND = { sort: "Sort key", shard: "Shard key", reference: "Reference table", index: "Index", stats: "Statistics" };
+
+async function loadAdvisor(refresh) {
+  state.advisor.loading = true;
+  state.advisor.error = null;
+  renderAdvisor();
+  try { state.advisor.data = await S2.callTool("query_history_advisor", { refresh }); }
+  catch (err) { state.advisor.error = err; }
+  state.advisor.loading = false;
+  renderAdvisor();
+  reportContext();
+}
+
+function colChips(label, cols) {
+  if (!cols?.length) return null;
+  return h("div", { class: "qh-chips" }, h("span", { class: "s2-faint" }, label),
+    cols.slice(0, 5).map((c) => h("span", { class: "qh-chip", title: `${c.queries} queries · ${secs(c.ms)}${c.kinds ? ` · ${c.kinds.join(", ")}` : ""}` },
+      `${c.column} ×${c.queries}`)));
+}
+
+function renderAdvisor() {
+  if (state.tab !== "advisor") return;
+  const a = state.advisor;
+  const d = a.data;
+  const head = h("div", { class: "qh-adv-meta" },
+    d ? `${fmt.number(d.analyzed)} distinct queries analyzed (from ${fmt.number(d.events)} history events) in ${d.seconds} s` +
+      `${d.explain_failed ? ` · ${d.explain_failed} couldn't be explained (e.g. tables that no longer exist)` : ""}` +
+      `${d.skipped ? ` · ${d.skipped} smaller ones skipped` : ""}${d.cached ? " · from the last analysis" : ""}`
+      : "Every distinct query in the history is EXPLAINed (compiled, not run) to see which columns it filters, joins and groups on.",
+    h("span", { class: "s2-spacer" }),
+    h("button", { class: "s2-btn", disabled: a.loading, onclick: () => loadAdvisor(true) },
+      a.loading ? h("span", { class: "s2-spinner" }) : null, d ? "Analyze again" : "Analyze history"));
+  if (a.loading && !d) { fill(advisorEl, head, h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Analyzing the query history…")); return; }
+  if (a.error) { fill(advisorEl, head, S2.errorBox(a.error)); return; }
+  if (!d) { fill(advisorEl, head); return; }
+
+  const w = d.workload;
+  const work = (w.big_results.length || w.select_star.length || w.failures.length) ? h("section", { class: "s2-card qh-adv-work" },
+    h("h2", {}, "Workload"),
+    h("ul", { style: { margin: 0, paddingLeft: "18px" } },
+      w.big_results.length ? h("li", {}, `${w.big_results.length} quer${w.big_results.length === 1 ? "y returns" : "ies return"} over a million rows to the client, e.g. `,
+        h("code", {}, w.big_results[0].sql.slice(0, 90)), ` (${fmt.number(w.big_results[0].rows)} rows, ${secs(w.big_results[0].ms)}). Filter or aggregate in the database instead.`) : null,
+      w.select_star.length ? h("li", {}, `${w.select_star.length} large SELECT * quer${w.select_star.length === 1 ? "y" : "ies"}: list only the columns needed (columnstore reads only those).`) : null,
+      w.failures.slice(0, 5).map((f) => h("li", {}, h("strong", {}, `${fmt.number(f.count)}× ${f.error_code}`), " — e.g. ", h("code", {}, f.sample.slice(0, 110)))))) : null;
+
+  const cards = d.tables.map((t) => h("section", { class: "s2-card qh-adv-table" },
+    h("div", { style: { display: "flex", alignItems: "center", gap: "6px" } },
+      h("h3", {}, t.table), h("span", { class: "s2-spacer" }),
+      h("span", { class: `s2-badge ${PRIO[t.priority][0]}` }, PRIO[t.priority][1])),
+    h("div", { class: "qh-adv-sub" },
+      `${t.rows != null ? `${fmt.number(t.rows)} rows · ` : ""}${t.storage} · shard key ${t.shard_key == null ? "none" : t.shard_key.length ? `(${t.shard_key.join(", ")})` : "() keyless"}` +
+      ` · sort key ${t.sort_key == null || !t.sort_key.length ? "none" : `(${t.sort_key.join(", ")})`} · ${t.queries} quer${t.queries === 1 ? "y" : "ies"}, ${secs(t.ms)}`),
+    colChips("Filtered on", t.filters), colChips("Joined on", t.joins), colChips("Grouped by", t.groups),
+    t.recommendations.length ? t.recommendations.map((r) => h("div", { class: `qh-rec ${r.priority === "high" ? "high" : r.priority === "medium" ? "medium" : r.priority}` },
+      h("div", { class: "t" }, h("span", { class: `s2-badge ${PRIO[r.priority][0]}` }, KIND[r.kind] ?? r.kind), r.title),
+      h("p", {}, r.detail),
+      r.sql ? [h("pre", { class: "s2-pre" }, r.sql), h("button", { class: "s2-btn ghost", style: { marginTop: "4px" }, onclick: () => copy(r.sql) }, "Copy")] : null))
+      : h("div", { class: "s2-small s2-faint" }, "No changes suggested for this table."),
+    t.examples.length ? h("details", { class: "qh-more" }, h("summary", {}, "Example queries"),
+      t.examples.map((x) => h("div", { style: { margin: "4px 0" } }, h("span", { class: "s2-faint" }, `${x.runs}× · ${secs(x.ms)} `), h("code", { class: "s2-mono" }, x.sql)))) : null));
+  fill(advisorEl, head, work,
+    d.tables.length ? h("div", { class: "qh-adv-grid" }, cards) : h("div", { class: "s2-empty" }, "No user tables in the analyzed queries."),
+    h("div", { class: "s2-small s2-faint", style: { marginTop: "10px" } },
+      "Changing a shard or sort key means rebuilding the table: the suggested statements build a copy next to it. Review them, test with your queries, then swap the names."));
+}
+
+function reportContext() {
+  const rows = filtered().slice(0, 8);
+  const sel = state.data?.events.find((e) => e.key === state.selected);
+  const recs = sel && state.tuning[sel.key]?.result?.recommendations;
+  S2.updateModelContext(`User is viewing the Query History (queries ≥ ${state.minSeconds} s${state.hours ? `, last ${state.hours} h` : ""}):\n` +
+    rows.map((e) => `${secs(e.ms)} ${e.user}@${e.database ?? "-"} ${e.ok ? "" : "FAILED "}${e.sql.slice(0, 120)}`).join("\n") +
+    (sel ? `\nSelected: ${secs(sel.ms)} ${sel.sql.slice(0, 300)}` : "") +
+    (recs ? `\nRecommendations: ${recs.map((r) => r.title).join("; ")}` : ""));
+}
+
+async function refresh() {
+  if (state.loading) return;
+  state.loading = true;
+  render();
+  try {
+    state.data = await S2.callTool("query_history_data", { min_ms: Math.round(state.minSeconds * 1000), ...(state.hours ? { hours: Number(state.hours) } : {}) });
+    state.error = null;
+    if (state.selected && !state.data.events.some((e) => e.key === state.selected)) state.selected = null;
+  } catch (e) { state.error = e; }
+  finally { state.loading = false; render(); reportContext(); }
+}
+
+function setAuto(on) {
+  state.auto = on;
+  clearInterval(state.timer);
+  state.timer = on ? setInterval(() => { if (!S2.isHidden()) refresh(); }, REFRESH_MS) : null;
+}
+
+S2.onDisplayModeChange = () => { if (state.data) render(); };
+await S2.connect({
+  name: "singlestore-query-history",
+  onToolInput(args) {
+    if (args?.min_seconds) state.minSeconds = Math.max(1, Number(args.min_seconds));
+    if (args?.hours) state.hours = String(args.hours);
+  },
+  onToolResult(result) {
+    try {
+      state.data = S2.resultData(result);
+      state.minSeconds = Math.max(1, (state.data.min_ms ?? 1000) / 1000);
+      state.hours = state.data.hours ? String(state.data.hours) : "";
+      if (state.data.advisor) state.advisor.data = state.data.advisor;
+    } catch (e) { state.error = e; }
+    if (state.data?.tab === "advisor") setTab("advisor");
+    else render();
+    reportContext();
+  },
+  onToolCancelled() {
+    if (!state.data) root.replaceChildren(h("div", { class: "s2-empty" }, "Cancelled."));
+  },
+});
+</script>
+</body>
+</html>
