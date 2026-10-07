@@ -5,6 +5,25 @@ const X = globalThis.McpExtApps;
 const S2 = (globalThis.S2 = {});
 
 S2.app = null;
+
+// An uncaught error in an app shows as a banner in the page, not a blank view (apps run in sandboxed
+// frames whose console the user can't see). Errors from the host connection itself are left alone.
+function showPageError(err) {
+  const msg = String(err?.stack || err?.message || err || "Unknown error");
+  if (/ProtocolError|Method not found/.test(msg) && !S2.app) return;
+  let box = document.getElementById("s2-page-error");
+  if (!box) {
+    box = document.createElement("div");
+    box.id = "s2-page-error";
+    box.setAttribute("role", "alert");
+    box.style.cssText = "position:fixed;left:8px;right:8px;bottom:8px;z-index:9999;background:#fff1f0;color:#a40e26;" +
+      "border:1px solid #ffb3b8;border-radius:6px;padding:8px 10px;font:12px/1.4 system-ui,sans-serif;white-space:pre-wrap;max-height:40vh;overflow:auto";
+    (document.body || document.documentElement).append(box);
+  }
+  box.textContent = `This view hit an error (build ${S2.build}): ${msg.slice(0, 1200)}`;
+}
+window.addEventListener("error", (e) => showPageError(e.error ?? e.message));
+window.addEventListener("unhandledrejection", (e) => showPageError(e.reason));
 // Short hash of this page's build (see _core.build_page); shown in tooltips.
 S2.build = document.querySelector('meta[name="s2-build"]')?.content ?? "dev";
 
