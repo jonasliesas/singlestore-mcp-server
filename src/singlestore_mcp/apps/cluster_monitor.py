@@ -170,7 +170,8 @@ def collect(include_internal: bool = False) -> dict[str, Any]:
             # Leaf-side fan-out of system-view reads, including this monitor's own.
             " AND NOT (USER = 'distributed' AND DB = 'information_schema')"
             " ORDER BY TIME DESC LIMIT 200",
-            (f"%{_MARKER}%",),
+            # This server's own statements (this monitor, the alert checks, …) all start with "/* s2-".
+            ("%/* s2-%",),
         ),
         lambda: _query(
             "SELECT COUNT(*) AS n FROM information_schema.MV_PROCESSLIST WHERE COMMAND = 'Sleep' AND USER <> 'distributed'"

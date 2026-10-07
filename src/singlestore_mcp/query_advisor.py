@@ -139,7 +139,8 @@ def _history() -> list[dict[str, Any]]:
         f"{MARKER} SELECT DETAILS::$query_text AS q, DETAILS::$context_database AS db, DETAILS::%duration_ms AS ms,"
         " DETAILS::%success AS ok, DETAILS::%row_count AS row_count, DETAILS::$error_code AS error_code"
         " FROM information_schema.MV_TRACE_EVENTS WHERE EVENT_TYPE = 'Query_completion'"
-        f" AND (DETAILS::$query_text IS NULL OR DETAILS::$query_text NOT LIKE '%{MARKER}%')"
+        # Every statement this server sends for itself starts with a "/* s2-… */" marker.
+        " AND (DETAILS::$query_text IS NULL OR DETAILS::$query_text NOT LIKE '%/* s2-%')"
     )[1]
 
 
@@ -371,8 +372,10 @@ def _recommend(name: str, p: dict[str, Any], t: dict[str, Any]) -> dict[str, Any
     big = (rows or 0) >= 1_000_000
     sort_key, shard_key = t.get("sort_key"), t.get("shard_key")
 
-    def add(kind: str, priority: str, title: str, detail: str, sql: str | None = None) -> None:
-        recs.append({"kind": kind, "priority": priority, "title": title, "detail": detail, **({"sql": sql} if sql else {})})
+    def add(kind: str, priority: str, title: str, detail: str, sql: str | None = None, new_table: str | None = None) -> None:
+        recs.append({"kind": kind, "priority": priority, "title": title, "detail": detail, **({"sql": sql} if sql else {}),
+                     # A rebuilt copy: the Advisor's "Compare with new table" checks it against the original.
+                     **({"new_table": new_table} if sql and new_table else {})})
 
     # --- sort key (columnstore): the columns most query time filters on
     if not t.get("rowstore") and filters:
@@ -401,7 +404,7 @@ def _recommend(name: str, p: dict[str, Any], t: dict[str, Any]) -> dict[str, Any
                 + "With this sort key SingleStore skips the segments outside the filter."
                 + ("" if big else " The table is small, so the gain is small."),
                 rebuild_sql(t.get("ddl"), dbname, table, "_sorted", sort=cols,
-                            current_shard=shard_key, current_sort=sort_key))
+                            current_shard=shard_key, current_sort=sort_key), f"{table}_sorted")
     elif not t.get("rowstore") and big and p["ms"]:
         add("sort", "low", "No filters on this table",
             "The analyzed queries read this table without filtering it, so a sort key wouldn't help them. "
@@ -439,7 +442,7 @@ def _recommend(name: str, p: dict[str, Any], t: dict[str, Any]) -> dict[str, Any
                    f" Check first that it has many distinct values (no statistics yet): "
                    f"SELECT APPROX_COUNT_DISTINCT({quote_identifier(top['column'])}) FROM {fq};"),
                 rebuild_sql(t.get("ddl"), dbname, table, "_resharded", shard=[top["column"]],
-                            current_shard=shard_key, current_sort=sort_key))
+                            current_shard=shard_key, current_sort=sort_key), f"{table}_resharded")
 
     # --- reference table: small and broadcast
     if p["moves"]["broadcast_queries"] and not t.get("reference") and rows is not None and rows <= 1_000_000:
@@ -447,7 +450,7 @@ def _recommend(name: str, p: dict[str, Any], t: dict[str, Any]) -> dict[str, Any
             f"It's small ({_fmt_rows(rows)} rows) and gets broadcast to every leaf in {p['moves']['broadcast_queries']} "
             f"quer{'y' if p['moves']['broadcast_queries'] == 1 else 'ies'}. A reference table has a full copy on every "
             "leaf, so joins with it never move data.",
-            rebuild_sql(t.get("ddl"), dbname, table, "_ref", reference=True, current_sort=sort_key))
+            rebuild_sql(t.get("ddl"), dbname, table, "_ref", reference=True, current_sort=sort_key), f"{table}_ref")
 
     # --- rowstore: index on the filtered columns
     if t.get("rowstore") and filters:

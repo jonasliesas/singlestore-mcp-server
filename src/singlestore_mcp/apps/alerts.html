@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alerts</title>
+<!--S2:HEAD-->
+<style>
+  .al-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 10px; }
+  .al-seg { display: inline-flex; border: 1px solid var(--s2-border); border-radius: var(--s2-radius-sm); overflow: hidden; }
+  .al-seg button { border: 0; background: transparent; padding: 3px 10px; font-size: var(--s2-fs-xs); cursor: pointer; color: var(--s2-text-2); }
+  .al-seg button + button { border-left: 1px solid var(--s2-border); }
+  .al-seg button[aria-pressed="true"] { background: var(--s2-bg-3); color: var(--s2-text); font-weight: var(--font-weight-semibold, 600); }
+  .al-main { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 12px; align-items: start; }
+  @media (max-width: 900px) { .al-main { grid-template-columns: minmax(0, 1fr); } }
+  .al-list { display: flex; flex-direction: column; gap: 8px; }
+  .al-item { border: 1px solid var(--s2-border-2); border-left-width: 4px; border-radius: var(--s2-radius-sm); padding: 8px 10px; background: var(--s2-bg); }
+  .al-item.critical { border-left-color: var(--s2-err); }
+  .al-item.warning { border-left-color: var(--s2-warn); }
+  .al-item.info { border-left-color: var(--s2-info); }
+  .al-item.acked { opacity: .72; }
+  .al-item .t { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-weight: var(--font-weight-semibold, 600); font-size: var(--s2-fs-sm, 13px); }
+  .al-item .d { margin: 4px 0 0; font-size: var(--s2-fs-xs); color: var(--s2-text-2); line-height: 1.5; word-break: break-word; }
+  .al-item .m { margin-top: 4px; font-size: 11px; color: var(--s2-text-3); font-variant-numeric: tabular-nums; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .al-item details { margin-top: 4px; font-size: var(--s2-fs-xs); }
+  .al-item details summary { cursor: pointer; color: var(--s2-text-2); }
+  .al-item pre { max-height: 200px; overflow: auto; white-space: pre-wrap; word-break: break-word; margin: 4px 0 0; }
+  .al-rules { padding: 10px 12px; }
+  .al-rules h2 { font-size: var(--font-text-md-size, 14px); margin: 0 0 8px; }
+  .al-rule { display: flex; align-items: center; gap: 8px; font-size: var(--s2-fs-xs); padding: 5px 0; border-top: 1px solid var(--s2-border-2); }
+  .al-rule:first-of-type { border-top: 0; }
+  .al-rule label { flex: 1; display: flex; gap: 6px; align-items: flex-start; cursor: pointer; line-height: 1.4; }
+  .al-rule input[type="number"] { width: 64px; padding: 2px 5px; font-size: var(--s2-fs-xs); }
+  .al-note { font-size: 11px; color: var(--s2-text-3); margin-top: 8px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div id="root"><div class="s2-empty"><span class="s2-spinner"></span> Loading alerts…</div></div>
+<script type="module">
+const { h, fmt } = S2;
+const root = document.getElementById("root");
+const REFRESH_MS = 15000;
+const fill = (el, ...kids) => el.replaceChildren(...kids.flat().filter((k) => k != null && k !== false));
+const state = { data: null, error: null, show: "open", busy: false, draft: {}, saving: false };
+const SEV = { critical: ["err", "Critical"], warning: ["warn", "Warning"], info: ["info", "Info"] };
+const ago = (t) => (t ? S2.fmt.relTime(t) : "–");
+const clock = (t) => (t ? new Date(t * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "–");
+
+async function load() {
+  try { state.data = await S2.callTool("alerts_data", {}); state.error = null; }
+  catch (e) { state.error = e; }
+  render();
+}
+
+async function act(tool, args, message) {
+  state.busy = true; render();
+  try {
+    const r = await S2.callTool(tool, args);
+    if (message) S2.toast(typeof message === "function" ? message(r) : message, "ok");
+    if (r.alerts) state.data = r; else await load();
+    // The workspace updates its rail badge at once.
+    if (S2.embedded()) window.parent.postMessage({ type: "s2-alerts-changed" }, "*");
+  } catch (e) { S2.toast(e.message, "err"); }
+  state.busy = false; render();
+}
+
+function visible() {
+  const all = state.data?.alerts ?? [];
+  if (state.show === "open") return all.filter((a) => !a.acked);
+  if (state.show === "active") return all.filter((a) => a.active);
+  return all;
+}
+
+function alertItem(a) {
+  const [cls, label] = SEV[a.severity] ?? ["info", a.severity ?? "Info"];
+  const go = (view) => (S2.embedded() ? h("button", { class: "s2-btn ghost", onclick: () => S2.openView(view) },
+    view === "cluster" ? "Open Cluster Monitor" : view === "pipelines" ? "Open Pipelines" : "Open Query History") : null);
+  const link = a.kind === "long_running" || a.kind === "memory" || a.kind === "disk" || a.kind === "node_offline" ? go("cluster")
+    : a.kind === "pipeline" || a.kind === "pipeline_state" ? go("pipelines") : a.kind === "slow_query" || a.kind === "failed_query" ? go("history") : null;
+  return h("div", { class: `al-item ${a.severity ?? "info"}${a.acked ? " acked" : ""}` },
+    h("div", { class: "t" },
+      h("span", { class: `s2-badge ${cls}` }, label), a.title,
+      a.active ? h("span", { class: "s2-badge warn plain", title: "Still the case at the last check" }, "active") : a.ended ? h("span", { class: "s2-badge plain" }, "ended") : null,
+      a.count > 1 ? h("span", { class: "s2-badge plain", title: "Times seen" }, `×${fmt.number(a.count)}`) : null,
+      h("span", { class: "s2-spacer" }),
+      a.acked ? h("span", { class: "s2-small s2-faint" }, "acknowledged")
+        : h("button", { class: "s2-btn ghost", disabled: state.busy, onclick: () => act("alerts_ack", { ids: [a.id] }) }, "Acknowledge")),
+    a.detail ? h("p", { class: "d" }, a.detail) : null,
+    h("div", { class: "m" },
+      h("span", { title: clock(a.first_seen) }, `first ${ago(a.first_seen)}`),
+      h("span", { title: clock(a.last_seen) }, `last ${ago(a.last_seen)}`),
+      a.ended ? h("span", {}, `ended ${ago(a.ended)}`) : null,
+      a.unwatched ? h("span", { title: "The active connection was switched to another cluster" }, "not watched any more") : null,
+      a.source ? h("span", { title: "Cluster (host:port of the connection)" }, a.source) : null,
+      link),
+    a.sql ? h("details", {}, h("summary", {}, "SQL"), h("pre", { class: "s2-pre" }, a.sql),
+      h("button", { class: "s2-btn ghost", onclick: () => navigator.clipboard?.writeText(a.sql).then(() => S2.toast("Copied", "ok")) }, "Copy")) : null);
+}
+
+function rulesPanel() {
+  const d = state.data;
+  const draft = state.draft;
+  const val = (name, field) => draft[name]?.[field] ?? d.rules[name][field];
+  const set = (name, field, v) => { draft[name] = { ...(draft[name] ?? {}), [field]: v }; renderRulesDirty(); };
+  const rows = Object.entries(d.rules).map(([name, r]) => h("div", { class: "al-rule" },
+    h("label", {}, h("input", { type: "checkbox", checked: Boolean(val(name, "enabled")), onchange: (e) => set(name, "enabled", e.target.checked) }), r.label),
+    "seconds" in r ? [h("input", { class: "s2-input", type: "number", min: "1", value: val(name, "seconds"), "aria-label": `${r.label} (seconds)`,
+      onchange: (e) => set(name, "seconds", Number(e.target.value)) }), "s"]
+      : "percent" in r ? [h("input", { class: "s2-input", type: "number", min: "1", max: "100", value: val(name, "percent"), "aria-label": `${r.label} (percent)`,
+        onchange: (e) => set(name, "percent", Number(e.target.value)) }), "%"] : null));
+  const interval = state.draftSettings?.interval_s ?? d.settings.interval_s;
+  return h("section", { class: "s2-card al-rules", "aria-label": "Alert rules" },
+    h("h2", {}, "Rules"),
+    rows,
+    h("div", { class: "al-rule" }, h("label", {}, "Check every"),
+      h("input", { class: "s2-input", type: "number", min: "15", value: interval, "aria-label": "Check interval in seconds",
+        onchange: (e) => { state.draftSettings = { ...(state.draftSettings ?? {}), interval_s: Number(e.target.value) }; renderRulesDirty(); } }), "s"),
+    h("div", { class: "al-rule" },
+      h("label", { title: "The workspace shows a browser notification for new alerts, if your browser allows it" },
+        h("input", { type: "checkbox", checked: Boolean(d.settings.notify), onchange: (e) => act("alerts_update", { settings: { notify: e.target.checked } },
+          e.target.checked ? "The workspace will notify you (allow notifications when the browser asks)" : "Notifications off") }),
+        "Notify me (browser notification from the workspace)")),
+    h("div", { style: { display: "flex", gap: "6px", marginTop: "8px" } },
+      h("button", { id: "al-save", class: "s2-btn primary", disabled: state.saving || !dirty(), onclick: saveRules }, "Save rules"),
+      h("button", { class: "s2-btn ghost", disabled: !dirty(), onclick: () => { state.draft = {}; state.draftSettings = null; render(); } }, "Discard")),
+    h("div", { class: "al-note" },
+      "The server checks the cluster in the background while it runs (read-only queries on information_schema, a few in parallel). ",
+      "A long-running query or a full disk stays one alert (first / last seen, count) until it ends. Rules and history are kept in alerts.json in the server's data folder."));
+}
+const dirty = () => Object.keys(state.draft).length > 0 || state.draftSettings != null;
+function renderRulesDirty() { const b = document.getElementById("al-save"); if (b) b.disabled = state.saving || !dirty(); }
+async function saveRules() {
+  state.saving = true;
+  try {
+    await S2.callTool("alerts_update", { rules: state.draft, ...(state.draftSettings ? { settings: state.draftSettings } : {}) });
+    state.draft = {}; state.draftSettings = null;
+    S2.toast("Rules saved", "ok");
+    await load();
+  } catch (e) { S2.toast(e.message, "err"); }
+  state.saving = false; render();
+}
+
+function render() {
+  const d = state.data;
+  if (!d) { fill(root, state.error ? S2.errorBox(state.error) : h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Loading alerts…")); return; }
+  const st = d.status;
+  const list = visible();
+  const confirmClear = async (e) => { if (await S2.confirmInline(e.currentTarget, "Remove every alert from the list?", "Clear all")) act("alerts_clear", {}, (r) => `${r.cleared} cleared`); };
+  fill(root,
+    h("div", { class: "s2-header" },
+      h("div", {},
+        h("h1", { class: "s2-title" }, "Alerts"),
+        h("div", { class: "s2-subtitle" },
+          `${fmt.number(d.unacknowledged)} unacknowledged · ${fmt.number(d.active)} active · checked every ${d.settings.interval_s} s` +
+          (st.last_check ? ` · last check ${ago(st.last_check)} (${st.last_seconds} s)` : st.running ? " · first check shortly" : " · checker not running in this server"))),
+      h("span", { class: "s2-spacer" }),
+      h("button", { class: "s2-btn", disabled: state.busy, onclick: () => act("alerts_check_now", {}, "Checked") }, state.busy ? h("span", { class: "s2-spinner" }) : null, "Check now"),
+      S2.openInBrowserButton("alerts", () => ({})),
+      S2.fullscreenButton()),
+    state.error ? h("div", { class: "s2-error", style: { marginBottom: "10px" } }, `Refresh failed: ${state.error.message}`) : null,
+    st.last_error ? h("div", { class: "s2-error", style: { marginBottom: "10px" } }, `Last check: ${st.last_error}`) : null,
+    h("div", { class: "al-main" },
+      h("div", {},
+        h("div", { class: "al-bar" },
+          h("span", { class: "al-seg", role: "group", "aria-label": "Show" },
+            [["open", `Unacknowledged (${d.unacknowledged})`], ["active", `Active (${d.active})`], ["all", `All (${d.total})`]].map(([k, label]) =>
+              h("button", { "aria-pressed": String(state.show === k), onclick: () => { state.show = k; render(); } }, label))),
+          h("span", { class: "s2-spacer" }),
+          h("button", { class: "s2-btn", disabled: state.busy || !d.unacknowledged, onclick: () => act("alerts_ack", { all: true }, (r) => `${r.acknowledged} acknowledged`) }, "Acknowledge all"),
+          h("button", { class: "s2-btn ghost", disabled: state.busy || !d.total, onclick: () => act("alerts_clear", { acknowledged_only: true }, (r) => `${r.cleared} cleared`) }, "Clear acknowledged"),
+          h("button", { class: "s2-btn ghost danger", disabled: state.busy || !d.total, onclick: confirmClear }, "Clear all")),
+        list.length ? h("div", { class: "al-list" }, list.slice(0, 200).map(alertItem))
+          : h("div", { class: "s2-empty" }, state.show === "open" ? "No unacknowledged alerts." : state.show === "active" ? "Nothing is active right now." : "No alerts yet.")),
+      rulesPanel()));
+  S2.updateModelContext(`User is viewing Alerts: ${d.unacknowledged} unacknowledged, ${d.active} active.\n` +
+    (d.alerts ?? []).slice(0, 8).map((a) => `[${a.severity}] ${a.title}${a.active ? " (active)" : ""}${a.acked ? "" : " (unacknowledged)"}: ${String(a.detail ?? "").slice(0, 140)}`).join("\n"));
+}
+
+setInterval(() => { if (!S2.isHidden() && !state.busy && !dirty()) load(); }, REFRESH_MS);
+S2.onDisplayModeChange = () => { if (state.data) render(); };
+await S2.connect({
+  name: "singlestore-alerts",
+  onToolResult(result) {
+    try { state.data = S2.resultData(result); } catch (e) { state.error = e; }
+    render();
+  },
+  onToolCancelled() { if (!state.data) root.replaceChildren(h("div", { class: "s2-empty" }, "Cancelled.")); },
+});
+window.addEventListener("s2:connection-changed", () => load());
+</script>
+</body>
+</html>

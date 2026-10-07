@@ -76,6 +76,34 @@
   .qh-adv-work code { font-family: var(--s2-mono); font-size: 11px; color: var(--s2-text-2); }
   .qh-kv { width: 100%; font-size: var(--s2-fs-xs); }
   .qh-kv td:first-child { color: var(--s2-text-3); padding-right: 12px; white-space: nowrap; }
+  .qh-shape-chip { display: inline-flex; align-items: center; gap: 6px; font-size: var(--s2-fs-xs); background: var(--s2-info-bg); color: var(--s2-info);
+    border-radius: 10px; padding: 2px 4px 2px 10px; }
+  .qh-shape-chip button { border: 0; background: none; color: inherit; cursor: pointer; font-size: 13px; padding: 0 4px; }
+  .qh-tr-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 10px; margin-bottom: 12px; }
+  .qh-chart { padding: 10px 12px 6px; }
+  .qh-chart h3 { font-size: var(--s2-fs-sm, 13px); margin: 0; font-weight: var(--font-weight-semibold, 600); display: flex; gap: 8px; align-items: baseline; }
+  .qh-chart h3 .s2-faint { font-weight: normal; font-size: 11px; }
+  .qh-chart svg { display: block; width: 100%; overflow: visible; }
+  .qh-chart .grid { stroke: var(--s2-border-2); stroke-width: 1; shape-rendering: crispEdges; }
+  .qh-chart .base { stroke: var(--s2-border); stroke-width: 1; shape-rendering: crispEdges; }
+  .qh-chart .tick { fill: var(--s2-text-3); font-size: 11px; font-variant-numeric: tabular-nums; font-family: var(--s2-font); }
+  .qh-chart .bar { fill: var(--series-1, var(--s2-info)); }
+  .qh-chart .bar.err { fill: var(--s2-err); }
+  .qh-chart .bar:hover, .qh-chart .bar.on { opacity: .75; }
+  .qh-chart .line { fill: none; stroke: var(--series-2, var(--s2-warn)); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .qh-chart .dot { fill: var(--series-2, var(--s2-warn)); stroke: var(--s2-bg); stroke-width: 1.5; }
+  .qh-chart .hint { font-size: 11px; color: var(--s2-text-2); min-height: 16px; font-variant-numeric: tabular-nums; }
+  .qh-tr-table tbody tr { cursor: pointer; }
+  .qh-tr-table td.sql { font-family: var(--s2-mono); max-width: 520px; }
+  .qh-cmp { padding: 10px 12px; margin-bottom: 12px; border-color: var(--s2-info); }
+  .qh-cmp h2 { font-size: var(--font-text-md-size, 14px); margin: 0; }
+  .qh-cmp .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; font-size: var(--s2-fs-xs); }
+  .qh-cmp .s2-input { width: auto; padding: 3px 7px; font-size: var(--s2-fs-xs); }
+  .qh-cmp td.sql { font-family: var(--s2-mono); max-width: 460px; }
+  .qh-cmp .faster { color: var(--s2-ok); font-weight: 600; }
+  .qh-cmp .slower { color: var(--s2-err); font-weight: 600; }
+  .qh-prog { height: 4px; background: var(--s2-bg-3); border-radius: 2px; overflow: hidden; margin: 6px 0; }
+  .qh-prog > span { display: block; height: 100%; background: var(--s2-info); transition: width .3s; }
 </style>
 </head>
 <body>
@@ -92,7 +120,10 @@ const fill = (el, ...kids) => el.replaceChildren(...kids.flat().filter((k) => k 
 const state = {
   data: null, error: null, loading: false,
   minSeconds: 1, hours: "",
-  user: "", database: "", status: "", category: "", search: "",
+  user: "", database: "", status: "", category: "", origin: "", search: "",
+  shape: null,           // {shape, sample}: list filtered to one query shape (from Trends)
+  trends: { loading: false, error: null, data: null, days: 30, hourly: false },
+  cmp: null,             // before/after check (Advisor)
   sort: { key: "finished", dir: -1 },
   selected: null,        // event key
   detail: {},            // key -> {event, loading, error}
@@ -209,6 +240,8 @@ function filtered() {
     (!state.database || (e.database ?? "") === state.database) &&
     (!state.status || (state.status === "ok") === e.ok) &&
     (!state.category || e.category === state.category) &&
+    (!state.origin || (state.origin === "-" ? !e.origin : e.origin === state.origin)) &&
+    (!state.shape || e.shape === state.shape.shape) &&
     (!q || e.sql.toLowerCase().includes(q) || (e.error_code ?? "").toLowerCase().includes(q)));
   const { key, dir } = state.sort;
   const val = (e) => key === "finished" ? (toLocal(e.finished)?.getTime() ?? 0) : key === "rows" ? (e.rows ?? -1) : e.ms;
@@ -237,8 +270,13 @@ function filters() {
     select("Database", state.database, [["", "All"], ...uniq((e) => e.database).map((x) => [x, x])], (v) => { state.database = v; render(); }),
     select("Status", state.status, [["", "All"], ["ok", "Succeeded"], ["failed", "Failed"]], (v) => { state.status = v; render(); }),
     select("Type", state.category, [["", "All"], ...uniq((e) => e.category).map((x) => [x, x])], (v) => { state.category = v; render(); }),
+    h("span", { title: "Probable origin, guessed from the SQL: SAS CAS (binary_serialization / PARALLELISM_LEVEL=\"SEGMENT\"), SAS in-database (_dm…, _flw…, SASTMP… tables)" },
+      select("Source", state.origin, [["", "All"], ...uniq((e) => e.origin).map((x) => [x, x]), ["-", "Other"]], (v) => { state.origin = v; render(); })),
     h("label", { class: "qh-field" }, h("input", { class: "s2-input", type: "search", placeholder: "Search SQL or error…", value: state.search,
-      "aria-label": "Search SQL", oninput: (e) => { state.search = e.target.value; renderList(); } })));
+      "aria-label": "Search SQL", oninput: (e) => { state.search = e.target.value; renderList(); } })),
+    state.shape ? h("span", { class: "qh-shape-chip", title: state.shape.sample },
+      `Query shape: ${state.shape.sample.slice(0, 48)}${state.shape.sample.length > 48 ? "…" : ""}`,
+      h("button", { "aria-label": "Show all query shapes", onclick: () => { state.shape = null; render(); } }, "✕")) : null);
 }
 
 function setMin(s) {
@@ -266,7 +304,9 @@ function renderList() {
   const statsSlot = document.getElementById("qh-stats");
   if (statsSlot) statsSlot.replaceChildren(stats(rows));
   if (!rows.length) {
-    listEl.replaceChildren(h("div", { class: "s2-empty" }, state.data.enabled_hint ?? `No queries ran ${fmt.duration(state.minSeconds)} or longer${state.hours ? " in this period" : ""} with these filters.`));
+    listEl.replaceChildren(h("div", { class: "s2-empty" }, state.data.enabled_hint ?? (state.shape
+      ? "None of this query shape's runs are in the cluster's query history any more (it's a ring buffer that forgets); the Trends tab keeps a summary."
+      : null) ?? `No queries ran ${fmt.duration(state.minSeconds)} or longer${state.hours ? " in this period" : ""} with these filters.`));
     return;
   }
   const max = Math.max(...rows.map((e) => e.ms));
@@ -284,6 +324,7 @@ function renderList() {
       h("td", {}, e.user ?? "–"),
       h("td", { class: e.database ? "" : "null" }, e.database ?? "–"),
       h("td", {}, e.category ?? "–"),
+      h("td", { class: e.origin ? "" : "null" }, e.origin ?? ""),
       h("td", { class: "num" }, e.rows == null ? "–" : fmt.number(e.rows)),
       h("td", {}, e.ok ? h("span", { class: "s2-badge ok" }, "OK") : h("span", { class: "s2-badge err", title: e.error_code ?? "" }, "Failed")),
       h("td", { class: "sql", title: e.sql }, e.sql)));
@@ -291,7 +332,7 @@ function renderList() {
   fill(listEl, h("div", { class: "s2-table-wrap qh-list" },
     h("table", { class: "s2-table qh-table" },
       h("thead", {}, h("tr", {}, sortHead("finished", "Finished"), sortHead("ms", "Duration", true), h("th", {}, "User"), h("th", {}, "Database"),
-        h("th", {}, "Type"), sortHead("rows", "Rows", true), h("th", {}, "Status"), h("th", {}, "Query"))),
+        h("th", {}, "Type"), h("th", { title: "Probable origin, guessed from the SQL" }, "Source"), sortHead("rows", "Rows", true), h("th", {}, "Status"), h("th", {}, "Query"))),
       body)),
     rows.length > 1000 ? h("div", { class: "s2-small s2-faint", style: { marginTop: "4px" } }, `Showing the first 1,000 of ${fmt.number(rows.length)}; narrow the filters to see the rest.`) : null);
 }
@@ -347,6 +388,7 @@ function renderDetail() {
     ["Started", when(ev?.start_time ?? row.started)], ["Finished", when(row.finished)], ["Duration", secs(row.ms)],
     ["User", row.user ?? "–"], ["Database", row.database ?? "–"], ["Type", row.category ?? "–"],
     ["Rows", row.rows == null ? "–" : fmt.number(row.rows)], ["Resource pool", row.pool ?? "–"],
+    ...(row.origin ? [["Source", `${row.origin} (probably)`]] : []),
     ["Connection", ev?.connection_id ?? "–"], ["Plan ID", row.plan_id ?? "–"],
   ];
   const r = t?.result;
@@ -424,17 +466,18 @@ function render() {
       h("label", { class: "qh-field", title: `Refresh every ${REFRESH_MS / 1000} s` },
         h("input", { type: "checkbox", checked: state.auto, onchange: (e) => setAuto(e.target.checked) }), "Auto-refresh"),
       h("button", { class: "s2-btn", onclick: () => refresh(), disabled: state.loading }, state.loading ? h("span", { class: "s2-spinner" }) : null, "Refresh"),
-      S2.openInBrowserButton("query_history", () => ({ min_seconds: state.minSeconds, ...(state.hours ? { hours: Number(state.hours) } : {}), ...(state.tab === "advisor" ? { tab: "advisor" } : {}) })),
+      S2.openInBrowserButton("query_history", () => ({ min_seconds: state.minSeconds, ...(state.hours ? { hours: Number(state.hours) } : {}), ...(state.tab !== "queries" ? { tab: state.tab } : {}) })),
       S2.fullscreenButton()),
     state.error ? h("div", { class: "s2-error", style: { marginBottom: "10px" } }, `Refresh failed: ${state.error.message}`) : null,
     h("div", { class: "qh-tabs", role: "tablist" },
-      [["queries", "Queries"], ["advisor", "Advisor"]].map(([k, label]) => h("button", { role: "tab", "aria-selected": String(state.tab === k),
+      [["queries", "Queries"], ["trends", "Trends"], ["advisor", "Advisor"]].map(([k, label]) => h("button", { role: "tab", "aria-selected": String(state.tab === k),
         onclick: () => setTab(k) }, label))),
-    state.tab === "advisor" ? advisorEl : [
+    state.tab === "advisor" ? advisorEl : state.tab === "trends" ? trendsEl : [
       filters(),
       h("div", { id: "qh-stats" }),
       h("div", { class: `qh-main${state.selected ? " with-detail" : ""}` }, listEl, state.selected ? detailEl : null)]);
   if (state.tab === "advisor") renderAdvisor();
+  else if (state.tab === "trends") renderTrends();
   else { renderList(); renderDetail(); }
 }
 
@@ -442,6 +485,154 @@ function setTab(tab) {
   state.tab = tab;
   render();
   if (tab === "advisor" && !state.advisor.data && !state.advisor.loading) loadAdvisor(false);
+  if (tab === "trends" && !state.trends.data && !state.trends.loading) loadTrends();
+}
+
+// ---------------------------------------------------------------- trends (local durable copy of the history)
+const trendsEl = h("div");
+const TREND_DAYS = [[7, "7 days"], [30, "30 days"], [90, "90 days"], [365, "1 year"]];
+const SVGNS = "http://www.w3.org/2000/svg";
+function svgEl(tag, attrs = {}, text) {
+  const el = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  if (text != null) el.textContent = text;
+  return el;
+}
+function niceCeil(value) {
+  const raw = Math.max(value, 1e-9) / 4;
+  const p = 10 ** Math.floor(Math.log10(raw));
+  const f = raw / p;
+  const step = (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * p;
+  return { max: Math.ceil(value / step) * step || step, step };
+}
+
+async function loadTrends() {
+  const t = state.trends;
+  t.loading = true; t.error = null;
+  renderTrends();
+  try { t.data = await S2.callTool("query_history_trends", { days: t.days }); }
+  catch (err) { t.error = err; }
+  t.loading = false;
+  renderTrends();
+  reportContext();
+}
+
+// Every bucket in the period, including empty ones. Keys are cluster-local "YYYY-MM-DD" / "YYYY-MM-DD HH".
+function bucketSeries(points, hourly, now, days) {
+  const pad = (n) => String(n).padStart(2, "0");
+  const [d, tm] = String(now).split(" ");
+  const [Y, M, D] = d.split("-").map(Number);
+  const H = Number((tm ?? "0").slice(0, 2));
+  const by = Object.fromEntries((points ?? []).map((p) => [p.t, p]));
+  const out = [];
+  const n = hourly ? 48 : days;
+  for (let i = n - 1; i >= 0; i--) {
+    const dt = hourly ? new Date(Y, M - 1, D, H - i) : new Date(Y, M - 1, D - i);
+    const key = `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}${hourly ? ` ${pad(dt.getHours())}` : ""}`;
+    out.push(by[key] ?? { t: key, queries: 0, total_ms: 0, failed: 0, p95_ms: 0 });
+  }
+  return out;
+}
+const bucketLabel = (key, hourly) => {
+  const [d, hh] = key.split(" ");
+  const [Y, M, D] = d.split("-").map(Number);
+  const dt = new Date(Y, M - 1, D, Number(hh ?? 0));
+  return hourly ? dt.toLocaleString([], { weekday: "short", hour: "2-digit" }) : dt.toLocaleDateString([], { month: "short", day: "numeric" });
+};
+
+function trendChart(title, note, series, value, format, kind, hourly) {
+  const W = 420, H = 150, m = { l: 46, r: 8, t: 8, b: 22 };
+  const pw = W - m.l - m.r, ph = H - m.t - m.b;
+  const vals = series.map(value);
+  const { max, step } = niceCeil(Math.max(...vals, 0) * 1.1 || 1);
+  const y = (v) => m.t + ph - (v / max) * ph;
+  const bw = pw / series.length;
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": `${title}: peak ${format(Math.max(...vals, 0))}` });
+  for (let v = 0; v <= max + 1e-9; v += step) {
+    svg.append(svgEl("line", { class: v === 0 ? "base" : "grid", x1: m.l, x2: m.l + pw, y1: y(v), y2: y(v) }));
+    svg.append(svgEl("text", { class: "tick", x: m.l - 6, y: y(v) + 4, "text-anchor": "end" }, format(v)));
+  }
+  const every = Math.ceil(series.length / 6);
+  series.forEach((p, i) => {
+    if (i % every === 0) svg.append(svgEl("text", { class: "tick", x: m.l + bw * (i + 0.5), y: H - 6, "text-anchor": "middle" }, bucketLabel(p.t, hourly)));
+  });
+  const hint = h("div", { class: "hint" }, " ");
+  const show = (i) => { const p = series[i]; hint.textContent = `${bucketLabel(p.t, hourly)}: ${format(vals[i])}${kind !== "line" ? "" : ` · ${fmt.number(p.queries)} queries`}`; };
+  if (kind === "line") {
+    let d = "";
+    series.forEach((p, i) => { if (p.queries) d += `${d ? "L" : "M"}${(m.l + bw * (i + 0.5)).toFixed(1)},${y(vals[i]).toFixed(1)}`; });
+    svg.append(svgEl("path", { class: "line", d }));
+  }
+  series.forEach((p, i) => {
+    const x = m.l + bw * i;
+    if (kind === "line") {
+      if (p.queries) svg.append(svgEl("circle", { class: "dot", cx: x + bw / 2, cy: y(vals[i]), r: series.length > 60 ? 1.5 : 3 }));
+      const hit = svgEl("rect", { x, y: m.t, width: bw, height: ph, fill: "transparent" });
+      hit.addEventListener("pointerenter", () => show(i));
+      svg.append(hit);
+    } else {
+      const bar = svgEl("rect", { class: `bar${kind === "err" ? " err" : ""}`, x: x + bw * 0.12, width: Math.max(1, bw * 0.76),
+        y: y(vals[i]), height: Math.max(0, m.t + ph - y(vals[i])) });
+      const hit = svgEl("rect", { x, y: m.t, width: bw, height: ph, fill: "transparent" });
+      hit.addEventListener("pointerenter", () => { show(i); bar.classList.add("on"); });
+      hit.addEventListener("pointerleave", () => bar.classList.remove("on"));
+      svg.append(bar, hit);
+    }
+  });
+  svg.addEventListener("pointerleave", () => { hint.textContent = " "; });
+  return h("section", { class: "s2-card qh-chart" }, h("h3", {}, title, note ? h("span", { class: "s2-faint" }, note) : null), svg, hint);
+}
+
+function showShape(s) {
+  state.shape = { shape: s.shape, sample: s.sample ?? "" };
+  state.minSeconds = 1; state.hours = "";
+  state.user = state.database = state.status = state.category = state.origin = state.search = "";
+  state.tab = "queries";
+  refresh();
+}
+
+function renderTrends() {
+  if (state.tab !== "trends") return;
+  const t = state.trends;
+  const d = t.data;
+  const controls = h("div", { class: "qh-filters" },
+    h("span", { class: "qh-field" }, "Period",
+      h("span", { class: "qh-seg", role: "group", "aria-label": "Period" },
+        TREND_DAYS.map(([v, label]) => h("button", { "aria-pressed": String(!t.hourly && t.days === v), onclick: () => { t.hourly = false; if (t.days !== v) { t.days = v; loadTrends(); } else renderTrends(); } }, label)),
+        h("button", { "aria-pressed": String(t.hourly), onclick: () => { t.hourly = true; renderTrends(); } }, "48 h, hourly"))),
+    h("span", { class: "s2-spacer" }),
+    h("button", { class: "s2-btn", disabled: t.loading, onclick: () => loadTrends() }, t.loading ? h("span", { class: "s2-spinner" }) : null, "Refresh"));
+  if (t.loading && !d) { fill(trendsEl, controls, h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Reading the local history…")); return; }
+  if (t.error) { fill(trendsEl, controls, S2.errorBox(t.error)); return; }
+  if (!d) { fill(trendsEl, controls); return; }
+  const series = bucketSeries(t.hourly ? d.hourly : d.daily, t.hourly, d.now, d.days);
+  const per = t.hourly ? "per hour" : "per day";
+  const shapeRow = (s, cols) => h("tr", { tabindex: "0", title: "Show these runs in the Queries tab", onclick: () => showShape(s),
+    onkeydown: (ev) => { if (ev.key === "Enter") showShape(s); } }, cols, h("td", { class: "sql", title: s.sample }, s.sample));
+  fill(trendsEl, controls,
+    h("div", { class: "qh-adv-meta" },
+      d.stored ? `${fmt.number(d.stored)} runs kept locally since ${when(d.oldest)} (queries the cluster traced, ≥ 1 s), for ${d.source}.` : "Nothing stored yet.",
+      " The cluster's history is a ring buffer that forgets; this copy grows each time the history loads and with every Alerts check."),
+    h("div", { class: "qh-tr-grid" },
+      trendChart("Queries", per, series, (p) => p.queries, (v) => fmt.number(v), "bar", t.hourly),
+      trendChart("Total runtime", per, series, (p) => p.total_ms / 1000, (v) => fmt.duration(v), "bar", t.hourly),
+      trendChart("Failures", per, series, (p) => p.failed, (v) => fmt.number(v), "err", t.hourly),
+      trendChart("p95 duration", per, series, (p) => p.p95_ms / 1000, (v) => fmt.duration(v), "line", t.hourly)),
+    h("section", { class: "s2-card qh-adv-work" },
+      h("h2", {}, "Slower than before"),
+      h("div", { class: "s2-small s2-faint", style: { marginBottom: "6px" } }, "Per query shape: the median duration in the last 7 days against the 7 days before (at least 1.5× and 1 s slower). Click one to see its runs."),
+      d.slower.length ? h("div", { class: "s2-table-wrap" }, h("table", { class: "s2-table qh-tr-table" },
+        h("thead", {}, h("tr", {}, h("th", { class: "num" }, "Before"), h("th", { class: "num" }, "Last 7 days"), h("th", { class: "num" }, "Slower"), h("th", { class: "num" }, "Runs"), h("th", {}, "Query"))),
+        h("tbody", {}, d.slower.map((s) => shapeRow(s, [h("td", { class: "num" }, secs(s.before_ms)), h("td", { class: "num" }, secs(s.median_ms)),
+          h("td", { class: "num" }, h("span", { class: "s2-badge err plain" }, `${s.ratio}×`)), h("td", { class: "num", title: `${s.runs_before} runs the week before` }, `${s.runs} / ${s.runs_before}`)])))))
+        : h("div", { class: "s2-small s2-muted" }, "No query shape got markedly slower.")),
+    h("section", { class: "s2-card qh-adv-work" },
+      h("h2", {}, "New heavy queries"),
+      h("div", { class: "s2-small s2-faint", style: { marginBottom: "6px" } }, `Shapes first seen in the last 7 days with over a minute of runtime in total${d.oldest ? ` (the local copy starts ${when(d.oldest)})` : ""}.`),
+      d.new_heavy.length ? h("div", { class: "s2-table-wrap" }, h("table", { class: "s2-table qh-tr-table" },
+        h("thead", {}, h("tr", {}, h("th", { class: "num" }, "Median"), h("th", { class: "num" }, "Total"), h("th", { class: "num" }, "Runs"), h("th", {}, "Query"))),
+        h("tbody", {}, d.new_heavy.map((s) => shapeRow(s, [h("td", { class: "num" }, secs(s.median_ms)), h("td", { class: "num" }, secs(s.total_ms)), h("td", { class: "num" }, fmt.number(s.runs))])))))
+        : h("div", { class: "s2-small s2-muted" }, "No new heavy query shapes.")));
 }
 
 // ---------------------------------------------------------------- advisor (whole history)
@@ -503,14 +694,143 @@ function renderAdvisor() {
     t.recommendations.length ? t.recommendations.map((r) => h("div", { class: `qh-rec ${r.priority === "high" ? "high" : r.priority === "medium" ? "medium" : r.priority}` },
       h("div", { class: "t" }, h("span", { class: `s2-badge ${PRIO[r.priority][0]}` }, KIND[r.kind] ?? r.kind), r.title),
       h("p", {}, r.detail),
-      r.sql ? [h("pre", { class: "s2-pre" }, r.sql), h("button", { class: "s2-btn ghost", style: { marginTop: "4px" }, onclick: () => copy(r.sql) }, "Copy")] : null))
+      r.sql ? [h("pre", { class: "s2-pre" }, r.sql), h("button", { class: "s2-btn ghost", style: { marginTop: "4px" }, onclick: () => copy(r.sql) }, "Copy"),
+        r.new_table ? h("button", { class: "s2-btn ghost", style: { marginTop: "4px" }, title: "Once the copy is built: time the heaviest queries from the history on both tables",
+          onclick: () => openCompare(t.table, r.new_table) }, "Compare with new table") : null] : null))
       : h("div", { class: "s2-small s2-faint" }, "No changes suggested for this table."),
     t.examples.length ? h("details", { class: "qh-more" }, h("summary", {}, "Example queries"),
       t.examples.map((x) => h("div", { style: { margin: "4px 0" } }, h("span", { class: "s2-faint" }, `${x.runs}× · ${secs(x.ms)} `), h("code", { class: "s2-mono" }, x.sql)))) : null));
-  fill(advisorEl, head, work,
+  fill(advisorEl, head, cmpEl, work,
     d.tables.length ? h("div", { class: "qh-adv-grid" }, cards) : h("div", { class: "s2-empty" }, "No user tables in the analyzed queries."),
     h("div", { class: "s2-small s2-faint", style: { marginTop: "10px" } },
       "Changing a shard or sort key means rebuilding the table: the suggested statements build a copy next to it. Review them, test with your queries, then swap the names."));
+}
+
+// ---------------------------------------------------------------- before/after check (Advisor)
+// Times the heaviest read-only queries from the history on the original table and on the rebuilt copy.
+const cmpEl = h("div");
+
+function openCompare(table, newTable) {
+  state.cmp = { table, newTable, runs: 3, timeout: 120, cand: null, loading: false, error: null, selected: new Set(), job: null };
+  renderCompare();
+  cmpEl.scrollIntoView({ behavior: "smooth", block: "start" });
+  loadCandidates();
+}
+
+async function loadCandidates() {
+  const c = state.cmp;
+  c.loading = true; c.error = null; c.cand = null; c.job = null;
+  renderCompare();
+  try {
+    c.cand = await S2.callTool("query_history_compare_candidates", { table: c.table, new_table: c.newTable });
+    c.selected = new Set(c.cand.queries.slice(0, 3).map((q) => q.shape));
+  } catch (err) { c.error = err; }
+  c.loading = false;
+  renderCompare();
+}
+
+async function startCompare() {
+  const c = state.cmp;
+  try {
+    c.job = await S2.callTool("query_history_compare_start", { table: c.table, new_table: c.newTable, shapes: [...c.selected], runs: c.runs, timeout_s: c.timeout });
+  } catch (err) { S2.toast(err.message, "err"); return; }
+  renderCompare();
+  const poll = async () => {
+    if (state.cmp !== c || !c.job) return;
+    try { c.job = await S2.callTool("query_history_compare_status", { job_id: c.job.id }); }
+    catch (err) { c.error = err; renderCompare(); return; }
+    renderCompare();
+    if (c.job.state === "running") setTimeout(poll, 1500);
+    else reportContext();
+  };
+  setTimeout(poll, 1000);
+}
+
+function speedCell(q) {
+  if (q.speedup == null) return h("td", { class: "num" }, "–");
+  const s = q.speedup;
+  const cls = s >= 1.1 ? "faster" : s <= 0.9 ? "slower" : "";
+  return h("td", { class: `num ${cls}`, title: "Old median / new median. Differences under ~10% (or a few ms) are noise." },
+    s >= 1 ? `${s}× faster` : `${(1 / s).toFixed(2)}× slower`);
+}
+
+function renderCompare() {
+  const c = state.cmp;
+  if (!c) { cmpEl.replaceChildren(); return; }
+  const job = c.job;
+  const running = job?.state === "running";
+  const nameInput = h("input", { class: "s2-input s2-mono", value: c.newTable, size: 32, "aria-label": "New table name", disabled: running,
+    onchange: (e) => { c.newTable = e.target.value.trim(); } });
+  const head = h("div", { style: { display: "flex", alignItems: "center", gap: "8px" } },
+    h("h2", {}, `Before / after: ${c.table}`), h("span", { class: "s2-spacer" }),
+    h("button", { class: "s2-btn ghost", "aria-label": "Close the comparison", disabled: running, onclick: () => { state.cmp = null; renderCompare(); } }, "✕"));
+  const nameRow = h("div", { class: "row" }, "New table", nameInput,
+    h("button", { class: "s2-btn", disabled: c.loading || running, onclick: () => { c.newTable = nameInput.value.trim(); loadCandidates(); } },
+      c.loading ? h("span", { class: "s2-spinner" }) : null, "Find queries"));
+  const parts = [head, nameRow];
+  if (c.error) parts.push(S2.errorBox(c.error));
+  const cand = c.cand;
+  if (cand && !cand.exists) parts.push(h("div", { class: "s2-error" }, cand.message));
+  else if (cand && !cand.queries.length) parts.push(h("div", { class: "s2-small s2-muted" }, cand.message));
+  else if (cand && !job) {
+    const picked = cand.queries.filter((q) => c.selected.has(q.shape));
+    const est = picked.reduce((a, q) => a + q.median_ms, 0) * 2 * c.runs;
+    parts.push(
+      h("div", { class: "s2-small s2-faint" }, `The heaviest read-only queries (SELECT / WITH) from the history that read ${cand.table}, with the table name replaced by ${cand.new_table}. Pick the ones to time:`),
+      h("div", { class: "s2-table-wrap", style: { maxHeight: "300px", marginTop: "6px" } }, h("table", { class: "s2-table" },
+        h("thead", {}, h("tr", {}, h("th", {}, ""), h("th", { class: "num" }, "Runs"), h("th", { class: "num" }, "Median"), h("th", { class: "num" }, "Total"), h("th", {}, "Query"))),
+        h("tbody", {}, cand.queries.map((q) => h("tr", {},
+          h("td", {}, h("input", { type: "checkbox", checked: c.selected.has(q.shape), "aria-label": "Include this query",
+            onchange: (e) => { e.target.checked ? c.selected.add(q.shape) : c.selected.delete(q.shape); renderCompare(); } })),
+          h("td", { class: "num" }, fmt.number(q.runs)), h("td", { class: "num" }, secs(q.median_ms)), h("td", { class: "num" }, secs(q.total_ms)),
+          h("td", { class: "sql", title: q.sql },
+            h("details", {}, h("summary", {}, q.sql.slice(0, 110)),
+              h("div", { class: "s2-small s2-faint" }, `Original (${q.database ?? "no database"}):`), h("pre", { class: "s2-pre" }, q.sql),
+              h("div", { class: "s2-small s2-faint" }, `On the new table (${q.replacements} name${q.replacements === 1 ? "" : "s"} replaced):`), h("pre", { class: "s2-pre" }, q.new_sql)))))))),
+      h("div", { class: "row" },
+        "Runs per table", h("input", { class: "s2-input", type: "number", min: "1", max: "10", value: c.runs, style: { width: "56px" }, "aria-label": "Runs per table",
+          onchange: (e) => { c.runs = Math.max(1, Math.min(10, Number(e.target.value) || 3)); renderCompare(); } }),
+        "Timeout per query", h("input", { class: "s2-input", type: "number", min: "5", value: c.timeout, style: { width: "64px" }, "aria-label": "Timeout per query in seconds",
+          onchange: (e) => { c.timeout = Math.max(5, Number(e.target.value) || 120); } }), "s",
+        h("span", { class: "s2-spacer" }),
+        h("button", { class: "s2-btn primary", disabled: !picked.length, onclick: async (e) => {
+          const ok = await S2.confirmInline(e.currentTarget,
+            `Run ${picked.length} quer${picked.length === 1 ? "y" : "ies"} ${c.runs}× on ${cand.table} and ${c.runs}× on ${cand.new_table} (${2 * c.runs * picked.length} runs, about ${fmt.duration(est / 1000)} from the history)? They really run on the cluster.`,
+            "Run them");
+          if (ok) startCompare();
+        } }, `Run comparison (${2 * c.runs * picked.length} runs)`)),
+      h("div", { class: "s2-small s2-faint" },
+        "Each query runs as SELECT COUNT(*) AS n FROM (<query>) AS _q, so no rows are sent to the client and the row counts show whether both tables give the same answer. ",
+        "The database may skip columns that are only returned, so this times the filtering, joining and grouping rather than the output. ",
+        "Old and new alternate; times are server time (wall time minus one network round trip). A query over the timeout is cancelled (KILL QUERY)."));
+  }
+  if (job) {
+    const pct = job.total_runs ? Math.round((job.done_runs / job.total_runs) * 100) : 0;
+    parts.push(
+      h("div", { class: "row" },
+        running ? [h("span", { class: "s2-spinner" }), ` Running ${job.done_runs} of ${job.total_runs} · ${fmt.duration(job.elapsed_s)}`]
+          : `${job.state === "done" ? "Finished" : job.state === "cancelled" ? "Stopped" : "Failed"}: ${job.done_runs} of ${job.total_runs} runs in ${fmt.duration(job.elapsed_s)}`,
+        h("span", { class: "s2-spacer" }),
+        running ? h("button", { class: "s2-btn danger", disabled: job.cancelling, onclick: async () => {
+          try { c.job = await S2.callTool("query_history_compare_cancel", { job_id: job.id }); } catch (err) { S2.toast(err.message, "err"); }
+          renderCompare(); } }, job.cancelling ? "Stopping…" : "Stop")
+          : h("button", { class: "s2-btn", onclick: () => { c.job = null; renderCompare(); } }, "New comparison")),
+      running ? h("div", { class: "qh-prog" }, h("span", { style: { width: `${pct}%` } })) : null,
+      job.error ? S2.errorBox(job.error) : null,
+      h("div", { class: "s2-table-wrap" }, h("table", { class: "s2-table" },
+        h("thead", {}, h("tr", {}, h("th", { class: "num" }, "Old (median)"), h("th", { class: "num" }, "New (median)"), h("th", { class: "num" }, "Speed-up"),
+          h("th", {}, "Rows"), h("th", {}, "Status"), h("th", {}, "Query"))),
+        h("tbody", {}, job.queries.map((q) => h("tr", {},
+          h("td", { class: "num", title: q.old.map((r) => r.ms != null ? `${r.ms} ms` : r.error).join(", ") }, q.old_median_ms == null ? "–" : secs(q.old_median_ms)),
+          h("td", { class: "num", title: q.new.map((r) => r.ms != null ? `${r.ms} ms` : r.error).join(", ") }, q.new_median_ms == null ? "–" : secs(q.new_median_ms)),
+          speedCell(q),
+          h("td", {}, q.rows_match == null ? "–" : q.rows_match ? h("span", { class: "s2-badge ok" }, `match (${fmt.number(q.old_rows)})`)
+            : h("span", { class: "s2-badge err", title: `old ${q.old_rows}, new ${q.new_rows}` }, "differ")),
+          h("td", {}, q.errors.length ? h("span", { class: "s2-badge err", title: q.errors.join("\n") }, q.errors[0].slice(0, 60))
+            : q.status === "running" ? h("span", {}, h("span", { class: "s2-spinner" }), ` ${q.current ?? ""}`) : q.status),
+          h("td", { class: "sql", title: q.sql }, q.sql.slice(0, 120))))))));
+  }
+  fill(cmpEl, h("section", { class: "s2-card qh-cmp", "aria-label": "Before/after comparison" }, parts));
 }
 
 function reportContext() {
@@ -520,7 +840,11 @@ function reportContext() {
   S2.updateModelContext(`User is viewing the Query History (queries ≥ ${state.minSeconds} s${state.hours ? `, last ${state.hours} h` : ""}):\n` +
     rows.map((e) => `${secs(e.ms)} ${e.user}@${e.database ?? "-"} ${e.ok ? "" : "FAILED "}${e.sql.slice(0, 120)}`).join("\n") +
     (sel ? `\nSelected: ${secs(sel.ms)} ${sel.sql.slice(0, 300)}` : "") +
-    (recs ? `\nRecommendations: ${recs.map((r) => r.title).join("; ")}` : ""));
+    (recs ? `\nRecommendations: ${recs.map((r) => r.title).join("; ")}` : "") +
+    (state.tab === "trends" && state.trends.data ? `\nTrends tab, slower than the week before: ${state.trends.data.slower.slice(0, 5)
+      .map((s) => `${secs(s.before_ms)} -> ${secs(s.median_ms)} (${s.runs} runs) ${s.sample.slice(0, 80)}`).join("; ") || "none"}` : "") +
+    (state.cmp?.job && state.cmp.job.state !== "running" ? `\nBefore/after ${state.cmp.job.table} vs ${state.cmp.job.new_table}: ${state.cmp.job.queries
+      .map((q) => `${q.old_median_ms ?? "?"} ms -> ${q.new_median_ms ?? "?"} ms${q.rows_match === false ? " (row counts differ)" : ""}`).join("; ")}` : ""));
 }
 
 async function refresh() {
@@ -555,7 +879,7 @@ await S2.connect({
       state.hours = state.data.hours ? String(state.data.hours) : "";
       if (state.data.advisor) state.advisor.data = state.data.advisor;
     } catch (e) { state.error = e; }
-    if (state.data?.tab === "advisor") setTab("advisor");
+    if (state.data?.tab === "advisor" || state.data?.tab === "trends") setTab(state.data.tab);
     else render();
     reportContext();
   },

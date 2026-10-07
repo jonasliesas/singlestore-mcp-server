@@ -156,7 +156,7 @@ def _splash(target: str) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Open the SingleStore Workspace in a browser window.")
     parser.add_argument("--database", help="database to start in")
-    parser.add_argument("--view", default="sql", choices=["sql", "notebook", "schema", "pipelines", "cluster", "history", "connections"])
+    parser.add_argument("--view", default="sql", choices=["sql", "notebook", "schema", "pipelines", "cluster", "history", "alerts", "connections"])
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--browser", action="store_true", help="open in the default browser instead of an Edge app window")
     parser.add_argument("--no-open", action="store_true", help="start the server and print the URL, without opening a window")
@@ -198,6 +198,9 @@ def main() -> None:
         if not opts.no_open:
             _open_window(_workspace_url(state, args), opts.browser)
     view.allow_shutdown = True
+    from . import alerts
+
+    alerts.start()  # background alert checks while the workspace server runs
     _state_file().write_text(json.dumps(state), encoding="utf-8")
     if opts.no_open:
         print(_workspace_url(state, args), flush=True)
@@ -213,6 +216,7 @@ def main() -> None:
             pass
         from . import assistant
 
+        alerts.stop(timeout=2.0)
         assistant._close_all()
 
 

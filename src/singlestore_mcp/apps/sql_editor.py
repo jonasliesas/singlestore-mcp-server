@@ -37,7 +37,7 @@ register_app(
 # The workspace shell: SQL editor plus the Schema, Pipelines and Cluster apps
 # as views behind a left-hand rail. sql_editor opens it.
 WORKSPACE_URI = "ui://singlestore/workspace.html"
-WORKSPACE_VIEWS = ("sql", "notebook", "schema", "pipelines", "cluster", "history", "connections")
+WORKSPACE_VIEWS = ("sql", "notebook", "schema", "pipelines", "cluster", "history", "alerts", "connections")
 register_app(
     WORKSPACE_URI,
     "workspace.html",
@@ -90,7 +90,7 @@ def sql_editor(
     Args:
         database: Database to start in (case-sensitive).
         sql: SQL to put in the editor (not run automatically).
-        view: View to show first: "sql" (default), "notebook", "schema", "pipelines", "cluster", "history" (Query History) or "connections".
+        view: View to show first: "sql" (default), "notebook", "schema", "pipelines", "cluster", "history" (Query History), "alerts" or "connections".
         table: For view="schema": table to pre-select in `database`.
     """
     if view not in WORKSPACE_VIEWS:
