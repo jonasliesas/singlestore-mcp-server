@@ -19,7 +19,7 @@ from typing import Any
 
 from mcp.types import CallToolResult, ToolAnnotations
 
-from .. import assistant, query_advisor
+from .. import assistant, history_store, query_advisor
 from ..db import db, quote_identifier
 from ._core import APP_ONLY, apps, jsonable, jsonable_rows, register_app, tool_result, with_browser_link
 
@@ -55,11 +55,12 @@ def collect(min_ms: int = MIN_RUNTIME_MS, hours: float | None = None, limit: int
     limit = max(1, min(_MAX_EVENTS, int(limit)))
     where = ["EVENT_TYPE = 'Query_completion'", "DETAILS::%%duration_ms >= %s",
              "(DETAILS::$query_text IS NULL OR DETAILS::$query_text NOT LIKE %s)"]
-    params: list[Any] = [min_ms, f"%{_MARKER}%"]
+    # Every statement this server sends for itself starts with a "/* s2-… */" marker: leave them all out.
+    params: list[Any] = [min_ms, f"%{history_store.MARKER_PREFIX}%"]
     if hours:
         where.append("TIME >= NOW() - INTERVAL %s SECOND")
         params.append(int(float(hours) * 3600))
-    rows, info, offset = db.parallel(
+    rows, info, offset, _synced = db.parallel(
         lambda: _query(
             "SELECT NODE_ID, NODE_START_EPOCH_S, EVENT_ID, TIME,"
             " DETAILS::%%duration_ms AS ms, DETAILS::$start_time AS started, DETAILS::$user_name AS user,"
@@ -77,6 +78,8 @@ def collect(min_ms: int = MIN_RUNTIME_MS, hours: float | None = None, limit: int
         ),
         # The cluster's clock offset from UTC, so the app can show times in the viewer's time zone.
         lambda: _query("SELECT TIMESTAMPDIFF(MINUTE, UTC_TIMESTAMP(), NOW()) AS offset_min"),
+        # Keep the local copy for the Trends tab up to date (only events newer than the last sync).
+        history_store.safe_sync,
     )
     events = [{
         "key": f"{r['NODE_ID']}:{r['NODE_START_EPOCH_S']}:{r['EVENT_ID']}",
@@ -93,6 +96,8 @@ def collect(min_ms: int = MIN_RUNTIME_MS, hours: float | None = None, limit: int
         "pool": r["pool"],
         "sql": " ".join((r["sql_head"] or "").split()),
         "sql_truncated": (r["sql_len"] or 0) > _LIST_SQL_CHARS,
+        "shape": history_store.shape_of(r["sql_head"]),
+        "origin": history_store.origin(r["sql_head"]),
     } for r in rows]
     total = info[0] if info else {}
     return {
@@ -483,12 +488,15 @@ def query_history(min_seconds: float = 1.0, hours: float | None = None, tab: str
     Args:
         min_seconds: Only queries that ran at least this long (minimum 1).
         hours: Only the last N hours (default: everything in the history).
-        tab: "queries" (default) or "advisor" (table-design advice from the whole history).
+        tab: "queries" (default), "trends" (daily / hourly load, failures and p95 from a local copy of the history
+            kept across the cluster's ring buffer, plus queries that got slower) or "advisor" (table-design advice
+            from the whole history).
 
     The result includes ``browser_url``: post it as a clickable link right under the app.
     """
-    data = {**collect(int(max(1.0, min_seconds) * 1000), hours), "tab": "advisor" if tab == "advisor" else "queries"}
-    args = {"min_seconds": min_seconds, **({"hours": hours} if hours else {}), **({"tab": "advisor"} if tab == "advisor" else {})}
+    tab = tab if tab in ("advisor", "trends") else "queries"
+    data = {**collect(int(max(1.0, min_seconds) * 1000), hours), "tab": tab}
+    args = {"min_seconds": min_seconds, **({"hours": hours} if hours else {}), **({"tab": tab} if tab != "queries" else {})}
     return tool_result(with_browser_link(_summary(data), data, "query_history", args), data)
 
 

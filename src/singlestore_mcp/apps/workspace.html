@@ -43,6 +43,9 @@
   .ws-loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--s2-text-2); font-size: var(--s2-fs-xs); }
   .ws-loading[hidden] { display: none; }
   .ws-loading .s2-error { max-width: 420px; }
+  .ws-badge { position: absolute; top: 1px; right: 7px; min-width: 16px; height: 16px; padding: 0 4px; box-sizing: border-box; border-radius: 8px;
+    background: var(--s2-err); color: #fff; font-size: 10px; font-weight: 600; line-height: 16px; text-align: center; pointer-events: none; }
+  .ws-badge[hidden] { display: none; }
 </style>
 </head>
 <body>
@@ -69,6 +72,7 @@ const ICONS = {
   pipelines: '<rect x="3" y="3.5" width="7" height="6" rx="1.5"/><rect x="14" y="14.5" width="7" height="6" rx="1.5"/><path d="M6.5 9.5v2.5a3 3 0 0 0 3 3h4.5"/><polyline points="12 13 14 15 12 17"/>',
   cluster: '<rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><line x1="7" y1="7.5" x2="7.01" y2="7.5"/><line x1="7" y1="16.5" x2="7.01" y2="16.5"/><line x1="11" y1="7.5" x2="17" y2="7.5"/><line x1="11" y1="16.5" x2="17" y2="16.5"/>',
   history: '<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/>',
+  alerts: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
   connections: '<path d="M9 7V3"/><path d="M15 7V3"/><path d="M6 7h12v4a6 6 0 0 1-12 0z"/><path d="M12 17v4"/>',
   browser: '<path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
   fullscreen: '<path d="M4 9V4h5"/><path d="M20 9V4h-5"/><path d="M4 15v5h5"/><path d="M20 15v5h-5"/>',
@@ -81,6 +85,7 @@ const VIEWS = {
   connections: { label: "Connect", title: "Connections", uri: "ui://singlestore/connections.html", tool: "connections_window", bottom: true },
   cluster: { label: "Cluster", title: "Cluster Monitor", uri: "ui://singlestore/cluster-monitor.html", tool: "cluster_monitor" },
   history: { label: "History", title: "Query History", uri: "ui://singlestore/query-history.html", tool: "query_history" },
+  alerts: { label: "Alerts", title: "Alerts", uri: "ui://singlestore/alerts.html", tool: "alerts" },
 };
 
 // Notebook tabs: each is its own view keyed "notebook", "notebook:2", … with its own kernel.
@@ -122,6 +127,45 @@ function buildShell() {
   }
   mainEl.append(tabsEl);
   root.replaceChildren(h("div", { class: "ws" }, rail, mainEl));
+  startAlertBadge();
+}
+
+// ---------------------------------------------------------------- alerts badge
+// The server checks the cluster in the background; this only reads its in-memory
+// state (no cluster queries), so polling it is cheap.
+const ALERT_POLL_MS = 30000;
+const alertBadge = h("span", { class: "ws-badge", hidden: true, "aria-hidden": "true" });
+const alertSeen = new Set();
+let alertFirstPoll = true, alertNotify = false;
+function startAlertBadge() {
+  railButtons.alerts?.append(alertBadge);
+  pollAlerts();
+  setInterval(() => { if (!document.hidden) pollAlerts(); }, ALERT_POLL_MS);
+  // Asking for notification permission needs a click in this (top) page; the Alerts view's
+  // "Notify me" switch only records the wish.
+  document.addEventListener("pointerdown", () => {
+    if (alertNotify && "Notification" in window && Notification.permission === "default") Notification.requestPermission().catch(() => {});
+  });
+}
+async function pollAlerts() {
+  let b;
+  try { b = await S2.callTool("alerts_badge", {}); } catch { return; }
+  const n = Number(b.unacknowledged) || 0;
+  alertBadge.hidden = n === 0;
+  alertBadge.textContent = n > 99 ? "99+" : String(n);
+  const btn = railButtons.alerts;
+  if (btn) btn.title = btn.ariaLabel = n ? `Alerts · ${n} unacknowledged` : "Alerts";
+  alertNotify = Boolean(b.notify);
+  const fresh = (b.newest_unacked ?? []).filter((a) => !alertSeen.has(a.id));
+  for (const a of b.newest_unacked ?? []) alertSeen.add(a.id);
+  if (!alertFirstPoll && fresh.length && alertNotify && "Notification" in window && Notification.permission === "granted") {
+    try {
+      const note = new Notification(fresh.length === 1 ? `SingleStore alert: ${fresh[0].title}` : `${fresh.length} new SingleStore alerts`,
+        { body: fresh.map((a) => a.title).join("\n"), tag: "s2-alerts" });
+      note.onclick = () => { window.focus(); openView("alerts"); note.close(); };
+    } catch { /* not allowed in this frame */ }
+  }
+  alertFirstPoll = false;
 }
 
 // ---------------------------------------------------------------- views
@@ -282,6 +326,7 @@ window.addEventListener("message", async (ev) => {
   const msg = ev.data;
   if (msg?.type === "s2-open-view") { openView(msg.view, msg); return; }
   if (msg?.type === "s2-connection-changed") { connectionChanged(msg.name); return; }
+  if (msg?.type === "s2-alerts-changed") { pollAlerts(); return; }
   if (msg?.type === "s2-title") { ws.titles[view] = { title: String(msg.title || "untitled"), dirty: Boolean(msg.dirty), path: msg.path }; renderTabs(); return; }
   if (msg?.jsonrpc !== "2.0" || !msg.method) return;
   const { id, method, params } = msg;

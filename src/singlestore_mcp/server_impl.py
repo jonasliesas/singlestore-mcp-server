@@ -489,7 +489,13 @@ def run_stdio() -> None:
     """Serve MCP over stdio in this process (the supervisor's child, or unsupervised)."""
     # Connect in the background once the MCP handshake is under way.
     threading.Timer(1.0, db.warm).start()
-    mcp.run(transport="stdio")
+    from . import alerts
+
+    alerts.start()  # background alert checks while the server runs (SINGLESTORE_MCP_ALERTS=0 turns them off)
+    try:
+        mcp.run(transport="stdio")
+    finally:
+        alerts.stop(timeout=2.0)
 
 
 if __name__ == "__main__":
