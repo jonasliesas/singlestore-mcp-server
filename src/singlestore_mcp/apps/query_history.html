@@ -104,6 +104,8 @@
   .qh-cmp .slower { color: var(--s2-err); font-weight: 600; }
   .qh-prog { height: 4px; background: var(--s2-bg-3); border-radius: 2px; overflow: hidden; margin: 6px 0; }
   .qh-prog > span { display: block; height: 100%; background: var(--s2-info); transition: width .3s; }
+  .qh-chart rect.pick { cursor: pointer; }
+  .qh-chart rect.bar.picked { fill: var(--s2-text); }
 </style>
 </head>
 <body>
@@ -552,7 +554,7 @@ const bucketLabel = (key, hourly) => {
   return hourly ? dt.toLocaleString([], { weekday: "short", hour: "2-digit" }) : dt.toLocaleDateString([], { month: "short", day: "numeric" });
 };
 
-function trendChart(title, note, series, value, format, kind, hourly) {
+function trendChart(title, note, series, value, format, kind, hourly, onPick, picked) {
   const W = 420, H = 150, m = { l: 46, r: 8, t: 8, b: 22 };
   const pw = W - m.l - m.r, ph = H - m.t - m.b;
   const vals = series.map(value);
@@ -568,7 +570,7 @@ function trendChart(title, note, series, value, format, kind, hourly) {
   series.forEach((p, i) => {
     if (i % every === 0) svg.append(svgEl("text", { class: "tick", x: m.l + bw * (i + 0.5), y: H - 6, "text-anchor": "middle" }, bucketLabel(p.t, hourly)));
   });
-  const hint = h("div", { class: "hint" }, " ");
+  const hint = h("div", { class: "hint" }, onPick ? "Click a bar to list its queries." : " ");
   const show = (i) => { const p = series[i]; hint.textContent = `${bucketLabel(p.t, hourly)}: ${format(vals[i])}${kind !== "line" ? "" : ` · ${fmt.number(p.queries)} queries`}`; };
   if (kind === "line") {
     let d = "";
@@ -579,20 +581,71 @@ function trendChart(title, note, series, value, format, kind, hourly) {
     const x = m.l + bw * i;
     if (kind === "line") {
       if (p.queries) svg.append(svgEl("circle", { class: "dot", cx: x + bw / 2, cy: y(vals[i]), r: series.length > 60 ? 1.5 : 3 }));
-      const hit = svgEl("rect", { x, y: m.t, width: bw, height: ph, fill: "transparent" });
+      const hit = svgEl("rect", { x, y: m.t, width: bw, height: ph, fill: "transparent", class: p.queries ? "pick" : "" });
       hit.addEventListener("pointerenter", () => show(i));
+      if (p.queries && onPick) hit.addEventListener("click", () => onPick(p));
       svg.append(hit);
     } else {
-      const bar = svgEl("rect", { class: `bar${kind === "err" ? " err" : ""}`, x: x + bw * 0.12, width: Math.max(1, bw * 0.76),
+      const bar = svgEl("rect", { class: `bar${kind === "err" ? " err" : ""}${picked === p.t ? " picked" : ""}`, x: x + bw * 0.12, width: Math.max(1, bw * 0.76),
         y: y(vals[i]), height: Math.max(0, m.t + ph - y(vals[i])) });
-      const hit = svgEl("rect", { x, y: m.t, width: bw, height: ph, fill: "transparent" });
+      const hit = svgEl("rect", { x, y: m.t, width: bw, height: ph, fill: "transparent", class: vals[i] ? "pick" : "" });
+      if (vals[i] && onPick) hit.addEventListener("click", () => onPick(p));
       hit.addEventListener("pointerenter", () => { show(i); bar.classList.add("on"); });
       hit.addEventListener("pointerleave", () => bar.classList.remove("on"));
       svg.append(bar, hit);
     }
   });
-  svg.addEventListener("pointerleave", () => { hint.textContent = " "; });
+  svg.addEventListener("pointerleave", () => { hint.textContent = onPick ? "Click a bar to list its queries." : " "; });
   return h("section", { class: "s2-card qh-chart" }, h("h3", {}, title, note ? h("span", { class: "s2-faint" }, note) : null), svg, hint);
+}
+
+// Clicking a bar lists the stored runs behind it (Failures: only the failed ones), slowest first.
+async function pickBucket(p, failedOnly) {
+  const t = state.trends;
+  t.picked = { bucket: p.t, failed: failedOnly, loading: true, data: null, error: null };
+  renderTrends();
+  try { t.picked.data = await S2.callTool("query_history_trend_runs", { bucket: p.t, failed_only: failedOnly }); }
+  catch (err) { t.picked.error = err; }
+  t.picked.loading = false;
+  renderTrends();
+  document.getElementById("qh-trend-runs")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+// Open one run in the Queries tab (full SQL, tuning, Ask Claude) while the cluster still has it.
+async function openRun(run) {
+  state.tab = "queries";
+  state.shape = null;
+  state.minSeconds = 1; state.hours = "";
+  state.user = state.database = state.status = state.category = state.origin = state.search = "";
+  state.selected = null;
+  await refresh();
+  if (state.data?.events.some((e) => e.key === run.key)) choose(run.key);
+  else S2.toast("That run is no longer in the cluster's query history (it keeps a limited number); the Trends list shows the start of its SQL.", "err");
+}
+
+function trendRuns() {
+  const pk = state.trends.picked;
+  if (!pk) return null;
+  const label = bucketLabel(pk.bucket, pk.bucket.length > 10);
+  const head = h("div", { style: { display: "flex", alignItems: "center", gap: "8px" } },
+    h("h2", {}, `${pk.failed ? "Failed queries" : "Queries"} · ${label}`),
+    pk.data ? h("span", { class: "s2-faint s2-small" }, `${fmt.number(pk.data.total)} run${pk.data.total === 1 ? "" : "s"}, slowest first${pk.data.total > pk.data.runs.length ? ` (showing ${fmt.number(pk.data.runs.length)})` : ""}`) : null,
+    h("span", { class: "s2-spacer" }),
+    h("button", { class: "s2-btn ghost", "aria-label": "Close the list", onclick: () => { state.trends.picked = null; renderTrends(); } }, "✕"));
+  let body;
+  if (pk.loading) body = h("div", { class: "s2-small s2-muted" }, h("span", { class: "s2-spinner" }), " Loading…");
+  else if (pk.error) body = S2.errorBox(pk.error);
+  else if (!pk.data.runs.length) body = h("div", { class: "s2-small s2-muted" }, "No queries stored for this period.");
+  else body = h("div", { class: "s2-table-wrap", style: { maxHeight: "420px" } }, h("table", { class: "s2-table qh-table" },
+    h("thead", {}, h("tr", {}, h("th", {}, "Finished"), h("th", { class: "num" }, "Duration"), h("th", {}, "User"), h("th", {}, "Database"),
+      h("th", {}, "Source"), h("th", { class: "num" }, "Rows"), h("th", {}, "Status"), h("th", {}, "Query"))),
+    h("tbody", {}, pk.data.runs.map((r) => h("tr", { tabindex: "0", title: "Open in the Queries tab: full SQL, tuning and Ask Claude",
+      onclick: () => openRun(r), onkeydown: (ev) => { if (ev.key === "Enter") openRun(r); } },
+      h("td", {}, when(r.finished)), h("td", { class: "num" }, secs(r.ms)), h("td", {}, r.user ?? "–"), h("td", { class: r.database ? "" : "null" }, r.database ?? "–"),
+      h("td", {}, r.origin ?? ""), h("td", { class: "num" }, r.rows == null ? "–" : fmt.number(r.rows)),
+      h("td", {}, r.ok ? h("span", { class: "s2-badge ok" }, "OK") : h("span", { class: "s2-badge err", title: r.error_code ?? "" }, "Failed")),
+      h("td", { class: "sql", title: r.sql ?? "" }, r.sql ?? ""))))));
+  return h("section", { class: "s2-card qh-adv-work", id: "qh-trend-runs" }, head, body);
 }
 
 function showShape(s) {
@@ -626,10 +679,11 @@ function renderTrends() {
       d.stored ? `${fmt.number(d.stored)} runs kept locally since ${when(d.oldest)} (queries the cluster traced, ≥ 1 s), for ${d.source}.` : "Nothing stored yet.",
       " The cluster's history is a ring buffer that forgets; this copy grows each time the history loads and with every Alerts check."),
     h("div", { class: "qh-tr-grid" },
-      trendChart("Queries", per, series, (p) => p.queries, (v) => fmt.number(v), "bar", t.hourly),
-      trendChart("Total runtime", per, series, (p) => p.total_ms / 1000, (v) => fmt.duration(v), "bar", t.hourly),
-      trendChart("Failures", per, series, (p) => p.failed, (v) => fmt.number(v), "err", t.hourly),
-      trendChart("p95 duration", per, series, (p) => p.p95_ms / 1000, (v) => fmt.duration(v), "line", t.hourly)),
+      trendChart("Queries", per, series, (p) => p.queries, (v) => fmt.number(v), "bar", t.hourly, (p) => pickBucket(p, false), t.picked?.failed ? null : t.picked?.bucket),
+      trendChart("Total runtime", per, series, (p) => p.total_ms / 1000, (v) => fmt.duration(v), "bar", t.hourly, (p) => pickBucket(p, false), t.picked?.failed ? null : t.picked?.bucket),
+      trendChart("Failures", per, series, (p) => p.failed, (v) => fmt.number(v), "err", t.hourly, (p) => pickBucket(p, true), t.picked?.failed ? t.picked.bucket : null),
+      trendChart("p95 duration", per, series, (p) => p.p95_ms / 1000, (v) => fmt.duration(v), "line", t.hourly, (p) => pickBucket(p, false))),
+    trendRuns(),
     h("section", { class: "s2-card qh-adv-work" },
       h("h2", {}, "Slower than before"),
       h("div", { class: "s2-small s2-faint", style: { marginBottom: "6px" } }, "Per query shape: the median duration in the last 7 days against the 7 days before (at least 1.5× and 1 s slower). Click one to see its runs."),

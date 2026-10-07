@@ -173,6 +173,31 @@ def _buckets(conn: sqlite3.Connection, src: str, since: str, fmt: str) -> list[d
              "p95_ms": _p95([m for m, _ in v])} for k, v in sorted(per.items())]
 
 
+def bucket_runs(bucket: str, failed_only: bool = False, limit: int = 500) -> dict[str, Any]:
+    """The stored runs of one Trends bar: a day ("YYYY-MM-DD") or an hour ("YYYY-MM-DD HH"), slowest first."""
+    import re
+
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}( \d{2})?", bucket or ""):
+        raise ValueError("bucket must be YYYY-MM-DD or YYYY-MM-DD HH")
+    src = source_id()
+    conn = connect()
+    try:
+        cond = " AND ok = 0" if failed_only else ""
+        total = conn.execute(f"SELECT COUNT(*) FROM runs WHERE source = ? AND finished LIKE ?{cond}",
+                             (src, bucket + "%")).fetchone()[0]
+        rows = conn.execute(
+            "SELECT event_key, finished, ms, user, database, ok, error_code, category, rows, sample, origin, shape"
+            f" FROM runs WHERE source = ? AND finished LIKE ?{cond} ORDER BY ms DESC LIMIT ?",
+            (src, bucket + "%", max(1, min(2000, int(limit))))).fetchall()
+    finally:
+        conn.close()
+    return {"bucket": bucket, "failed_only": failed_only, "total": total,
+            "runs": [{"key": r["event_key"], "finished": r["finished"], "ms": r["ms"], "user": r["user"],
+                      "database": r["database"], "ok": bool(r["ok"]), "error_code": r["error_code"],
+                      "category": r["category"], "rows": r["rows"], "sql": r["sample"], "origin": r["origin"],
+                      "shape": r["shape"]} for r in rows]}
+
+
 def trends(days: int = 30, now: str | None = None) -> dict[str, Any]:
     """Daily buckets for ``days`` and hourly buckets for the last 48 h, plus shapes that got slower.
 

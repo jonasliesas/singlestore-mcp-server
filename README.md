@@ -4,6 +4,9 @@ A local MCP server for SingleStore that runs in **stdio** mode from Claude
 Code, Claude Desktop or VS Code, and works with **SingleStore Helios and
 self-managed clusters** alike.
 
+For how it's built and how it connects to SingleStore, Claude, SAS Viya and
+identity providers, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 ## What it does
 
 - **SQL and schema tools**: run SQL, list databases and tables, describe
@@ -484,7 +487,11 @@ The **Trends** tab shows, per day (7 days, 30 days, 90 days, 1 year) or per
 hour for the last 48 hours:
 
 - the number of queries, the total runtime, failures, and the p95 duration
-  (bars and a line, hover for the values);
+  (bars and a line, hover for the values). **Click a bar** to list the
+  queries behind it, slowest first (on the Failures chart, only the failed
+  ones). Click a query to open it in the Queries tab with its full SQL,
+  tuning recommendations and Ask Claude, as long as the cluster's history
+  still has it; older runs show the start of their SQL;
 - **Slower than before**: query shapes whose median duration in the last 7
   days is at least 1.5× and 1 s more than in the 7 days before, with the run
   counts of both weeks;

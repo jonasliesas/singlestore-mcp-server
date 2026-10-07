@@ -34,6 +34,13 @@ def query_history_trends(days: int = 30) -> CallToolResult:
 
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def query_history_trend_runs(bucket: str, failed_only: bool = False) -> CallToolResult:
+    """The queries behind one Trends bar (a day "YYYY-MM-DD" or an hour "YYYY-MM-DD HH"), slowest first."""
+    data = history_store.bucket_runs(bucket, failed_only)
+    return tool_result(f"{data['total']} {'failed ' if failed_only else ''}runs in {bucket}", data)
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
 def query_history_compare_candidates(table: str, new_table: str, limit: int = 8) -> CallToolResult:
     """The heaviest read-only queries in the history that read ``table`` (database.table), with the table name
     replaced by ``new_table`` (nothing is run)."""
