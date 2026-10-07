@@ -197,6 +197,9 @@ left switches between its views:
   *result →*). Several statements per cell are fine; writes ask first.
 - **Python cells** run on an IPython (Jupyter) kernel with pandas (`pd`),
   matplotlib (inline charts) and `conn` (a SingleStore connection).
+- **SAS cells** run SAS code (DATA steps, PROCs, PROC SQL) on your SAS Viya,
+  with the ODS output and the log (errors and warnings counted, the log opens
+  when there are errors). See *SAS cells* below.
 - **Text cells** are Markdown with embedded HTML, as in Jupyter (styled
   headers, images, alert boxes); scripts are stripped.
 - **Shift+Enter** runs and moves on, **Ctrl+Enter** runs, **Alt+Enter** runs
@@ -217,7 +220,8 @@ left switches between its views:
 - Several notebooks open as **tabs**, each with its own kernel. **New** opens
   a new tab; **Open** loads into a new tab unless the current one is empty.
   Closing a tab stops its kernel (unsaved tabs need a second click).
-- Saved as standard `.ipynb` files, with SQL cells as `%%sql` cells, so they
+- Saved as standard `.ipynb` files, with SQL cells as `%%sql` and SAS cells
+  as `%%sas` cells, so they
   open in Jupyter / VS Code and SingleStore Notebooks, and SingleStore's
   example notebooks open here.
 
@@ -226,7 +230,9 @@ left switches between its views:
 - Python runs in its own environment, `~/.singlestore-mcp/notebook-env`,
   installed with `uv` the first time (the notebook offers an **Install**
   button). It has what SingleStore's examples expect: pandas, matplotlib,
-  singlestoredb, SQLAlchemy with the SingleStore dialect, ibis, scikit-learn.
+  singlestoredb, SQLAlchemy with the SingleStore dialect, ibis, scikit-learn,
+  and SAS's Python packages: saspy, swat (CAS), DLPy (`sas-dlpy`), sasctl
+  and sasoptpy.
 - **Packages** lists what's installed (with filter) and installs more. `%pip
   install …` and `!pip install …` in a cell also install into this
   environment. Restart the kernel (↻) after installing.
@@ -237,6 +243,30 @@ left switches between its views:
   download method stalls on some corporate networks).
 - Code runs with your user rights on this machine, like any local Jupyter.
   Kernels stop after 30 idle minutes; SQL cells fetch at most 100,000 rows.
+
+**SAS cells (SAS Viya)**
+
+- Set up once in **Connect → SAS Viya**: the Viya address, the compute
+  context (e.g. *SAS Studio compute context*; **Test** lists them) and
+  **Sign in**. Sign-in uses your own Viya account (OAuth with Viya's built-in
+  `vscode` client): SAS Logon opens in the browser and shows a code to paste
+  once; after that the sign-in renews itself. If you already signed in with
+  the SAS Viya MCP server or the SAS Viya CLI, that sign-in is reused.
+- **+ SAS** adds a SAS cell. The code runs in a SAS Compute session on Viya
+  (one per notebook, started on the first SAS cell, which takes about half a
+  minute; restart the kernel for a fresh one).
+- **SingleStore from SAS**: each session gets the library **S2** on the
+  notebook's SingleStore database (SAS/ACCESS to SingleStore, engine
+  `SSTORE`), so a DATA step can `set s2.mytable;` or write `data s2.newtable;`.
+  The password isn't echoed to the SAS log. This needs a password connection
+  (not JWT / SSO); the libref name can be changed in the settings.
+- **From Python**: `sas_session()` is the saspy session; `sas_to_df("table",
+  "libref")` and `df_to_sas(df, "table", "libref")` move data between SAS and
+  pandas; `cas_session()` gives a swat CAS connection (use it with DLPy) and
+  `sasctl_session()` a sasctl session, all signed in with the same Viya
+  sign-in.
+- Claude in the notebook knows about SAS cells and suggests them in ```sas
+  blocks with an **Insert SAS cell** button.
 
 **Claude**
 
@@ -338,11 +368,39 @@ the exact `jwks_endpoint`, `jwks_username_field` and user the cluster needs.
 | **Schema Explorer** `schema_explorer(database?, table?)` | Databases → tables with row counts and sizes; per table the columns, DDL (shard / sort keys) and a row preview. **Ask Claude** and **Query in grid**. |
 | **Pipeline Monitor** `pipeline_monitor(database?)` | Every pipeline's state, source → table, progress (files loaded / Kafka lag), latest batches and errors. Start / Stop (with confirmation), Test, error details, **Ask Claude**, auto-refresh. |
 | **Cluster Monitor** `cluster_monitor()` | Per node SingleStore CPU (against its core limit), memory and disk with a 15-minute CPU chart (all / aggregators / leaves), plus the queries running now. Refreshes every 5 s. |
+| **Clean up** `cleanup_work_tables()` | Finds the work tables SAS jobs leave behind (`_dm…` Data Management, `_flw…` flow, `SASTMP…` / `_tmp…` temp tables) in every non-system database: rows, size, created, created by, age, last use and dependent views. Select tables, confirm, and they're dropped one at a time, with a dry-run mode and a log. The **🧹 Clean up** button in the Schema Explorer's header. |
 | **Query History** `query_history(min_seconds=1, hours?)` | Every finished query the cluster traced: when, how long, user, database, rows, success / error. Filter on runtime (1 s and up), period, user, database, status, type and text; sort by time, duration or rows. Select a query for its full SQL and **Get tuning recommendations**. Its own **History** item in the workspace rail. |
 | **Query Grid** `query_grid(sql, database?, max_rows=1000)` | Read-only results as a sortable, filterable grid with CSV export; the SQL can be edited and re-run. Writes are refused. |
 
 `TEST PIPELINE` loads no data, but a failed test is still recorded in the
 pipeline's batch history and error log.
+
+**Clean up** lives in the Schema Explorer (the **🧹 Clean up** button in its
+header, or ask Claude to "clean up the SAS work tables"). It scans all
+databases except the system ones (`information_schema`, `memsql`, `cluster`,
+`sys`, `mysql`, `performance_schema`) in two rounds of queries, whatever the
+number of tables:
+
+- **Name patterns**: one per line, a pattern and a label, e.g. `_dm*  SAS DM`.
+  `*` and `?` are wildcards, case-insensitive. The defaults are `_dm*`,
+  `_flw*`, `SASTMP*` and `_tmp*`. Optionally it also offers every table not
+  created or altered for N days. The settings are kept in
+  `~/.singlestore-mcp/cleanup.json`.
+- **Last used** is the most recent query in the query history that names the
+  table (see Query History above; only queries above its duration threshold
+  are recorded, so "never seen" is no guarantee). Tables used or created in
+  the last N days (default 7), and tables that a view depends on, are marked
+  **risky**.
+- **Dependent views** block a table's drop unless you tick them in the
+  confirmation; they are then dropped first.
+- **Dropping**: select tables (or *Select all* / *Select not risky*), then the
+  confirmation lists the exact statements and the total size. Each object is
+  dropped with its own `DROP TABLE IF EXISTS \`db\`.\`table\`` and gets its own
+  result (dropped / error). **Dry run** is on until you turn it off: it only
+  shows the statements. The server checks everything again before dropping.
+- Every drop is logged (time, cluster user, Windows user, connection, table,
+  rows, size, result) to `~/.singlestore-mcp/cleanup-log.jsonl`; the panel
+  shows the recent entries.
 
 **Query History** needs SingleStore's query history (event tracing) turned on
 once, by an admin:
