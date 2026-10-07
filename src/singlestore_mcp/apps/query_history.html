@@ -949,6 +949,8 @@ await S2.connect({
     if (state.data?.tab === "advisor" || state.data?.tab === "trends") setTab(state.data.tab);
     else render();
     reportContext();
+    // The tool result carries only the latest queries (it must stay small); load the full list now.
+    if (state.data?.partial) refresh();
   },
   onToolCancelled() {
     if (!state.data) root.replaceChildren(h("div", { class: "s2-empty" }, "Cancelled."));

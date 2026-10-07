@@ -495,9 +495,20 @@ def query_history(min_seconds: float = 1.0, hours: float | None = None, tab: str
     The result includes ``browser_url``: post it as a clickable link right under the app.
     """
     tab = tab if tab in ("advisor", "trends") else "queries"
-    data = {**collect(int(max(1.0, min_seconds) * 1000), hours), "tab": tab}
+    full = collect(int(max(1.0, min_seconds) * 1000), hours)
+    data = {**_first_slice(full), "tab": tab}
     args = {"min_seconds": min_seconds, **({"hours": hours} if hours else {}), **({"tab": tab} if tab != "queries" else {})}
-    return tool_result(with_browser_link(_summary(data), data, "query_history", args), data)
+    return tool_result(with_browser_link(_summary(full), data, "query_history", args), data)
+
+
+# What a model-visible tool sends along must stay small (Claude limits the size of a tool result), so it
+# carries only the latest queries; the page then loads the full list itself with query_history_data.
+_FIRST_SLICE = 40
+
+
+def _first_slice(data: dict[str, Any], keep: int = _FIRST_SLICE) -> dict[str, Any]:
+    events = data["events"]
+    return {**data, "events": events[:keep], "partial": len(events) > keep}
 
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
@@ -540,7 +551,7 @@ def query_advisor_report(refresh: bool = False) -> CallToolResult:
     The result includes ``browser_url``: post it as a clickable link right under the app.
     """
     result = query_advisor.advise(refresh=refresh)
-    data = {**collect(), "advisor": result, "tab": "advisor"}
+    data = {**_first_slice(collect(), 0), "advisor": result, "tab": "advisor"}
     return tool_result(with_browser_link(query_advisor.summary(result), data, "query_history", {"tab": "advisor"}), data)
 
 
