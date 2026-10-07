@@ -76,6 +76,28 @@
   .se-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; gap: 6px; color: var(--s2-text-2); text-align: center; padding: 24px; }
   .se-placeholder .big { font-size: var(--font-text-md-size, 14px); color: var(--s2-text); font-weight: var(--font-weight-medium, 500); }
 
+  /* Clean-up panel */
+  .cu { display: flex; flex-direction: column; gap: 10px; min-height: 580px; }
+  html[data-display-mode="fullscreen"] .cu { min-height: calc(100vh - 70px); }
+  .cu-box { border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); padding: 8px 10px; }
+  .cu-opts { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: flex-start; }
+  .cu-opts label { display: flex; align-items: center; gap: 6px; font-size: var(--s2-fs-xs); color: var(--s2-text-2); }
+  .cu-opts .num { width: 64px; }
+  .cu-pat { display: flex; flex-direction: column; gap: 4px; flex: 1 1 300px; min-width: 0; }
+  .cu-pat textarea { width: 100%; min-height: 78px; font-family: var(--s2-mono); font-size: var(--s2-fs-xs); resize: vertical; box-sizing: border-box; }
+  .cu-side { display: flex; flex-direction: column; gap: 8px; }
+  .cu-dbs { display: flex; flex-wrap: wrap; gap: 6px; }
+  .cu-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .cu-bar .cu-count { font-weight: var(--font-weight-semibold, 600); }
+  .cu-risk { color: var(--s2-warn); font-size: var(--s2-fs-xs); }
+  .cu-confirm { border: 1px solid var(--s2-err); background: var(--s2-err-bg); border-radius: var(--s2-radius); padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .cu-confirm.dry { border-color: var(--s2-info); background: var(--s2-info-bg); }
+  .cu-confirm pre { margin: 0; max-height: 220px; overflow: auto; }
+  .cu-confirm ul { margin: 0; padding-left: 18px; font-size: var(--s2-fs-xs); }
+  .cu-res .ok { color: var(--s2-ok); } .cu-res .err { color: var(--s2-err); } .cu-res .warn { color: var(--s2-warn); }
+  .cu-res li { font-size: var(--s2-fs-xs); }
+  .cu h3 { margin: 0 0 6px; font-size: var(--s2-fs-xs); text-transform: uppercase; letter-spacing: .04em; color: var(--s2-text-3); font-weight: 600; }
+
   @media (max-width: 640px) {
     .se { grid-template-columns: minmax(0, 1fr); height: auto; }
     .se-left { max-height: 260px; }
@@ -102,6 +124,19 @@ const state = {
   previews: new Map(),       // key -> {status, data, error}
   banner: null,              // error from the initial tool call
   pending: null,             // tool input args before the result arrives
+  mode: "browse",            // "browse" | "cleanup"
+  cu: {
+    settings: null,          // {patterns, older_than_days, recent_days, dry_run}
+    patternsText: null, olderOn: false, olderDays: 90, recentDays: 7,
+    scan: null,              // {status: "loading"|"ok"|"error", data, error}
+    selected: new Set(),     // candidate keys
+    views: new Set(),        // dependent view keys the user includes in the drop
+    dryRun: true,
+    confirm: false,
+    running: false,
+    result: null,            // last drop result
+    log: [],
+  },
 };
 const key = (db, t) => `${db}\u0000${t}`;
 const qi = (name) => "`" + String(name).replace(/`/g, "``") + "`";
@@ -506,24 +541,304 @@ function renderRight() {
 }
 let lastRightSel = null;
 
-function render() {
-  const header = h("div", { class: "s2-header" },
-    h("h1", { class: "s2-title" }, "Schema Explorer"),
-    h("span", { class: "s2-subtitle" }, state.dbs ? `${state.dbs.filter((d) => !d.system).length} databases` : ""),
+// ---------- clean-up panel (leftover SAS work tables) ----------
+// Scan: schema_explorer_cleanup_scan; drop: schema_explorer_cleanup_drop (one
+// DROP per object on the server, dry run by default the first time).
+const cu = state.cu;
+let cuEl = null;
+const ckey = (c) => key(c.database, c.name);
+const cuCands = () => cu.scan?.status === "ok" ? cu.scan.data.candidates : [];
+const cuByKey = () => new Map(cuCands().map((c) => [ckey(c), c]));
+const patternsToText = (ps) => (ps ?? []).map((p) => `${p.pattern}  ${p.kind}`).join("\n");
+const textToPatterns = (text) => text.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"))
+  .map((l) => { const m = l.match(/^(\S+)\s*(.*)$/); return { pattern: m[1], kind: m[2].trim() || "work table" }; });
+const sizeText = (v) => v == null ? "–" : fmt.bytes(v);
+// Times from the cluster carry no zone: compare them with the cluster's own NOW().
+function agoText(now, t) {
+  const a = fmt.toDate(now), b = fmt.toDate(t);
+  if (!a || !b) return "–";
+  const s = Math.max(0, (a - b) / 1000);
+  return s < 3600 ? `${Math.round(s / 60)} min ago` : s < 172800 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} days ago`;
+}
+
+function applyCleanupSettings(s) {
+  if (!s) return;
+  cu.settings = s;
+  if (cu.patternsText == null) cu.patternsText = patternsToText(s.patterns);
+  cu.olderOn = Boolean(s.older_than_days);
+  if (s.older_than_days) cu.olderDays = s.older_than_days;
+  cu.recentDays = s.recent_days ?? 7;
+  cu.dryRun = s.dry_run !== false;
+}
+
+function enterCleanup() {
+  state.mode = "cleanup";
+  cu.confirm = false;
+  render();
+  if (!cu.settings) {
+    call("schema_explorer_cleanup_settings", {}).then((d) => { applyCleanupSettings(d.settings); cu.log = d.log ?? []; renderCleanup(); })
+      .catch((e) => S2.toast(e.message, "err"));
+  }
+  if (!cu.scan) cleanupScan(false);
+  S2.updateModelContext("The user is in the Schema Explorer's Clean-up panel (leftover SAS work tables).");
+}
+function leaveCleanup() { state.mode = "browse"; render(); }
+
+async function cleanupScan(save = true) {
+  const args = cu.settings || save ? {
+    patterns: textToPatterns(cu.patternsText ?? ""),
+    older_than_days: cu.olderOn ? Number(cu.olderDays) || null : null,
+    recent_days: Number(cu.recentDays) || 7,
+    save,
+  } : {};
+  if (args.patterns && !args.patterns.length && !args.older_than_days) { S2.toast("Add at least one name pattern", "err"); return; }
+  cu.scan = { status: "loading" };
+  cu.confirm = false;
+  renderCleanup();
+  try {
+    const data = await call("schema_explorer_cleanup_scan", args);
+    cu.scan = { status: "ok", data };
+    if (!cu.settings || save) applyCleanupSettings(data.settings);
+    cu.log = data.log ?? cu.log;
+    const keys = new Set(data.candidates.map(ckey));
+    for (const k of [...cu.selected]) if (!keys.has(k)) cu.selected.delete(k);
+    const n = data.candidates.length;
+    S2.updateModelContext(`Clean-up panel: ${n} candidate work table(s), ${fmt.bytes(data.total_bytes)} in total` +
+      (n ? `: ${data.candidates.slice(0, 30).map((c) => `${c.database}.${c.name}`).join(", ")}${n > 30 ? ", …" : ""}` : "") + ".");
+  } catch (e) { cu.scan = { status: "error", error: e }; }
+  renderCleanup();
+}
+
+function selection() {
+  const by = cuByKey();
+  const tables = [...cu.selected].map((k) => by.get(k)).filter(Boolean);
+  const views = new Map();
+  for (const t of tables) for (const v of t.views) views.set(key(v.database, v.name), v);
+  const blocked = tables.filter((t) => t.views.some((v) => !cu.views.has(key(v.database, v.name))));
+  const ok = tables.filter((t) => !blocked.includes(t));
+  return { tables, ok, blocked, views, size: ok.reduce((a, t) => a + (Number(t.size_bytes) || 0), 0) };
+}
+
+async function cleanupDrop() {
+  const sel = selection();
+  if (!sel.ok.length) return;
+  const includedViews = [...sel.views.values()].filter((v) => cu.views.has(key(v.database, v.name)));
+  cu.running = true;
+  renderCleanup();
+  try {
+    const res = await call("schema_explorer_cleanup_drop", {
+      tables: sel.ok.map((t) => ({ database: t.database, name: t.name })),
+      views: includedViews.map((v) => ({ database: v.database, name: v.name })),
+      dry_run: cu.dryRun,
+    });
+    cu.result = res;
+    cu.confirm = false;
+    if (!res.dry_run) {
+      if (res.log) cu.log = res.log;
+      cu.selected.clear(); cu.views.clear();
+      S2.toast(`Dropped ${res.dropped} object(s), ${fmt.bytes(res.dropped_bytes)} freed${res.errors ? `, ${res.errors} error(s)` : ""}`, res.errors ? "err" : "");
+      // The schema changed: refresh the explorer's own tree (the workspace has no schema-changed message).
+      const touched = new Set(res.results.filter((r) => r.status === "dropped").map((r) => r.database));
+      for (const d of touched) {
+        state.tables.delete(d);
+        for (const m of [state.details, state.previews]) for (const k of [...m.keys()]) if (k.startsWith(d + "\u0000")) m.delete(k);
+        if (state.sel?.db === d && state.sel.table && res.results.some((r) => r.status === "dropped" && r.database === d && r.name === state.sel.table)) state.sel = { db: d, table: null };
+      }
+      loadDatabases();
+      for (const d of touched) if (state.expanded.has(d)) loadTables(d, true);
+      S2.updateModelContext(`Clean-up: the user dropped ${res.dropped} object(s): ${res.results.filter((r) => r.status === "dropped").map((r) => `${r.database}.${r.name}`).join(", ")}.`);
+      await cleanupScan(false);
+    }
+  } catch (e) { S2.toast(`Clean-up failed: ${e.message}`, "err"); }
+  cu.running = false;
+  renderCleanup();
+}
+
+function renderCleanupOptions() {
+  const ta = h("textarea", { class: "s2-input", spellcheck: false, "aria-label": "Name patterns",
+    oninput: (e) => { cu.patternsText = e.target.value; } });
+  ta.value = cu.patternsText ?? "";
+  const older = h("input", { type: "checkbox", checked: cu.olderOn, onchange: (e) => { cu.olderOn = e.target.checked; } });
+  const days = h("input", { class: "s2-input num", type: "number", min: 1, value: cu.olderDays, "aria-label": "Days",
+    oninput: (e) => { cu.olderDays = e.target.value; } });
+  const recent = h("input", { class: "s2-input num", type: "number", min: 1, value: cu.recentDays, "aria-label": "Recent days",
+    oninput: (e) => { cu.recentDays = e.target.value; } });
+  return h("div", { class: "cu-box cu-opts" },
+    h("div", { class: "cu-pat" },
+      h("h3", {}, "Name patterns"),
+      ta,
+      h("div", { class: "s2-small s2-faint" }, "One per line: pattern, then a label. * and ? are wildcards, case-insensitive. Stored in ~/.singlestore-mcp/cleanup.json.")),
+    h("div", { class: "cu-side" },
+      h("h3", {}, "Options"),
+      h("label", {}, older, "Also every table not changed for", days, "days"),
+      h("label", {}, "Risky if used or created within", recent, "days"),
+      h("div", { class: "s2-toolbar" },
+        h("button", { class: "s2-btn primary", onclick: () => cleanupScan(true), disabled: cu.scan?.status === "loading" }, "Scan"),
+        h("button", { class: "s2-btn ghost", title: "Put the default SAS patterns back", onclick: () => {
+          cu.patternsText = "_dm*  SAS DM\n_flw*  SAS flow\nSASTMP*  temp\n_tmp*  temp"; renderCleanup();
+        } }, "Default patterns"))));
+}
+
+function renderCandidates(data) {
+  const cands = data.candidates;
+  const riskyN = cands.filter((c) => c.risky).length;
+  const head = h("div", { class: "se-stats" },
+    stat("Candidates", fmt.number(cands.length)),
+    stat("Total size", fmt.bytes(data.total_bytes)),
+    stat("Risky", fmt.number(riskyN), "Used or created recently, or with dependent views"),
+    stat("Tables scanned", fmt.number(data.tables_scanned)));
+  const dbs = h("div", { class: "cu-dbs" }, Object.entries(data.by_database).sort().map(([d, v]) =>
+    h("span", { class: "s2-badge plain", title: `${v.tables} table(s), ${fmt.number(v.rows)} rows` }, `${d}: ${v.tables} · ${fmt.bytes(v.size_bytes)}`)));
+  const hist = data.history;
+  const note = h("div", { class: "s2-small s2-faint" },
+    hist?.events ? `“Last used” comes from the query history (${fmt.number(hist.events)} queries since ${fmt.dateTime(hist.oldest)}; only queries above its duration threshold are recorded), so “never” is not a guarantee.`
+      : "The query history is off or empty, so “last used” is unknown. An admin turns it on with CREATE EVENT TRACE Query_completion WITH (Query_text = on).",
+    data.truncated ? " Only the first 2,000 candidates are shown." : "");
+  if (!cands.length) return [head, note, placeholder("No leftover work tables found", "Nothing matches the name patterns" + (data.older_than_days ? ` or is older than ${data.older_than_days} days` : "") + ".")];
+  const rows = cands.map((c) => ({
+    "": ckey(c), Database: c.database, Name: c.name, Kind: c.kind, Rows: c.rows, Size: c.size_bytes,
+    Created: c.created, "Created by": c.owner, Age: c.age_days, "Last used": c.last_used?.time ?? null,
+    Views: c.views.length || null, Risk: c.risks.join(", ") || null, _c: c,
+  }));
+  const table = S2.dataTable(["", "Database", "Name", "Kind", "Rows", "Size", "Created", "Created by", "Age", "Last used", "Views", "Risk"], rows, {
+    maxHeight: S2.displayMode === "fullscreen" ? "calc(100vh - 470px)" : "300px",
+    render: {
+      "": (k, r) => h("input", { type: "checkbox", checked: cu.selected.has(k), "aria-label": `Select ${r.Database}.${r.Name}`,
+        onclick: (e) => e.stopPropagation(),
+        onchange: (e) => { e.target.checked ? cu.selected.add(k) : cu.selected.delete(k); cu.confirm = false; renderCleanupActions(); } }),
+      Name: (v) => h("span", { class: "s2-mono" }, v),
+      Rows: (v) => rowsText(v),
+      Size: (v, r) => h("span", { title: `On disk: ${sizeText(r._c.disk_bytes)}\nIn memory: ${sizeText(r._c.memory_bytes)}` }, sizeText(v)),
+      Created: (v) => fmt.dateTime(v),
+      "Created by": (v) => v ?? "–",
+      Age: (v) => v == null ? "–" : v < 1 ? `${Math.round(v * 24)} h` : `${Math.round(v)} d`,
+      "Last used": (v, r) => v ? h("span", { title: `${r._c.last_used.user ?? ""}: ${r._c.last_used.sql}` }, agoText(data.now, v)) : h("span", { class: "s2-faint" }, "never seen"),
+      Views: (v, r) => v ? h("span", { class: "cu-risk", title: r._c.views.map((x) => `${x.database}.${x.name}`).join("\n") }, r._c.views.map((x) => x.name).join(", ")) : "",
+      Risk: (v) => v ? h("span", { class: "cu-risk" }, "⚠ " + v) : "",
+    },
+  });
+  return [head, dbs, note, table];
+}
+
+let cuActionsEl = null;
+function renderCleanupActions() {
+  if (!cuActionsEl) return;
+  const cands = cuCands();
+  const sel = selection();
+  const setAll = (pred) => { cu.selected = new Set(cands.filter(pred).map(ckey)); cu.confirm = false; renderCleanup(); };
+  const dry = h("input", { type: "checkbox", checked: cu.dryRun, onchange: async (e) => {
+    cu.dryRun = e.target.checked; cu.confirm = false; renderCleanupActions();
+    try { await call("schema_explorer_cleanup_settings", { dry_run: cu.dryRun }); } catch {}
+  } });
+  const bar = h("div", { class: "cu-bar" },
+    h("span", { class: "cu-count" }, `${sel.tables.length} selected`),
+    sel.tables.length ? h("span", { class: "s2-muted s2-small" }, fmt.bytes(sel.tables.reduce((a, t) => a + (Number(t.size_bytes) || 0), 0))) : null,
+    h("button", { class: "s2-btn ghost", onclick: () => setAll(() => true), disabled: !cands.length }, "Select all"),
+    h("button", { class: "s2-btn ghost", title: "Only tables without risk flags", onclick: () => setAll((c) => !c.risky), disabled: !cands.length }, "Select not risky"),
+    h("button", { class: "s2-btn ghost", onclick: () => setAll(() => false), disabled: !sel.tables.length }, "Clear"),
     h("span", { class: "s2-spacer" }),
-    h("button", { class: "s2-btn ghost", title: "Reload database list", onclick: () => {
+    h("label", { class: "se-toggle", title: "Only show the DROP statements; drop nothing" }, dry, "Dry run"),
+    h("button", { class: `s2-btn ${cu.dryRun ? "primary" : "danger"}`, disabled: !sel.tables.length || cu.running,
+      onclick: () => { cu.confirm = true; cu.result = null; renderCleanupActions(); } },
+      cu.dryRun ? "Show DROP statements…" : `Drop ${sel.tables.length || ""} table${sel.tables.length === 1 ? "" : "s"}…`));
+  const parts = [bar];
+  if (cu.confirm && sel.tables.length) parts.push(renderConfirm(sel));
+  if (cu.result) parts.push(renderResult(cu.result));
+  cuActionsEl.replaceChildren(...parts.filter(Boolean));
+}
+
+function renderConfirm(sel) {
+  const views = [...sel.views.entries()];
+  const viewBoxes = views.length ? h("div", {},
+    h("div", { class: "s2-small" }, h("strong", {}, "Dependent views"), " — a table with a view on it is only dropped if you include the view (it is dropped first):"),
+    h("ul", {}, views.map(([k, v]) => h("li", {}, h("label", { class: "se-toggle" },
+      h("input", { type: "checkbox", checked: cu.views.has(k), onchange: (e) => { e.target.checked ? cu.views.add(k) : cu.views.delete(k); renderCleanupActions(); } }),
+      h("span", { class: "s2-mono" }, `${v.database}.${v.name}`)))))) : null;
+  const incViews = views.filter(([k]) => cu.views.has(k)).map(([, v]) => v);
+  const stmts = [...incViews.map((v) => `DROP VIEW IF EXISTS ${fq(v.database, v.name)};`),
+    ...sel.ok.map((t) => `DROP TABLE IF EXISTS ${fq(t.database, t.name)};`)];
+  const risky = sel.ok.filter((t) => t.risky);
+  const go = h("button", { class: `s2-btn ${cu.dryRun ? "primary" : "danger"}`, disabled: !sel.ok.length || cu.running, onclick: cleanupDrop },
+    cu.running ? "Working…" : cu.dryRun ? "Run dry run" : `Drop ${sel.ok.length} table${sel.ok.length === 1 ? "" : "s"}${incViews.length ? ` and ${incViews.length} view${incViews.length === 1 ? "" : "s"}` : ""} now`);
+  return h("div", { class: `cu-confirm${cu.dryRun ? " dry" : ""}`, role: "alertdialog", "aria-label": "Confirm clean-up" },
+    h("div", {}, h("strong", {}, cu.dryRun ? "Dry run — nothing will be dropped. " : "This permanently drops: "),
+      `${sel.ok.length} table(s), ${fmt.bytes(sel.size)}${incViews.length ? `, plus ${incViews.length} view(s)` : ""}. One statement per object:`),
+    h("pre", { class: "s2-pre" }, stmts.join("\n") || "(nothing)"),
+    risky.length ? h("div", { class: "cu-risk" }, `⚠ ${risky.length} risky: `, risky.map((t) => `${t.name} (${t.risks.join(", ")})`).join("; ")) : null,
+    sel.blocked.length ? h("div", { class: "cu-risk" }, `Blocked by a dependent view (not included): ${sel.blocked.map((t) => `${t.database}.${t.name}`).join(", ")}`) : null,
+    viewBoxes,
+    h("div", { class: "s2-toolbar" }, h("button", { class: "s2-btn ghost", onclick: () => { cu.confirm = false; renderCleanupActions(); } }, "Cancel"), go));
+}
+
+function renderResult(res) {
+  const cls = { dropped: "ok", "dry-run": "", error: "err", blocked: "warn", skipped: "warn" };
+  return h("div", { class: "cu-box cu-res" },
+    h("h3", {}, res.dry_run ? "Dry run — statements that would run" : `Result: ${res.dropped} dropped, ${fmt.bytes(res.dropped_bytes)} freed, ${res.errors} error(s)`),
+    h("ul", {}, res.results.map((r) => h("li", {},
+      h("span", { class: cls[r.status] ?? "" }, r.status === "dry-run" ? "would run" : r.status), " ",
+      h("span", { class: "s2-mono" }, r.sql ?? `${r.type} ${fq(r.database, r.name)}`),
+      r.error ? h("span", { class: "s2-faint" }, ` — ${r.error}`) : null))),
+    res.dry_run ? h("div", { class: "s2-small s2-faint" }, "Turn off “Dry run” to drop for real.") : null);
+}
+
+function renderLog() {
+  if (!cu.log?.length) return h("div", { class: "s2-small s2-faint" }, "Nothing dropped yet. Every drop is logged to ~/.singlestore-mcp/cleanup-log.jsonl.");
+  const rows = cu.log.map((e) => ({ Time: e.time, User: e.user ?? e.os_user, Object: `${e.database}.${e.name}`, Type: e.type,
+    Rows: e.rows, Size: e.size_bytes, Status: e.status, Error: e.error }));
+  return S2.dataTable(["Time", "User", "Object", "Type", "Rows", "Size", "Status", "Error"], rows, {
+    maxHeight: "180px", render: { Time: (v) => fmt.dateTime(v), Rows: (v) => rowsText(v), Size: (v) => sizeText(v), Error: (v) => v ?? "" } });
+}
+
+function renderCleanup() {
+  if (!cuEl || state.mode !== "cleanup") return;
+  const s = cu.scan;
+  let body;
+  if (!s || s.status === "loading") body = h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Scanning all databases for work tables…");
+  else if (s.status === "error") body = [S2.errorBox(s.error), h("button", { class: "s2-btn", onclick: () => cleanupScan(false) }, "Retry")];
+  else body = renderCandidates(s.data);
+  cuActionsEl = h("div", { style: { display: "flex", flexDirection: "column", gap: "8px" } });
+  const scroll = cuEl.scrollTop;
+  cuEl.replaceChildren(...[
+    renderCleanupOptions(),
+    h("div", {}, body),
+    s?.status === "ok" && s.data.candidates.length ? cuActionsEl : null,
+    h("div", {}, h("h3", {}, "Recent clean-ups"), renderLog()),
+  ].flat().filter(Boolean));
+  renderCleanupActions();
+  cuEl.scrollTop = scroll;
+}
+
+function render() {
+  const cleanup = state.mode === "cleanup";
+  const header = h("div", { class: "s2-header" },
+    h("h1", { class: "s2-title" }, cleanup ? "Schema Explorer · Clean up" : "Schema Explorer"),
+    h("span", { class: "s2-subtitle" }, cleanup ? "leftover SAS work tables" : state.dbs ? `${state.dbs.filter((d) => !d.system).length} databases` : ""),
+    h("span", { class: "s2-spacer" }),
+    cleanup
+      ? h("button", { class: "s2-btn", onclick: leaveCleanup, title: "Back to browsing the schema" }, "← Schema")
+      : h("button", { class: "s2-btn", onclick: enterCleanup, title: "Find and drop leftover SAS work tables (_dm…, _flw…, temp)" }, "🧹 Clean up"),
+    h("button", { class: "s2-btn ghost", title: cleanup ? "Scan again" : "Reload database list", onclick: () => {
+      if (cleanup) { cleanupScan(false); return; }
       state.tables.clear(); state.details.clear(); state.previews.clear();
       loadDatabases();
       for (const db of state.expanded) loadTables(db, true);
       if (state.sel?.table) loadDetail(state.sel.db, state.sel.table, true);
     } }, "↻ Refresh"),
-    S2.openInBrowserButton("schema_explorer", () => ({ database: state.sel?.db, table: state.sel?.table })),
+    cleanup ? S2.openInBrowserButton("cleanup_work_tables", () => ({}))
+      : S2.openInBrowserButton("schema_explorer", () => ({ database: state.sel?.db, table: state.sel?.table })),
     S2.fullscreenButton());
+  if (cleanup) {
+    cuEl = h("div", { class: "cu" });
+    root.replaceChildren(...[header, cuEl].filter(Boolean));
+    renderCleanup();
+    return;
+  }
+  cuEl = null;
   rightEl = h("div", { class: "se-pane se-right" });
   const focused = document.activeElement === filterEl;
   const caret = filterEl?.selectionStart;
   const treeScroll = treeEl?.scrollTop ?? 0;
-  root.replaceChildren(header, h("div", { class: "se" }, buildLeft(), rightEl));
+  root.replaceChildren(...[header, h("div", { class: "se" }, buildLeft(), rightEl)].filter(Boolean));
   treeEl.scrollTop = treeScroll;
   renderRight();
   if (focused) { filterEl.focus(); try { filterEl.setSelectionRange(caret, caret); } catch {} }
@@ -533,6 +848,12 @@ function render() {
 async function applyInitial(data) {
   state.dbs = data.databases ?? [];
   state.banner = data.error ? new Error(data.error) : null;
+  if (data.mode === "cleanup") {
+    // Opened by cleanup_work_tables: straight into the Clean-up panel.
+    applyCleanupSettings(data.cleanup_settings);
+    enterCleanup();
+    return;
+  }
   const db = data.database;
   if (db && state.dbs.some((d) => d.name === db)) {
     if (SYSTEM.has(db)) state.showSystem = true;

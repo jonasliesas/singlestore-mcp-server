@@ -10,6 +10,9 @@ size come from ``TABLE_STATISTICS`` (master partitions for distributed
 tables, one copy for reference tables) and on-disk columnstore size from
 ``COLUMNAR_SEGMENTS``. Every identifier is backtick-quoted; table names are
 case-sensitive (``CARS`` and ``cars`` can coexist).
+
+The Clean-up panel (header button, or the ``cleanup_work_tables`` tool) finds
+and drops leftover SAS work tables; its logic is in ``..housekeeping``.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from typing import Any
 
 from mcp.types import CallToolResult, ToolAnnotations
 
+from .. import housekeeping
 from ..db import db, quote_identifier
 from ._core import APP_ONLY, apps, jsonable, jsonable_rows, register_app, tool_result, with_browser_link
 
@@ -446,3 +450,88 @@ def schema_explorer_preview(database: str, table: str, limit: int = PREVIEW_ROWS
     """First rows of a table or view, for the Schema Explorer app."""
     data = preview(database, table, limit)
     return tool_result(f"{len(data['rows'])} row(s) from {database}.{table}", data)
+
+
+# --------------------------------------------------------------------------
+# Clean up: leftover SAS work tables (logic in ..housekeeping)
+# --------------------------------------------------------------------------
+
+
+@apps.tool(resource_uri=URI, title="Clean up work tables", annotations=_READ_ONLY)
+def cleanup_work_tables() -> CallToolResult:
+    """Open the Schema Explorer's Clean-up panel for leftover SAS work tables.
+
+    SAS jobs leave work tables behind in SingleStore (SAS Data Management
+    ``_dm…`` tables, SAS flow ``_flw…`` tables, ``SASTMP…`` / ``_tmp…``). The
+    panel scans every non-system database by name pattern (editable, and
+    optionally every table older than N days) and shows per table its rows,
+    size, creator, age, last use in the query history and dependent views.
+    The user selects tables, confirms, and they are dropped one by one (with a
+    dry-run mode and a log). Nothing is dropped by this call; only the user
+    can drop from the panel. Use this when the user wants to find or clean up
+    leftover, temporary or SAS work tables.
+
+    The result includes ``browser_url``, which opens this view full-window in
+    the user's browser: post it as a clickable link right under the app.
+    """
+    data: dict[str, Any] = {"databases": list_databases(), "mode": "cleanup",
+                            "cleanup_settings": housekeeping.load_settings()}
+    summary = "Schema Explorer opened in Clean-up mode; it scans for leftover work tables in the app."
+    summary = with_browser_link(summary, data, "cleanup_work_tables", {})
+    return tool_result(summary, data)
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=_READ_ONLY)
+def schema_explorer_cleanup_scan(
+    patterns: list[dict[str, str]] | None = None,
+    older_than_days: int | None = None,
+    recent_days: int | None = None,
+    save: bool = False,
+) -> CallToolResult:
+    """Find leftover work tables by name pattern (and age), for the Schema Explorer's Clean-up panel.
+
+    Args:
+        patterns: [{"pattern": "_dm*", "kind": "SAS DM"}, ...]; shell-style, case-insensitive. Omit for the saved ones.
+        older_than_days: Also offer every table not created/altered for this many days.
+        recent_days: Tables used or created this recently are flagged as risky.
+        save: Store these settings in ~/.singlestore-mcp/cleanup.json.
+    """
+    if save:
+        housekeeping.save_settings({"patterns": patterns if patterns is not None else housekeeping.load_settings()["patterns"],
+                                    "older_than_days": older_than_days, "recent_days": recent_days})
+    data = housekeeping.scan(patterns, older_than_days, recent_days)
+    data["settings"] = housekeeping.load_settings()
+    data["log"] = housekeeping.read_log(20)
+    return tool_result(housekeeping.scan_summary(data, limit=10), data)
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=_READ_ONLY)
+def schema_explorer_cleanup_settings(dry_run: bool | None = None) -> CallToolResult:
+    """Read (or change the dry-run default of) the Clean-up settings, plus recent log entries."""
+    s = housekeeping.save_settings({"dry_run": dry_run}) if dry_run is not None else housekeeping.load_settings()
+    return tool_result("Clean-up settings", {"settings": s, "log": housekeeping.read_log(50)})
+
+
+@apps.tool(
+    resource_uri=URI,
+    visibility=APP_ONLY,
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True),
+)
+def schema_explorer_cleanup_drop(
+    tables: list[dict[str, str]],
+    views: list[dict[str, str]] | None = None,
+    dry_run: bool = True,
+) -> CallToolResult:
+    """Drop the selected work tables one statement at a time (DROP TABLE IF EXISTS), for the Clean-up panel.
+
+    Re-checks each table on the server; system databases are refused and a table
+    with a dependent view is skipped unless that view is listed in ``views``
+    (it is then dropped first). With ``dry_run`` only the statements are returned.
+
+    Args:
+        tables: [{"database": "SASDP", "name": "_dmallchars"}, ...]
+        views: Dependent views to drop as well, same shape.
+        dry_run: Only show the statements; drop nothing.
+    """
+    data = housekeeping.drop(tables, views, dry_run)
+    return tool_result(housekeeping.drop_summary(data), data)
