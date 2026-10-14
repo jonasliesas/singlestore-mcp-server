@@ -20,6 +20,7 @@ from __future__ import annotations
 import http.client
 import json
 import re
+import socket
 import ssl
 import threading
 import time
@@ -103,12 +104,33 @@ def _drop(url: str) -> None:
             pass
 
 
+_IDEMPOTENT = {"GET", "HEAD", "PUT", "DELETE", "OPTIONS"}
+_RETRY_WAITS = (0.5, 1.5)  # seconds before the 2nd and 3rd try on a fresh connection
+
+
+def _transient(exc: BaseException) -> bool:
+    """A dropped connection (the VPN, a proxy or Viya's ingress cut it, often seen as an SSL EOF) – worth another
+    try. Not: refused connections or unknown hosts (Viya down / no VPN), which fail the same way again."""
+    if isinstance(exc, (ConnectionRefusedError, socket.gaierror, ssl.SSLCertVerificationError)):
+        return False
+    return isinstance(exc, (ssl.SSLError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError,
+                            http.client.RemoteDisconnected, http.client.IncompleteRead, EOFError))
+
+
 def _send(url: str, method: str, data: bytes | None, hdrs: dict[str, str], timeout: float, direct: bool,
           verify: bool) -> tuple[int, dict[str, str], bytes]:
-    for attempt in range(2):  # a kept-alive connection the server (or a proxy) closed meanwhile: reconnect once
+    """One request on a kept-alive connection. A reused connection the server (or a proxy) closed meanwhile is
+    reopened once. On a fresh connection a dropped connection is tried again twice (after 0.5 s and 1.5 s) when
+    nothing was sent yet (the TLS handshake) or the request is idempotent – never a POST that may have arrived."""
+    fresh_retries = 0
+    for _ in range(4):
         conn, target = _conn(url, verify, timeout, direct)
         reused = conn.sock is not None
+        sent = False
         try:
+            if conn.sock is None:
+                conn.connect()
+            sent = True
             conn.request(method, target, body=data, headers=hdrs)
             resp = conn.getresponse()
             raw = resp.read()
@@ -118,12 +140,16 @@ def _send(url: str, method: str, data: bytes | None, hdrs: dict[str, str], timeo
         except TimeoutError:
             _drop(url)
             raise
-        except (OSError, http.client.HTTPException):
-            # On a reused connection this is the server having closed it (often seen as an SSL EOF).
+        except (OSError, http.client.HTTPException, EOFError) as exc:
             _drop(url)
-            if attempt or not reused:
-                raise
-    raise AssertionError("unreachable")
+            if reused:
+                continue  # the server closed the kept-alive connection: reconnect
+            if fresh_retries < len(_RETRY_WAITS) and _transient(exc) and (not sent or method.upper() in _IDEMPOTENT):
+                time.sleep(_RETRY_WAITS[fresh_retries])
+                fresh_retries += 1
+                continue
+            raise
+    raise SasError(f"SAS Viya kept dropping the connection ({method} {urllib.parse.urlsplit(url).path})")
 
 
 def request(method: str, url: str, *, body: Any = None, accept: str = "application/json",
@@ -146,7 +172,7 @@ def request(method: str, url: str, *, body: Any = None, accept: str = "applicati
     for direct in routes:
         try:
             status, rh, raw = _send(url, method, data, hdrs, timeout, direct, s["ssl_verify"])
-        except (OSError, http.client.HTTPException) as exc:
+        except (OSError, http.client.HTTPException, EOFError) as exc:
             _drop(url)
             last = exc
             continue
@@ -320,7 +346,7 @@ class Compute:
 
         with self.lock:
             status, body = get()
-            if status in (404, 410) and "session" in str(body).lower():
+            if session_gone(status, body):
                 self.sid = None
                 status, body = get()
         if status == 404:
@@ -332,6 +358,38 @@ class Compute:
     def columns(self, libref: str, table: str) -> list[dict[str, Any]]:
         body = self._data(f"/{_q(libref)}/{_q(table)}/columns?limit=10000")
         return [_column(c) for c in (body.get("items", []) if isinstance(body, dict) else [])]
+
+    def columns_many(self, pairs: list[tuple[str, str]]) -> tuple[str, dict[tuple[str, str], list[dict[str, Any]] | None]]:
+        """Columns of several tables at once (the SQL Editor's autocomplete): one Compute data request per table,
+        in parallel. Returns (session id, {(libref, table): columns, or None when there's no such table}).
+        Other failures raise. A session that ended meanwhile is restarted once."""
+        for attempt in range(2):
+            with self.lock:
+                sid = self.session()
+            base = f"{_base()}/compute/sessions/{sid}/data"
+
+            def get(pair: tuple[str, str], base: str = base) -> tuple[int, Any]:
+                st, b, _ = request("GET", f"{base}/{_q(pair[0])}/{_q(pair[1])}/columns?limit=10000", timeout=120,
+                                   accept=_COLLECTION)
+                return st, b
+
+            with ThreadPoolExecutor(max(1, min(4, len(pairs)))) as pool:
+                answers = list(pool.map(get, pairs))
+            if any(session_gone(st, b) for st, b in answers) and not attempt:
+                with self.lock:
+                    if self.sid == sid:
+                        self.sid = None
+                continue
+            out: dict[tuple[str, str], list[dict[str, Any]] | None] = {}
+            for pair, (st, b) in zip(pairs, answers, strict=True):
+                if st == 200:
+                    out[pair] = [_column(c) for c in (b.get("items", []) if isinstance(b, dict) else [])]
+                elif st == 404:
+                    out[pair] = None
+                else:
+                    raise _viya_error(st, b, f"Couldn't describe {pair[0]}.{pair[1]}")
+            return sid, out
+        raise SasError("SAS session unavailable")
 
     def tables(self, libref: str) -> list[dict[str, Any]]:
         body = self._data(f"/{_q(libref)}?limit=10000")
@@ -381,6 +439,23 @@ class Compute:
 
 class _SessionGone(Exception):
     pass
+
+
+def session_gone(status: int, body: Any) -> bool:
+    """Is this Compute answer "the session has ended"? Every 404 names the session in its ``path:`` detail, so a
+    missing table (errorCode 5314) or libref (5301) must not count; an ended session is 410, or 404 with
+    errorCode 5837 / "A session with the ID … could not be found"."""
+    if status == 410:
+        return True
+    if status != 404:
+        return False
+    if isinstance(body, dict):
+        if body.get("errorCode") == 5837:
+            return True
+        text = " ".join([str(body.get("message") or ""), *[str(d) for d in body.get("details") or [] if not str(d).startswith("path:")]])
+    else:
+        text = str(body)
+    return bool(re.search(r"session with the id .* could not be found|session .*(not found|has ended|expired)", text, re.I))
 
 
 def _q(name: str) -> str:

@@ -22,8 +22,9 @@ Backlog and agreed designs: [ROADMAP.md](ROADMAP.md). User docs: [README.md](REA
   changes, restart the running server with the `restart_server` tool.
 - Tests (pytest + Playwright, Edge channel by default; isolated `SINGLESTORE_MCP_HOME` in a temp folder):
   - `.venv\Scripts\python.exe -m pytest -m "not cluster and not ui"` – offline subset, no VPN
-  - `.venv\Scripts\python.exe -m pytest` – everything except the assistants (~4–5 min, needs VPN)
+  - `.venv\Scripts\python.exe -m pytest` – everything except the assistants and SAS (~8–12 min, needs VPN)
   - `--assistants` also asks the in-app Claude assistants (uses Claude)
+  - `--sas` also runs the SAS Viya tests (slow – cold SAS sessions); run them before a release and after SAS changes
   - GitHub Actions (`.github/workflows/tests.yml`) runs ruff + the offline subset on Windows and Linux on every push;
     keep offline tests free of cluster, credentials and Windows-only paths.
 - Markers: `cluster`, `notebook`, `sas`, `assistants`, `ui` (`--strict-markers`). Lint: `ruff check`.

@@ -53,7 +53,17 @@ What's left / ideas:
   are found in the plan cache (shown in a toast) but may not be listed in the view.
 - No Stop for a long SAS run yet (jobs time out after 15 min); one SAS session serves all tabs, one run at
   a time.
-- Autocomplete has columns only for tables expanded in the tree (one call per table, kept cheap on purpose).
+- ~~Autocomplete has columns only for tables expanded in the tree~~ – done 2026-10-14 (uncommitted, for Jonas to
+  test): SAS tabs fetch the columns of tables the SQL names by themselves (`lib.table.`, aliases, tables named in
+  the statement, unqualified names; quoted / name-literal names; one-level names against the tab's library /
+  caslib), in the background (debounced 350 ms, one `sas_lookup_columns` call for all unknown tables of the
+  statement, ≤ 8, Compute tables in parallel), cached per Viya connection + library + table, "doesn't exist"
+  remembered 60 s; dropped on a new SAS session / other Viya connection / ↻ / Restart SAS session.
+  `apps/vendor/sas-complete.js` (detection + cache), tests `tests/test_sas_complete.py` (offline, node),
+  `test_lookup_columns_for_autocomplete` (`sas`), UI `test_sql_editor_sas_autocomplete_fetches_columns`.
+  Found on the way: every Compute 404 names the session in its `path:` detail, so a missing table was taken for
+  "session ended" and restarted the SAS session (~35 s, startup code again) – `sas_rest.session_gone` now checks
+  the error code / message.
 - An "S2" libname from the active SingleStore connection (as notebooks get) isn't assigned in the
   Workspace session; use the startup code.
 - Agreed design (kept for reference):
@@ -151,5 +161,16 @@ What's left / ideas:
   The same fix now covers workloads, saved connections, alerts and notebook saves (an unreadable
   workloads.json / connections.json used to read as empty, so the next save could drop every workload or
   connection).
-- Under the load of the full suite, `tests/ui/test_sas_ep_ui.py` and `tests/ui/test_sas_ui.py::test_sql_editor_run_as_proc_sql`
-  failed once (2026-10-14); both pass when run on their own – probably waits too short for a cold SAS session.
+- ~~Under the load of the full suite, `tests/ui/test_sas_ep_ui.py` and `tests/ui/test_sas_ui.py::test_sql_editor_run_as_proc_sql`
+  failed once~~ – fixed 2026-10-14 (uncommitted). PROC SQL: the failing step was the SAS library list – the
+  screenshot of that run shows "Couldn't reach SAS Viya … UNEXPECTED_EOF_WHILE_READING" in the tree, a dropped
+  connection on a fresh HTTPS connection, which `sas_rest` retried only on a reused one. Now a dropped connection
+  (SSL EOF / reset / remote closed – not refused or unknown host) is tried twice more (0.5 s, 1.5 s) when nothing
+  was sent yet or the request is idempotent; a POST that may have arrived is never repeated (offline tests with a
+  local dropping server). The test warms the SAS session through MCP in a fixture, waits 180 s for the tree and
+  stops at once with the tree's error; its autosave sleep became a poll. EP card: the Playwright error came from a
+  fixed 30 s step (list, then the tuning button, which stays disabled until the run's full SQL loads); each step now
+  waits for its own condition (list idle with SAS EP rows, button enabled, card or error) with 120–180 s. Not
+  reproduced with a 12-core CPU load (2 runs, 3–4 min each but green); after the fix single runs of
+  both tests were green (the 3× full-folder / 10× repeat runs were stopped as too slow). Also seen once in a baseline run: `test_cluster_monitor_ui` (no `.cm-node` within 10 s after going
+  back to Overview) – not looked into.

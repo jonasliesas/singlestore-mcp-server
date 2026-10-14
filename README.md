@@ -348,9 +348,28 @@ SingleStore-native and through SAS side by side.
   language, e.g. a SAS library (`s2.cars`) or a `proc` step while the tab
   runs SingleStore SQL, backticks in a SAS tab, or `LIMIT` in PROC SQL:
   **Run as …** instead, or **Run anyway**.
-- **Autocomplete** in SAS tabs suggests libraries / caslibs, their tables and
-  the columns of tables you've expanded in the tree (typing `lib.` loads its
-  tables).
+- **Autocomplete** in SAS tabs suggests libraries / caslibs, their tables
+  (typing `lib.` loads its tables) and columns – also of tables you haven't
+  expanded in the tree. When the SQL names a table the editor doesn't know
+  yet, it fetches its columns in the background and shows them when they
+  arrive (typing never waits; the first SAS use starts the session, ~35 s):
+  - after `lib.table.`, after an alias (`select c. from s2.cars c` → the CARS
+    columns), after a table named in the statement (`cars.`), and for
+    unqualified names (the columns of every table in `FROM` / `JOIN`);
+  - quoted names work: `"My caslib"."My table"`, `'a b'n`;
+  - one-level names: PROC SQL uses the tab's library (else WORK), FedSQL in
+    CAS the tab's caslib (else CASUSER); FedSQL one-level names are WORK
+    tables.
+  - Round trips stay few: lookups wait until you pause (~0.35 s), every
+    unknown table of the statement goes in one call (up to 8), each table is
+    looked up once and cached per SAS Viya connection + library + table, and
+    a table that doesn't exist is remembered for a minute. The cache is
+    dropped when the active Viya connection changes, when the SAS session
+    restarts, with the tree's **↻** and with **Restart SAS session** (⚙).
+  - Backend: `sas_lookup_columns(language, tables)` (app-only, read-only):
+    Compute tables in parallel through the Compute data API (a miss is tried
+    once more with the library's own spelling of the name), caslib tables
+    through `table.columnInfo`.
 - The history keeps the language with each statement; **Run** runs it again
   as that language.
 
@@ -1841,8 +1860,9 @@ The test suite lives in `tests/` (pytest + Playwright); a performance report liv
 
 ```powershell
 .venv\Scripts\python.exe -m pytest -m "not cluster and not ui"   # offline subset (no VPN): lint, JS syntax, protocol, workload unit tests
-.venv\Scripts\python.exe -m pytest                               # everything except the assistants (~4-5 min)
+.venv\Scripts\python.exe -m pytest                               # everything except the assistants and SAS (~8-12 min)
 .venv\Scripts\python.exe -m pytest --assistants                  # also ask the in-app Claude assistants (uses Claude)
+.venv\Scripts\python.exe -m pytest --sas                         # also the SAS Viya tests (slow: cold SAS sessions; before a release or after SAS changes)
 .venv\Scripts\python.exe -m pytest tests\test_workload.py        # one file
 .venv\Scripts\python.exe -m pytest -k "sql_editor or copy"       # by name
 .venv\Scripts\python.exe -m pytest tests\ui --headed              # watch the browser tests
@@ -1861,7 +1881,7 @@ while Claude has the server's .exe open.
 |---|---|
 | `cluster` | Needs the SingleStore cluster. Skipped when `list_databases` fails. |
 | `notebook` | Starts a notebook kernel (slow). |
-| `sas` | Needs a signed-in SAS Viya. Skipped when `sas_viya_test` fails (see below). |
+| `sas` | Needs a signed-in SAS Viya. Skipped unless `--sas` is given (slow: cold SAS sessions), and when `sas_viya_test` fails (see below). |
 | `assistants` | Asks the in-app Claude assistants. Runs only with `--assistants`. |
 | `ui` | Drives the apps in a browser with Playwright. Most also carry `cluster`; `ui/test_connections_ui.py` needs neither the cluster nor Viya. |
 

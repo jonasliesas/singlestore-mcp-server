@@ -5,7 +5,8 @@ whole session. It runs against an isolated SINGLESTORE_MCP_HOME (see support.see
 SQL folder, with the background alert checker off.
 
 Markers (see pyproject.toml): ``cluster`` tests are skipped when the cluster can't be reached, ``sas``
-tests when SAS Viya can't, and ``assistants`` tests unless ``--assistants`` is given. ``ui`` tests that
+tests unless ``--sas`` is given (a cold SAS session takes ~35 s; run them before a release or after SAS
+changes) and when SAS Viya can't be reached, and ``assistants`` tests unless ``--assistants`` is given. ``ui`` tests that
 need the cluster are marked ``cluster`` too.
 """
 
@@ -22,6 +23,8 @@ from support import DB, McpSession, remove_links, seed_home, server_env
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption("--assistants", action="store_true", default=False,
                      help="also run the tests that ask the in-app Claude assistants (uses Claude)")
+    parser.addoption("--sas", action="store_true", default=False,
+                     help="also run the tests that need SAS Viya (slow: they start SAS sessions)")
 
 
 # ----------------------------------------------------------------------------- isolated server state
@@ -71,7 +74,9 @@ def cluster(mcp: McpSession) -> McpSession:
 
 
 @pytest.fixture(scope="session")
-def sas(cluster: McpSession) -> McpSession:
+def sas(request: pytest.FixtureRequest, cluster: McpSession) -> McpSession:
+    if not request.config.getoption("--sas"):
+        pytest.skip("SAS tests are slow: run with --sas")
     r = cluster.call("sas_viya_test", timeout=60)
     if r.is_error or not (isinstance(r.data, dict) and r.data.get("ok")):
         reason = r.data.get("error") if isinstance(r.data, dict) else r.text

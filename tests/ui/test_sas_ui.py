@@ -19,8 +19,21 @@ def _set_sql(frame: Any, sql: str, run: bool = True, **extra: Any) -> None:
     frame.evaluate("(d) => window.dispatchEvent(new CustomEvent('s2:set-sql', {detail: d}))", {"sql": sql, "run": run, **extra})
 
 
+@pytest.fixture(scope="module")
+def sas_warm(sas: McpSession) -> McpSession:
+    """Start the test server's SAS session before the browser needs it: a cold session takes ~35 s plus the startup
+    code, longer under load, and the UI's waits should be about the UI. One retry for a dropped connection."""
+    for attempt in range(2):
+        r = sas.call("sas_libraries", {}, timeout=300)
+        if not r.is_error:
+            return sas
+        if attempt:
+            pytest.fail(f"SAS session didn't start: {r.text[:400]}")
+    return sas
+
+
 @pytest.fixture
-def workspace(ui, app_url):
+def workspace(ui, app_url, sas_warm):
     page, errors = ui
     page.goto(app_url("sql_editor", {"database": DB, "view": "sql", "new_tab": True, "sql": "-- SAS UI test"}),
               wait_until="domcontentloaded")
@@ -35,9 +48,10 @@ def test_sql_editor_run_as_proc_sql(workspace, sas: McpSession) -> None:
     run_as = sql.get_by_label("Run as", exact=True)
     run_as.select_option("procsql")
     assert wait_js(sql, "document.querySelector('.sq-editor .sq-lang')?.textContent === 'PROC SQL'", 5), "editor badge not PROC SQL"
-    # The tree lists SAS libraries (the SAS session starts on the first use).
-    assert wait_js(sql, "[...document.querySelectorAll('.sq-tree .sq-row .name')].some((e) => e.textContent === 'SASHELP')", 120), \
-        "SAS libraries not listed: " + text(sql)[-500:]
+    # The tree lists SAS libraries (the session is warm: sas_warm); an error in the tree ends the wait at once.
+    listed = wait_js(sql, "[...document.querySelectorAll('.sq-tree .sq-row .name')].some((e) => e.textContent === 'SASHELP') ? 'ok'"
+                          " : (document.querySelector('.sq-tree .s2-error')?.innerText ?? '')", 180)
+    assert listed == "ok", "SAS libraries not listed: " + (listed or text(sql)[-500:])
 
     _set_sql(sql, "select name, age, height from sashelp.class where age > 14;")
     assert wait_js(sql, r"/Result \(\d+\)/.test(document.querySelector('.sq-status')?.innerText ?? '')", 90), \
@@ -68,8 +82,12 @@ def test_sql_editor_run_as_proc_sql(workspace, sas: McpSession) -> None:
     sql.locator(".cm-content").click()
     page.keyboard.press("Control+Shift+L")
     assert wait_js(sql, "document.querySelector('.sq-runas')?.value === 'fedsql'", 5), "Ctrl+Shift+L didn't switch to FedSQL"
-    time.sleep(1.8)  # autosave
-    langs = {t["id"]: t.get("language") for t in sas.ok("sql_editor_tabs")["tabs"]}
+    deadline = time.monotonic() + 20  # autosave (~1.5 s after the change; slower under load)
+    while True:
+        langs = {t["id"]: t.get("language") for t in sas.ok("sql_editor_tabs")["tabs"]}
+        if "fedsql" in langs.values() or time.monotonic() > deadline:
+            break
+        time.sleep(0.3)
     assert "fedsql" in langs.values(), langs
 
     # SingleStore SQL that is really SAS: the editor asks instead of failing.
@@ -77,6 +95,34 @@ def test_sql_editor_run_as_proc_sql(workspace, sas: McpSession) -> None:
     _set_sql(sql, "proc print data=sashelp.class; run;")
     assert wait_js(sql, "document.body.innerText.includes('This is SAS code')", 10), "no language warning: " + text(sql)[-400:]
     sql.get_by_role("button", name="Cancel", exact=True).click()
+    errs = [e for e in errors.drain() if "favicon" not in e]
+    assert not errs, errs
+
+
+def test_sql_editor_sas_autocomplete_fetches_columns(workspace, sas: McpSession) -> None:
+    """Typing "select c. from sashelp.class c" in a PROC SQL tab suggests CLASS's columns after "c." without the
+    table being expanded in the tree: the editor looks them up in the background (alias resolved)."""
+    page, errors, ws, sql = workspace
+    sql.get_by_label("Run as", exact=True).select_option("procsql")
+    assert wait_js(sql, "document.querySelector('.sq-editor .sq-lang')?.textContent === 'PROC SQL'", 5)
+    sql.locator(".cm-content").click()
+    page.keyboard.press("Control+A")
+    page.keyboard.type("select c. from sashelp.class c")
+    page.keyboard.press("Escape")
+    page.keyboard.press("Home")
+    for _ in range(len("select c.")):
+        page.keyboard.press("ArrowRight")
+    page.keyboard.press("Control+Space")
+    # The first SAS use starts the session (~35 s cold): the suggestions open when the columns arrive.
+    got = wait_js(sql, "[...document.querySelectorAll('.cm-tooltip-autocomplete li .cm-completionLabel')].map((e) => e.textContent)"
+                       ".filter((t) => /^(Name|Sex|Age|Height|Weight)$/i.test(t))", 150)
+    assert got and len(got) == 5, "no CLASS columns suggested after c.: " + text(sql)[-500:]
+    assert "Height" not in sql.locator(".sq-tree").inner_text(), "CLASS was expanded in the tree"
+    # Click the option (not Enter: the popup can be reopened in between – e.g. when SASHELP's table list arrives –
+    # and Enter on a closed popup inserts a line break). Playwright re-finds the option if it's re-rendered.
+    sql.locator(".cm-tooltip-autocomplete li", has=sql.locator(".cm-completionLabel", has_text="Age")).first.click()
+    assert wait_js(sql, r"/^select c\.age from sashelp\.class c$/i.test(document.querySelector('.cm-content').innerText.trim())", 10), \
+        sql.locator(".cm-content").inner_text()
     errs = [e for e in errors.drain() if "favicon" not in e]
     assert not errs, errs
 

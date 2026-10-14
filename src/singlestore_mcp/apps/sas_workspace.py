@@ -185,11 +185,103 @@ def cas_columns(caslib: str, table: str) -> CallToolResult:
         msg = " ".join(x for x in res["log"].splitlines() if x.startswith("ERROR"))[:300] or res["status"]
         raise LookupError(f"CAS couldn't describe {lib}.{tbl}: {msg}")
     _, rows = sas_rest.cas_table(sas_rest.first_table(res["results"], "ColumnInfo"))
-    cols = [{"name": r.get("Column"), "type": "char" if "char" in str(r.get("Type", "")).lower() else "num",
-             "cas_type": r.get("Type"), "length": r.get("RawLength"),
-             "format": (f"{r.get('Format')}{r.get('FormattedLength') or ''}." if r.get("Format") else None),
-             "label": r.get("Label") or None, "position": r.get("ID")} for r in rows]
+    cols = [_cas_column(r) for r in rows]
     return tool_result(f"{len(cols)} column(s) in {lib}.{tbl}", {"caslib": lib, "table": tbl, "columns": cols})
+
+
+MAX_LOOKUP = 8  # tables per sas_lookup_columns call
+
+
+def _lookup_pairs(tables: list[dict[str, Any]], language: str) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for t in tables or []:
+        if not isinstance(t, dict):
+            raise ValueError("tables: a list of {library, table}")
+        lib = _check_name(str(t.get("library") or ""), "caslib" if language == "cas" else "libref")
+        tbl = _check_name(str(t.get("table") or ""), "table name")
+        if language != "cas":
+            lib = lib.upper()
+        key = (lib.upper(), tbl.upper())
+        if key not in seen:
+            seen.add(key)
+            pairs.append((lib, tbl))
+    if len(pairs) > MAX_LOOKUP:
+        raise ValueError(f"Look up at most {MAX_LOOKUP} tables at a time.")
+    return pairs
+
+
+def _cas_describe(lib: str, tbl: str) -> list[dict[str, Any]] | None:
+    """Columns of a CAS table, or None when CAS can't find (or describe) it."""
+    res = cas.action("table.columnInfo", {"table": {"caslib": lib, "name": tbl}}, check=False)
+    if str(res["severity"]).lower() == "error":
+        return None
+    _, rows = sas_rest.cas_table(sas_rest.first_table(res["results"], "ColumnInfo"))
+    return [_cas_column(r) for r in rows]
+
+
+def _cas_column(r: dict[str, Any]) -> dict[str, Any]:
+    return {"name": r.get("Column"), "type": "char" if "char" in str(r.get("Type", "")).lower() else "num",
+            "cas_type": r.get("Type"), "length": r.get("RawLength"),
+            "format": (f"{r.get('Format')}{r.get('FormattedLength') or ''}." if r.get("Format") else None),
+            "label": r.get("Label") or None, "position": r.get("ID")}
+
+
+def lookup_columns(language: str, pairs: list[tuple[str, str]]) -> dict[str, Any]:
+    """Columns for the SQL Editor's autocomplete: {session, tables: [{library, table, name, columns | None}]}.
+    ``session`` names the Viya connection and SAS session the answer came from (the editor forgets its cache
+    when it changes). Compute: one data request per table, in parallel; a miss is retried once with the
+    library's own spelling of the name (SAS/ACCESS tables can be case-sensitive). CAS: one columnInfo each."""
+    conn = sas_viya.settings()["name"]
+    found: dict[tuple[str, str], tuple[str, list[dict[str, Any]] | None]] = {}
+    if language == "cas":
+        with cas.lock:
+            sid = cas.session()
+            for lib, tbl in pairs:
+                found[(lib, tbl)] = (tbl, _cas_describe(lib, tbl))
+    else:
+        sid, got = compute.columns_many(pairs)
+        for pair, cols in got.items():
+            found[pair] = (pair[1], cols)
+        misses = [p for p, (_, cols) in found.items() if cols is None]
+        retry: list[tuple[str, str]] = []
+        names: dict[tuple[str, str], str] = {}
+        for lib in {p[0] for p in misses}:
+            try:
+                listed = [str(t["name"]) for t in compute.tables(lib)]
+            except LookupError:
+                continue  # no such library
+            for p in misses:
+                if p[0] != lib:
+                    continue
+                real = next((n for n in listed if n.upper() == p[1].upper()), None)
+                if real and real != p[1]:
+                    names[(lib, real)] = p[1]
+                    retry.append((lib, real))
+        if retry:
+            sid2, again = compute.columns_many(retry)
+            if sid2 == sid:
+                for (lib, real), cols in again.items():
+                    found[(lib, names[(lib, real)])] = (real, cols)
+    tables = [{"library": lib, "table": tbl, "name": name, "columns": cols, "missing": cols is None}
+              for (lib, tbl), (name, cols) in found.items()]
+    return {"language": language, "connection": conn, "session": f"{conn}|{'cas' if language == 'cas' else 'compute'}|{sid}",
+            "tables": tables}
+
+
+@apps.tool(resource_uri=EDITOR_URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def sas_lookup_columns(language: str, tables: list[dict[str, Any]]) -> CallToolResult:
+    """Columns of up to 8 SAS tables (``[{library, table}]``) for the SQL Editor's autocomplete, in one call:
+    SAS libraries for procsql / fedsql, caslibs for cas. A table that doesn't exist comes back with
+    ``missing: true`` (not an error), so the editor can remember it briefly and not ask again."""
+    if language not in sas_sql.LANGUAGES:
+        raise ValueError(f"language must be one of {', '.join(sas_sql.LANGUAGES)}")
+    pairs = _lookup_pairs(tables, language)
+    if not pairs:
+        return tool_result("no tables", {"language": language, "session": None, "tables": []})
+    data = lookup_columns(language, pairs)
+    hit = sum(1 for t in data["tables"] if not t["missing"])
+    return tool_result(f"columns of {hit} of {len(pairs)} table(s)", data)
 
 
 @apps.tool(resource_uri=SCHEMA_URI, visibility=APP_ONLY, annotations=STATE)

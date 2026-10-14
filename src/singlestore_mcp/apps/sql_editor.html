@@ -8,6 +8,7 @@
 <!--S2:VENDOR:codemirror-bundle.js-->
 <!--S2:VENDOR:singlestore_functions.json-->
 <!--S2:VENDOR:s2-charts.js-->
+<!--S2:VENDOR:sas-complete.js-->
 <style>
   body { padding: 10px 12px; }
   .sq-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
@@ -247,6 +248,7 @@ const sas = {
   tables: new Map(),             // "sas|LIB" / "cas|CASLIB" -> {status, data, error}
   columns: new Map(),            // "sas|LIB\u0000TABLE" -> {status, data, error}
   viya: null,                    // sas_connections_state: the saved SAS Viya connections and the active one
+  colCache: new SasComplete.ColumnCache({ missingTtl: 60_000 }),  // autocomplete columns (see sasColumnSource)
 };
 async function loadViya(force = false) {
   if (sas.viya && !force) return;
@@ -255,6 +257,7 @@ async function loadViya(force = false) {
 }
 function forgetSas() {
   sas.status = null; sas.libs = null; sas.caslibs = null; sas.libsError = null; sas.casError = null; sas.tables.clear(); sas.columns.clear();
+  sas.colCache.clear();
 }
 // The active SAS Viya connection (Connections → SAS Viya); switching restarts the Workspace's SAS sessions there.
 async function switchViya(name) {
@@ -328,6 +331,7 @@ async function loadSasColumns(lib, table, lang = state.language) {
   try {
     const data = lang === "cas" ? await S2.callTool("cas_columns", { caslib: lib, table }) : await S2.callTool("sas_columns", { library: lib, table });
     sas.columns.set(key, { status: "ok", data });
+    sas.colCache.ok(colKey(lang, lib, table), data.columns, table);
   } catch (e) { sas.columns.set(key, { status: "error", error: cleanError(e) }); }
   renderTree(); refreshCompletion();
   return sas.columns.get(key).status === "ok" ? sas.columns.get(key).data.columns : null;
@@ -584,6 +588,122 @@ function sasLazySource(ctx) {
   return null;
 }
 
+// Columns of the tables a SAS statement names, without expanding them in the tree: "lib.table.", an alias
+// ("from s2.cars c" → "c."), a table named in the statement, and unqualified names (columns of every table
+// in FROM / JOIN). One-level names use the tab's library (PROC SQL) / caslib (CAS), else WORK / CASUSER;
+// FedSQL one-level names are WORK tables. Unknown tables are looked up in the background (sas_lookup_columns):
+// debounced, one call for every unknown table of the statement (up to 8), cached per Viya connection + library +
+// table; a table that doesn't exist (or a failed lookup) is remembered for a minute. Typing never waits: the
+// suggestions open when the columns arrive. The cache is dropped with a new SAS session, another Viya
+// connection, the tree's ↻ and "Restart SAS session" (⚙).
+const SC = SasComplete;
+const colKey = (lang, lib, table) => SC.ColumnCache.key(sas.viya?.active ?? "", srcOf(lang), lib, table);
+const lookup = { queue: new Map(), timer: null, reopen: false, inflight: 0 };
+const canonLib = (lib, lang) => libMeta(lib, lang)?.name ?? (lang === "cas" ? lib : String(lib).toUpperCase());
+function canonTable(lib, table, lang) {
+  const t = sas.tables.get(`${srcOf(lang)}|${lib}`);
+  const hit = t?.status === "ok" ? t.data.tables.find((x) => x.name.toUpperCase() === String(table).toUpperCase()) : null;
+  return hit?.name ?? table;
+}
+// Skip names that can't be tables of a known library (e.g. "extract(year from d)"); before the list loads, ask.
+function knownLib(lib, lang) {
+  const list = lang === "cas" ? sas.caslibs : sas.libs;
+  if (!list || (lang === "cas" && /^CASUSER$/i.test(lib))) return true;
+  return !!libMeta(lib, lang);
+}
+function wantColumns(tables, lang) {
+  for (const t of tables) {
+    if (!knownLib(t.lib, lang)) continue;
+    const library = canonLib(t.lib, lang), table = canonTable(library, t.table, lang);
+    const key = colKey(lang, library, table);
+    if (sas.colCache.get(key) || lookup.queue.has(key)) continue;
+    lookup.queue.set(key, { lang, library, table });
+  }
+  if (lookup.queue.size && !lookup.timer) lookup.timer = setTimeout(flushLookups, 350);
+}
+async function flushLookups() {
+  lookup.timer = null;
+  const items = [...lookup.queue.entries()];
+  lookup.queue.clear();
+  const batches = [];
+  for (const lang of new Set(items.map(([, v]) => v.lang))) {
+    const mine = items.filter(([, v]) => v.lang === lang);
+    for (let i = 0; i < mine.length; i += 8) batches.push(mine.slice(i, i + 8));
+  }
+  for (const [k] of items) sas.colCache.loading(k);
+  lookup.inflight++;
+  try {
+    await Promise.all(batches.map(async (batch) => {
+      const lang = batch[0][1].lang;
+      try {
+        const res = await S2.callTool("sas_lookup_columns", { language: lang, tables: batch.map(([, v]) => ({ library: v.library, table: v.table })) });
+        if (sas.colCache.session(res.session, srcOf(lang))) for (const [k] of batch) sas.colCache.loading(k);  // new SAS session: old entries dropped
+        for (const [k, v] of batch) {
+          const t = res.tables.find((x) => x.library.toUpperCase() === v.library.toUpperCase() && x.table.toUpperCase() === v.table.toUpperCase());
+          if (t && !t.missing) {
+            sas.colCache.ok(k, t.columns, t.name);
+            const ck = `${srcOf(lang)}|${v.library}\u0000${t.name}`;
+            if (!sas.columns.has(ck)) sas.columns.set(ck, { status: "ok", data: { columns: t.columns } });
+          } else sas.colCache.missing(k);
+        }
+      } catch (e) {
+        for (const [k] of batch) sas.colCache.missing(k, cleanError(e).message);  // tried again after the minute
+      }
+    }));
+  } finally { lookup.inflight--; }
+  if (lookup.inflight || lookup.queue.size) return;
+  renderTree();
+  if (lookup.reopen && view.hasFocus) { lookup.reopen = false; CM.startCompletion(view); }
+}
+function colIdent(name, lang) {
+  if (lang === "procsql") return sasName(name);
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : fedName(name);
+}
+function sasColumnSource(ctx) {
+  const lang = state.language;
+  if (!isSas(lang)) return null;
+  lookup.reopen = false;
+  const text = ctx.state.doc.toString();
+  const range = sasStatementRanges(text).find((r) => ctx.pos >= r.from && ctx.pos <= r.to) ?? { from: ctx.pos, to: ctx.pos };
+  const stmt = text.slice(range.from, range.to);
+  if (!stmt.trim() || isPlainSas(stmt)) return null;
+  const before = text.slice(Math.max(range.from, ctx.pos - 400), ctx.pos);
+  const selected = curLib(lang);
+  const all = SC.statementTables(stmt, lang, selected);
+  const q = SC.qualifierAt(before);
+  let targets, from;
+  if (q) {
+    targets = SC.targetsFor(q.parts, SC.tableRefs(stmt, lang), lang, selected);
+    from = ctx.pos - q.partial.length;
+  } else {
+    const w = ctx.matchBefore(/[\w$]+$/);
+    // Not while a table name is typed after FROM / JOIN, and not on an empty spot unless asked (Ctrl+Space).
+    if ((!w && !ctx.explicit) || /\b(from|join)\s+[\w$]*$/i.test(before)) targets = null;
+    else targets = all;
+    from = w ? w.from : ctx.pos;
+  }
+  wantColumns(targets ? [...targets, ...all] : all, lang);
+  if (!targets) return null;
+  const many = !q && targets.length > 1;
+  const options = [];
+  let pending = false;
+  for (const t of targets) {
+    if (!knownLib(t.lib, lang)) continue;
+    const library = canonLib(t.lib, lang), table = canonTable(library, t.table, lang);
+    const e = sas.colCache.get(colKey(lang, library, table));
+    if (!e || e.status === "loading") { pending = true; continue; }
+    if (e.status !== "ok") continue;
+    for (const c of e.columns) {
+      const ident = colIdent(c.name, lang);
+      options.push({ label: c.name, type: "property", apply: ident === c.name ? undefined : ident,
+        detail: [c.type, c.length, c.format, c.label].filter(Boolean).join(" · ") + (many ? ` · ${e.name ?? table}` : "") });
+    }
+  }
+  if (pending && (q || ctx.explicit)) lookup.reopen = true;
+  if (!options.length) return null;
+  return { from, options, validFor: /^[\w$]*$/ };
+}
+
 const sqlCompartment = new CM.Compartment();
 function sqlExtension() {
   if (isSas()) {
@@ -591,7 +711,8 @@ function sqlExtension() {
     const data = (source) => d.language.data.of({ autocomplete: source });
     const config = { dialect: d, schema: sasNamespace(), defaultSchema: curLib() ?? undefined, upperCaseKeywords: false };
     return [d.language, data(CM.schemaCompletionSource(config)),
-      data(notAfterDot(notInQuotes(CM.keywordCompletionSource(d, false)))), data(sasLazySource)];
+      data(notAfterDot(notInQuotes(CM.keywordCompletionSource(d, false)))), data(sasLazySource),
+      data(CM.ifNotIn(["String", "LineComment", "BlockComment"], sasColumnSource))];
   }
   const config = { dialect, schema: schemaNamespace(), defaultSchema: state.database ?? undefined, upperCaseKeywords: true };
   const data = (source) => dialect.language.data.of({ autocomplete: source });
@@ -826,7 +947,7 @@ function renderSasTree() {
   const rows = [h("div", { class: "sq-row", style: { cursor: "default", gap: "6px" } },
     langBadge(state.language), h("span", { class: "meta", style: { flex: 1 } }, cas ? "caslibs" : "SAS libraries"),
     h("button", { class: "s2-btn ghost act on", title: cas ? "Reload the caslibs" : "Reload the libraries (the SAS session keeps running)",
-      onclick: (e) => { e.stopPropagation(); sas.tables.clear(); sas.columns.clear(); loadSasLibraries(true); } }, "↻"))];
+      onclick: (e) => { e.stopPropagation(); sas.tables.clear(); sas.columns.clear(); sas.colCache.clear(); loadSasLibraries(true); } }, "↻"))];
   if (err) rows.push(h("div", { class: "sq-row" }, h("span", { class: "s2-error", style: { padding: "2px 6px", whiteSpace: "normal" } }, err.message)));
   if (!list) {
     rows.push(h("div", { class: "sq-placeholder" }, loading ? [h("span", { class: "s2-spinner" }), cas ? " Starting CAS…" : " Starting the SAS session (the first time takes a while)…"] : ""));
@@ -1606,7 +1727,7 @@ function renderSasPanel() {
     st?.startup?.errors ? h("span", { class: "warn", title: st.startup.first_error ?? "" }, `startup code: ${st.startup.errors} error(s)`) : null,
     h("button", { class: "s2-btn ghost", title: "End the Workspace's SAS and CAS sessions; the next run starts new ones (the startup code from Connections runs again)",
       onclick: async () => {
-        try { sas.status = await S2.callTool("sas_session_reset", {}); sas.libs = null; sas.caslibs = null; sas.tables.clear(); sas.columns.clear(); S2.toast("SAS sessions ended", "ok"); loadSasLibraries(); }
+        try { sas.status = await S2.callTool("sas_session_reset", {}); sas.libs = null; sas.caslibs = null; sas.tables.clear(); sas.columns.clear(); sas.colCache.clear(); S2.toast("SAS sessions ended", "ok"); loadSasLibraries(); }
         catch (e) { S2.toast(cleanError(e).message, "err"); }
       } }, "Restart SAS session"),
     h("button", { class: "s2-btn ghost", onclick: () => toggleSasPanel(false) }, "Close"));

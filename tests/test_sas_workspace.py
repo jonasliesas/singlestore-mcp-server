@@ -117,3 +117,20 @@ def test_history_records_language(sas: McpSession) -> None:
     _ok(sas, "sas_query", {"language": "procsql", "sql": "select count(*) as n from sashelp.class"})
     h = _ok(sas, "sql_editor_history", {"limit": 5})
     assert any(e.get("language") == "procsql" for e in h["entries"])
+
+
+def test_lookup_columns_for_autocomplete(sas: McpSession) -> None:
+    """The SQL Editor's background column lookup: several tables in one call, a missing table is ``missing``
+    (no error, and the SAS session isn't restarted for it), a lower-case name finds the table."""
+    d = _ok(sas, "sas_lookup_columns", {"language": "procsql", "tables": [
+        {"library": "sashelp", "table": "class"}, {"library": "SASHELP", "table": "S2_NO_SUCH_TABLE"},
+        {"library": "NOSUCHLB", "table": "X"}]})
+    by = {(t["library"], t["table"].upper()): t for t in d["tables"]}
+    cols = by[("SASHELP", "CLASS")]["columns"]
+    assert [c["name"].upper() for c in cols][:2] == ["NAME", "SEX"]
+    assert by[("SASHELP", "S2_NO_SUCH_TABLE")]["missing"] and by[("NOSUCHLB", "X")]["missing"]
+    again = _ok(sas, "sas_lookup_columns", {"language": "procsql", "tables": [{"library": "SASHELP", "table": "CARS"}]})
+    assert again["session"] == d["session"], "a missing table restarted the SAS session"
+    assert not again["tables"][0]["missing"]
+    c = _ok(sas, "sas_lookup_columns", {"language": "cas", "tables": [{"library": "CASUSER", "table": "S2_NO_SUCH_TABLE"}]})
+    assert c["tables"][0]["missing"] and c["session"].split("|")[1] == "cas"
