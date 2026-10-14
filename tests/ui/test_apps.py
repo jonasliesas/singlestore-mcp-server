@@ -542,7 +542,7 @@ STANDALONE = [
     ("query_history", {}, "ms"),
     ("alerts", {}, "Rule"),
     ("notebook", {"database": DB}, "SQL"),
-    ("connections_window", {}, "Environment variables"),
+    ("connections_window", {}, "New connection"),
     ("workload", {}, "Workload"),
     ("sql_editor", {"database": DB}, "SQL"),
 ]

@@ -3,7 +3,7 @@
     .venv\\Scripts\\python.exe perf\\perf.py [--quick] [--latency-n 20] [--soak 60] [--cold 5]
 
 Measures cold start, warm latency (p50 / p95 per tool), concurrency, large results, a mixed-load soak and
-server memory, against the cluster from the ``singlestore`` entry in ~/.claude.json (VPN needed), with an
+server memory, against the cluster of your active saved connection (VPN needed), with an
 isolated server home like the test suite. Writes perf/results/<version>-<timestamp>.json and compares it
 with the most recent earlier results file: p50 / p95 changes over 25% are printed as warnings (never a
 failure; network latency to the cluster varies).

@@ -2,8 +2,10 @@
 
 * ``isolated_home``: a throwaway SINGLESTORE_MCP_HOME seeded from the real ~/.singlestore-mcp
   (SAS settings, query history cache, CA bundle; the notebook Python env through a directory junction).
-* ``server_env``: the environment the test server runs with (cluster credentials from the
-  ``singlestore`` entry of ~/.claude.json, plus the isolated home).
+* ``server_env``: the environment the test server runs with: the isolated home, which holds a copy of
+  your saved connections (passwords stay in the OS credential store), so the test server uses your
+  active connection – or the one named in S2_TEST_CONNECTION. Only without saved connections does it
+  fall back to the SINGLESTORE_* variables of the ``singlestore`` entry in ~/.claude.json.
 * ``McpSession``: a synchronous facade over one ``mcp.client.Client`` connected over stdio, running its
   asyncio loop in a background thread so tests stay plain synchronous functions.
 
@@ -29,9 +31,9 @@ APPS_DIR = REPO / "src" / "singlestore_mcp" / "apps"
 PYTHON = REPO / ".venv" / "Scripts" / "python.exe" if sys.platform == "win32" else REPO / ".venv" / "bin" / "python"
 REAL_HOME = Path(os.environ.get("SINGLESTORE_MCP_HOME") or Path.home() / ".singlestore-mcp").expanduser()
 
-# Copied from the real home into the test home when present (connections.json deliberately is not:
-# the test server uses the built-in "Environment variables" connection).
-SEED_FILES = ("sas.json", "query_history.db", "singlestore_bundle.pem")
+# Copied from the real home into the test home when present. connections.json holds no passwords (they are
+# in the OS credential store, which the test server shares), so the test server signs in like yours does.
+SEED_FILES = ("connections.json", "sas.json", "query_history.db", "singlestore_bundle.pem")
 # Opt-in (S2_TEST_SAS_SECRETS=1): also copy the encrypted secrets file, which holds the SAS Viya sign-in
 # (too large for the Windows credential store). Off by default: the test server may refresh the token in
 # its copy, and the real file would then keep the old one.
@@ -113,12 +115,27 @@ def seed_home(home: Path) -> dict[str, Any]:
         if src.is_dir() and not (home / name).exists():
             _make_junction(home / name, src)
             done["linked"].append(name)
+    wanted = os.environ.get("S2_TEST_CONNECTION")
+    if wanted and (home / "connections.json").is_file():
+        data = json.loads((home / "connections.json").read_text(encoding="utf-8"))
+        if not any(p.get("name") == wanted for p in data.get("profiles", [])):
+            raise LookupError(f"S2_TEST_CONNECTION: no saved connection named {wanted!r}")
+        data["active"] = wanted
+        (home / "connections.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
     return done
+
+
+def _has_saved_connections(home: Path) -> bool:
+    try:
+        return bool(json.loads((home / "connections.json").read_text(encoding="utf-8")).get("profiles"))
+    except (OSError, ValueError):
+        return False
 
 
 def server_env(home: Path, sql_dir: Path, extra: dict[str, str] | None = None) -> dict[str, str]:
     env = dict(os.environ)
-    env.update(claude_server_env())
+    if not _has_saved_connections(home):
+        env.update(claude_server_env())
     env.update({
         "SINGLESTORE_MCP_HOME": str(home),
         "SINGLESTORE_MCP_SQL_DIR": str(sql_dir),

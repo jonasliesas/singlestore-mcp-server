@@ -1193,8 +1193,18 @@ uv sync
 
 This creates `.venv/` and installs everything from `uv.lock`.
 
-Then give the server your SingleStore credentials. Supported variables (see
-[`.env.example`](.env.example)):
+Then tell the server how to reach your cluster. **Recommended:** register the
+server *without* credentials and add the connection in the **Connections**
+window (`connections_window`, or Connections in the Workspace). The password
+then goes to your OS credential store (Windows Credential Manager, macOS
+Keychain, Secret Service on Linux), never into a config file. The installer
+opens Connections by itself when there is no connection yet.
+
+The older way, SINGLESTORE_* environment variables in the MCP config, still
+works: they show up as the read-only connection "Environment variables". The
+password then sits in the config file in plain text; see
+[Moving the password out of the config](#moving-the-password-out-of-the-config).
+Supported variables (see [`.env.example`](.env.example)):
 
 | Variable | Required | Notes |
 |---|---|---|
@@ -1257,24 +1267,15 @@ opening a different folder won't see it.
 #### Option B: user-scoped, via `claude mcp add` (available everywhere)
 
 To make the server available from *any* project — not just when this folder
-is open — register it once at the user level instead, from a terminal (the
-CLI reads your already-exported `SINGLESTORE_*` variables and bakes their
-current values into the stored config, since `claude mcp add` doesn't do the
-`${VAR}` expansion `.mcp.json` does):
+is open — register it once at the user level instead, from a terminal, with
+no credentials (add the connection in the Connections window afterwards):
 
 ```bash
-claude mcp add singlestore -s user \
-  -e SINGLESTORE_HOST="$SINGLESTORE_HOST" \
-  -e SINGLESTORE_USER="$SINGLESTORE_USER" \
-  -e SINGLESTORE_PASSWORD="$SINGLESTORE_PASSWORD" \
-  -- uv run --directory "C:\path\to\singlestore-mcp-server" singlestore-mcp-server
+claude mcp add singlestore -s user -- uv run --no-sync --directory "C:\path\to\singlestore-mcp-server" singlestore-mcp-server
 ```
 
-(Swap `$SINGLESTORE_HOST` etc. for literal values on Windows PowerShell,
-where `$VAR` bash-expansion inside a `bash`-tool call won't apply — or just
-type the real host/user/password in place of those placeholders.) If you
-later rotate the password, re-run the same command — `claude mcp add`
-overwrites an existing entry with the same name.
+`claude mcp add -e SINGLESTORE_PASSWORD=…` also works, but stores the password
+in plain text in `~/.claude.json`.
 
 #### Either way
 
@@ -1287,8 +1288,8 @@ until you restart that session — MCP servers are only loaded at startup.
 
 Claude Desktop (the standalone app, not Claude Code) uses a different,
 app-level config file — there's no per-project `.mcp.json` support and no
-`${VAR}` expansion, so credentials have to be written into the file as
-literal values.
+`${VAR}` expansion. Leave the credentials out of it and add the connection in
+the Connections window.
 
 1. Open the config file for your OS (create it if it doesn't exist yet —
    or in the Claude Desktop app, go to **Settings → Developer → Edit
@@ -1304,16 +1305,10 @@ literal values.
        "singlestore": {
          "command": "uv",
          "args": [
-           "run",
-           "--directory", "C:\\Users\\norjni\\claude code\\singlestore-mcp-server",
+           "run", "--no-sync",
+           "--directory", "C:\\path\\to\\singlestore-mcp-server",
            "singlestore-mcp-server"
-         ],
-         "env": {
-           "SINGLESTORE_HOST": "10.104.80.126",
-           "SINGLESTORE_USER": "admin",
-           "SINGLESTORE_PASSWORD": "your-actual-password-here",
-           "SINGLESTORE_SSL_DISABLED": "false"
-         }
+         ]
        }
      }
    }
@@ -1329,11 +1324,30 @@ literal values.
    message box, open **Connectors → Manage connectors**, and confirm
    `singlestore` is listed and connected.
 
-Since this file stores the password in plain text, treat it like any other
-credentials file — don't commit it or share it, and rotate the password if
-it ever leaks. Logs for debugging a failed connection live in
+If you do put SINGLESTORE_* variables with a password in this file, it is
+stored in plain text; treat it like any other credentials file. Logs for debugging a failed connection live in
 `%APPDATA%\Claude\logs\mcp-server-singlestore.log` (Windows) or
 `~/Library/Logs/Claude/mcp-server-singlestore.log` (macOS).
+
+### Moving the password out of the config
+
+If your `~/.claude.json` or `claude_desktop_config.json` still has
+`SINGLESTORE_PASSWORD` in the `singlestore` entry, move it to the credential
+store:
+
+```powershell
+uv run --no-sync python -m singlestore_mcp.move_password            # dry run: shows what it would do
+uv run --no-sync python -m singlestore_mcp.move_password --apply    # do it (quit Claude Desktop and Claude Code first)
+```
+
+For every config entry with SingleStore credentials (Claude Code, Claude
+Desktop including the Microsoft Store copy, and `claude_desktop_config*.json`
+backups next to it) it uses the saved connection with the same host, port and
+user, or saves a new one with the password in the credential store; makes it
+the active connection if none is; and removes the SINGLESTORE_* connection
+variables from the entry. It never prints the password, leaves `${…}`
+placeholders alone, and stops at an entry whose password differs from the one
+already saved (fix that in Connections and run it again).
 
 ### VS Code + GitHub Copilot Chat
 
@@ -1380,9 +1394,10 @@ The test suite lives in `tests/` (pytest + Playwright); a performance report liv
 **Prerequisites**
 
 - The dev dependencies in `.venv` (`uv sync --group dev` when no server is running from this checkout).
-- **VPN / cluster access** for the `cluster` tests. The test server reads the cluster credentials from the
-  `singlestore` entry in `~/.claude.json` (its `env`). If the cluster can't be reached, those tests are
-  skipped and the offline tests still run.
+- **VPN / cluster access** for the `cluster` tests. The test server signs in with your active saved
+  connection (set `S2_TEST_CONNECTION=<name>` to use another one); only without saved connections does it
+  fall back to the `env` of the `singlestore` entry in `~/.claude.json`. If the cluster can't be reached,
+  those tests are skipped and the offline tests still run.
 - **Microsoft Edge** for the `ui` tests. Playwright drives the installed Edge (`channel="msedge"`), so no
   `playwright install` is needed. Set `S2_TEST_BROWSER_CHANNEL=chrome` (or `chromium` for Playwright's
   bundled browser) to use another browser.
@@ -1434,11 +1449,11 @@ The suite starts one server (`python -m singlestore_mcp.server`, over stdio, thr
 supervisor) with its own `SINGLESTORE_MCP_HOME` in pytest's temp folder. It does not use
 `~/.singlestore-mcp`.
 
-- These files are copied in from `~/.singlestore-mcp` when present: `sas.json`, `query_history.db` and
-  `singlestore_bundle.pem`.
+- These files are copied in from `~/.singlestore-mcp` when present: `connections.json`, `sas.json`,
+  `query_history.db` and `singlestore_bundle.pem`. Passwords aren't in `connections.json`; the test server
+  reads them from the OS credential store like the real one.
 - `notebook-env` is linked in through a directory junction. At the end, only the junction is removed,
   never its target.
-- `connections.json` is not copied. The server uses the built-in "Environment variables" connection.
 - SQL and notebook files go to a temporary `SINGLESTORE_MCP_SQL_DIR`.
 - Background alerts are off (`SINGLESTORE_MCP_ALERTS=0`).
 

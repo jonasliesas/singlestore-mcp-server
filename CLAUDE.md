@@ -35,8 +35,9 @@ Backlog and agreed designs: [ROADMAP.md](ROADMAP.md). User docs: [README.md](REA
 - **Cluster is read-only** for Claude except actions the user confirms in the app (e.g. Analyze,
   workloads). Never change shared infrastructure (users, roles, cluster settings, caslibs) – give the SQL.
 - **Never run PROFILE on SAS EP calls** (`sasepFunction`, `EP.h<32hex>_EP(...)`).
-- **No secrets in the repo.** The SingleStore password comes from env (`SINGLESTORE_*`); never print or
-  log it. Check the diff for passwords/tokens before every commit.
+- **No secrets in the repo or in config files.** The SingleStore password lives in the OS credential store
+  via saved connections (`connections.py`; `move_password.py` moves old env passwords there); never print
+  or log it. Check the diff for passwords/tokens before every commit.
 - SAS connection files in `/Users/norjni/My Folder/mcp` are read with `%include`; never show their contents.
 - SingleStore syntax/capability questions: check docs.singlestore.com, don't guess. Table names in
   `SASDP` are case-sensitive.

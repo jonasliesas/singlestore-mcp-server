@@ -220,23 +220,25 @@ def _file() -> Path:
     return data_dir() / "connections.json"
 
 
-def _env_profile() -> Profile | None:
-    if os.environ.get("SINGLESTORE_URL"):
-        return Profile(name=ENV_PROFILE, url=os.environ["SINGLESTORE_URL"], builtin=True)
-    if not os.environ.get("SINGLESTORE_HOST"):
+def _env_profile(env: Any = None) -> Profile | None:
+    """The built-in profile described by SINGLESTORE_* variables (``env``, default os.environ)."""
+    env = os.environ if env is None else env
+    if env.get("SINGLESTORE_URL"):
+        return Profile(name=ENV_PROFILE, url=env["SINGLESTORE_URL"], builtin=True)
+    if not env.get("SINGLESTORE_HOST"):
         return None
     return Profile(
         name=ENV_PROFILE,
-        host=os.environ["SINGLESTORE_HOST"],
-        port=int(os.environ.get("SINGLESTORE_PORT", "3306")),
-        user=os.environ.get("SINGLESTORE_USER", "root"),
-        database=os.environ.get("SINGLESTORE_DATABASE") or None,
-        ssl_disabled=os.environ.get("SINGLESTORE_SSL_DISABLED", "").lower() in ("1", "true", "yes"),
-        ssl_ca=os.environ.get("SINGLESTORE_SSL_CA") or None,
-        ssl_cert=os.environ.get("SINGLESTORE_SSL_CERT") or None,
-        ssl_key=os.environ.get("SINGLESTORE_SSL_KEY") or None,
-        ssl_verify=os.environ.get("SINGLESTORE_SSL_VERIFY", "1").lower() not in ("0", "false", "no"),
-        auth="jwt" if os.environ.get("SINGLESTORE_CREDENTIAL_TYPE", "").lower() == "jwt" else "password",
+        host=env["SINGLESTORE_HOST"],
+        port=int(env.get("SINGLESTORE_PORT") or "3306"),
+        user=env.get("SINGLESTORE_USER") or "root",
+        database=env.get("SINGLESTORE_DATABASE") or None,
+        ssl_disabled=str(env.get("SINGLESTORE_SSL_DISABLED", "")).lower() in ("1", "true", "yes"),
+        ssl_ca=env.get("SINGLESTORE_SSL_CA") or None,
+        ssl_cert=env.get("SINGLESTORE_SSL_CERT") or None,
+        ssl_key=env.get("SINGLESTORE_SSL_KEY") or None,
+        ssl_verify=str(env.get("SINGLESTORE_SSL_VERIFY", "1")).lower() not in ("0", "false", "no"),
+        auth="jwt" if str(env.get("SINGLESTORE_CREDENTIAL_TYPE", "")).lower() == "jwt" else "password",
         builtin=True,
     )
 

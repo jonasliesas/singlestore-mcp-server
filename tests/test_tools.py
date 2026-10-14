@@ -295,6 +295,7 @@ def test_alerts_update_persists_and_restores(cluster: McpSession, test_home: Pat
 def test_connection_save_test_delete(cluster: McpSession) -> None:
     name = "zz regression"
     prof = {"name": name, "host": "127.0.0.1", "port": 1, "user": "nobody", "database": "", "auth": "password"}
+    active = cluster.ok("list_connections")["active"]
     try:
         cluster.ok("connection_save", {"profile": prof, "password": "zz-not-a-real-password", "activate": False})
         d = cluster.ok("connection_test", {"name": name})
@@ -304,7 +305,7 @@ def test_connection_save_test_delete(cluster: McpSession) -> None:
     st = cluster.ok("connections_state")
     assert not any(x["name"] == name for x in st["connections"]), "test connection still listed after delete"
     # the active connection is untouched
-    assert cluster.ok("list_connections")["active"] == "Environment variables"
+    assert cluster.ok("list_connections")["active"] == active
 
 
 def test_builtin_connection_is_protected(cluster: McpSession) -> None:

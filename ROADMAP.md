@@ -11,8 +11,8 @@ hand-off; pytest + Playwright test suite.
 
 ## Next small items
 - ~~Run the offline test subset in GitHub Actions on every push~~ – added after 0.9.0 (`.github/workflows/tests.yml`, Windows + Linux).
-- Move the SingleStore password out of `~/.claude.json` env into the app's connection store
-  (keyring) or Entra ID login.
+- ~~Move the SingleStore password out of `~/.claude.json` env into the OS credential store~~ – done after
+  0.9.0: `python -m singlestore_mcp.move_password`; tests use the saved connection.
 
 ## SAS in the Workspace (next big feature – agreed design)
 - **Schema Explorer** gets three sources: SingleStore, SAS libnames (Viya Compute), SAS caslibs (CAS).
@@ -56,3 +56,5 @@ hand-off; pytest + Playwright test suite.
 - `LIMIT 100000` in the SQL Editor fetches all rows before showing any.
 - Long single Python calls in a notebook can't be interrupted on Windows.
 - SAS notebook tests passed without the SAS secrets opt-in (unexplained).
+- Two UI tests are flaky (about 1 run in 3): `test_sql_editor_tabs` and `test_sql_editor_and_workload_round_trip`
+  ("Save didn't store the added statement") – timing in the tests, passes on rerun.
