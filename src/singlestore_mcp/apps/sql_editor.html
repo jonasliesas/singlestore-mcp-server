@@ -564,7 +564,8 @@ async function expandStarSource(ctx) {
 // SAS dialect (PROC SQL / FedSQL): no backticks or # comments, "…" quotes names; SAS libraries / caslibs,
 // their tables and the columns loaded so far for autocomplete.
 const SAS_KEYWORDS = "select from where group by having order as and or not in is null like between case when then else end join inner left right full outer cross on union except intersect all distinct into create table view index drop insert values update set delete alter add modify describe validate calculated contains eqt gt ge lt le ne sounds limit offset fetch first rows only true false cast";
-const sasDialect = CM.SQLDialect.define({ keywords: SAS_KEYWORDS, identifierQuotes: '"', hashComments: false, doubleQuotedStrings: false });
+// SAS names are case-insensitive: "sashelp." finds SASHELP's tables.
+const sasDialect = CM.SQLDialect.define({ keywords: SAS_KEYWORDS, identifierQuotes: '"', hashComments: false, doubleQuotedStrings: false, caseInsensitiveIdentifiers: true });
 function sasNamespace() {
   const ns = {};
   const list = state.language === "cas" ? sas.caslibs : sas.libs;
