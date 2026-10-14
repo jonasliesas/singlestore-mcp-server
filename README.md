@@ -1,5 +1,7 @@
 # singlestore-mcp-server
 
+[![tests](https://github.com/jonasliesas/singlestore-mcp-server/actions/workflows/tests.yml/badge.svg)](https://github.com/jonasliesas/singlestore-mcp-server/actions/workflows/tests.yml)
+
 A local MCP server for SingleStore that runs in **stdio** mode from Claude
 Code, Claude Desktop or VS Code, and works with **SingleStore Helios and
 self-managed clusters** alike.
@@ -1396,6 +1398,10 @@ The test suite lives in `tests/` (pytest + Playwright); a performance report liv
 .venv\Scripts\python.exe -m pytest -k "sql_editor or copy"       # by name
 .venv\Scripts\python.exe -m pytest tests\ui --headed              # watch the browser tests
 ```
+
+**On GitHub:** the offline subset and `ruff` run automatically on every push and pull request,
+on Windows and Linux ([`.github/workflows/tests.yml`](.github/workflows/tests.yml), the
+**Actions** tab). The cluster, browser, SAS and assistant tests only run locally.
 
 Use the venv's Python directly, or `uv run --no-sync`. A plain `uv run` tries to sync, and that fails
 while Claude has the server's .exe open.

@@ -10,7 +10,7 @@ Cluster Monitor Queries/Disk/Bottomless/IO tabs; Query History usage, grouping, 
 hand-off; pytest + Playwright test suite.
 
 ## Next small items
-- Run the offline test subset (`-m "not cluster and not ui"`) in GitHub Actions on every push.
+- ~~Run the offline test subset in GitHub Actions on every push~~ – added after 0.9.0 (`.github/workflows/tests.yml`, Windows + Linux).
 - Move the SingleStore password out of `~/.claude.json` env into the app's connection store
   (keyring) or Entra ID login.
 

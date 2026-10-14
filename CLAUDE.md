@@ -24,6 +24,8 @@ Backlog and agreed designs: [ROADMAP.md](ROADMAP.md). User docs: [README.md](REA
   - `.venv\Scripts\python.exe -m pytest -m "not cluster and not ui"` – offline subset, no VPN
   - `.venv\Scripts\python.exe -m pytest` – everything except the assistants (~4–5 min, needs VPN)
   - `--assistants` also asks the in-app Claude assistants (uses Claude)
+  - GitHub Actions (`.github/workflows/tests.yml`) runs ruff + the offline subset on Windows and Linux on every push;
+    keep offline tests free of cluster, credentials and Windows-only paths.
 - Markers: `cluster`, `notebook`, `sas`, `assistants`, `ui` (`--strict-markers`). Lint: `ruff check`.
 - Add a test for every bug fixed in a UI app (`tests/ui/test_apps.py`) and every new tool.
 - `perf/perf.py` – timing report; the cluster is ~120 ms+ per round trip, so fewer, pooled and

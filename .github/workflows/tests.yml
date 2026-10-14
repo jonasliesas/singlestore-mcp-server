@@ -1,0 +1,39 @@
+# Offline checks on every push and pull request: lint, JS syntax, MCP protocol, workload and
+# SQL Editor state unit tests. Tests that need the cluster (VPN), SAS Viya, a browser or Claude
+# are left out; run the full suite locally (see README → Testing).
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline:
+    name: offline (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --locked
+
+      - name: Lint
+        run: uv run --no-sync ruff check src tests perf
+
+      - name: Offline tests
+        run: uv run --no-sync pytest -m "not cluster and not ui"
