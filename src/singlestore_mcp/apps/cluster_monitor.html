@@ -74,6 +74,41 @@
   .cm-q-detail td { background: var(--s2-bg-2); white-space: normal !important; }
   .cm-q-detail .row { display: flex; gap: 14px; flex-wrap: wrap; font-size: var(--s2-fs-xs); color: var(--s2-text-2); margin-bottom: 6px; }
   html[data-display-mode="fullscreen"] .cm-q-wrap { max-height: calc(100vh - 420px) !important; }
+  /* Tabs, and the overview's two columns: chart beside the node cards on wide screens. */
+  .cm-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--s2-border); margin: 4px 0 12px; }
+  .cm-tabs button { border: 0; border-bottom: 2px solid transparent; background: none; padding: 6px 12px; cursor: pointer;
+    font-size: var(--s2-fs-sm, 13px); color: var(--s2-text-2); margin-bottom: -1px; display: inline-flex; align-items: center; gap: 6px; }
+  .cm-tabs button[aria-selected="true"] { color: var(--s2-text); font-weight: var(--font-weight-semibold, 600); border-bottom-color: var(--s2-info); }
+  .cm-tabs .count { font-size: 11px; padding: 0 6px; border-radius: 9px; background: var(--s2-bg-3); color: var(--s2-text-2); font-variant-numeric: tabular-nums; }
+  .cm-tabs .count.busy { background: var(--s2-info-bg); color: var(--s2-info); }
+  .cm-overview { display: grid; grid-template-columns: minmax(0, 3fr) minmax(300px, 2fr); gap: 12px; align-items: start; }
+  .cm-overview .cm-nodes { grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
+  @media (max-width: 1000px) { .cm-overview { grid-template-columns: minmax(0, 1fr); } }
+  .cm-q-wrap.recent { max-height: 420px; }
+  .cm-q td.ago, .cm-q td.ms { white-space: nowrap; }
+  /* Disk / Bottomless / IO tabs */
+  .cm-stack { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: var(--s2-bg-3); margin-top: 8px; gap: 1px; }
+  .cm-stack > span { display: block; height: 100%; min-width: 2px; }
+  .cm-parts { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 2px 14px; margin-top: 8px; font-size: var(--s2-fs-xs); }
+  .cm-part { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .cm-part .lbl { flex: 1; min-width: 0; color: var(--s2-text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cm-part strong { font-weight: var(--font-weight-medium, 500); font-variant-numeric: tabular-nums; }
+  .cm-part .pct { color: var(--s2-text-3); width: 38px; text-align: right; font-variant-numeric: tabular-nums; }
+  .cm-sw { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+  .cm-total { font-variant-numeric: tabular-nums; }
+  .cm-nodes.cm-wide { grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); }
+  .cm-node.compact .cm-parts { grid-template-columns: 1fr; }
+  .cm-kv { display: flex; flex-direction: column; gap: 3px; margin-top: 10px; font-size: var(--s2-fs-xs); }
+  .cm-kv > div { display: flex; justify-content: space-between; gap: 10px; }
+  .cm-kv span { color: var(--s2-text-2); }
+  .cm-kv strong { font-weight: var(--font-weight-medium, 500); font-variant-numeric: tabular-nums; text-align: right; }
+  .cm-top { margin-top: 10px; font-size: var(--s2-fs-xs); }
+  .cm-top-h { color: var(--s2-text-3); text-transform: uppercase; letter-spacing: .04em; font-size: 10px; margin-bottom: 2px; }
+  .cm-top-r { display: flex; justify-content: space-between; gap: 10px; }
+  .cm-top-r span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .cm-top-r strong { font-weight: var(--font-weight-medium, 500); font-variant-numeric: tabular-nums; flex: none; }
+  .cm-io-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 12px; }
+  @media (max-width: 900px) { .cm-io-charts { grid-template-columns: minmax(0, 1fr); } }
 </style>
 </head>
 <body>
@@ -87,9 +122,15 @@ const state = {
   data: null, error: null, loading: false,
   auto: true, timer: null,
   includeInternal: false,
+  tab: "overview",      // "overview" | "queries" | "disk" | "bottomless" | "io"
   history: [],          // [{t, cpu: {nodeId: pct}}] from the server
   chart: { group: "all", hidden: new Set(), hoverT: null },
   open: new Set(),      // expanded query keys
+  // Data of the Disk / Bottomless / IO tabs (their own tools, only called while the tab is open).
+  extra: { disk: { data: null, error: null, loading: false, at: 0 }, bottomless: { data: null, error: null, loading: false, at: 0 },
+    io: { data: null, error: null, loading: false, at: 0 } },
+  remote: { status: null },
+  ioChart: { group: "all", hidden: new Set(), disk: "rd", cache: "down" },
 };
 
 const qkey = (q) => `${q.node_id}:${q.id}`;
@@ -120,14 +161,15 @@ function meter(label, value, pct, sub, extra) {
     extra ?? null);
 }
 
-// ---------------------------------------------------------------- CPU chart
+// ---------------------------------------------------------------- charts
 const NS = "http://www.w3.org/2000/svg";
 const SERIES = 8;
 // Color follows the node (its position in the full node list), never its rank
 // among the visible lines, so filtering never repaints a line.
 const nodeColor = (index) => (index < SERIES ? `var(--series-${index + 1})` : "var(--s2-text-3)");
 const GROUPS = [["all", "All nodes"], ["agg", "Aggregators"], ["leaf", "Leaves"]];
-const inGroup = (n) => state.chart.group === "all" || (state.chart.group === "leaf" ? n.type === "LEAF" : n.type !== "LEAF");
+const inGroupOf = (chart, n) => chart.group === "all" || (chart.group === "leaf" ? n.type === "LEAF" : n.type !== "LEAF");
+const inGroup = (n) => inGroupOf(state.chart, n);
 
 function svgEl(tag, attrs = {}, text) {
   const el = document.createElementNS(NS, tag);
@@ -148,57 +190,77 @@ function timeLabel(t, withSeconds) {
   return new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", ...(withSeconds ? { second: "2-digit" } : {}) });
 }
 
-const chartEl = h("section", { class: "s2-card cm-chart", "aria-label": "SingleStore CPU per node" });
-const plotEl = h("div", { class: "cm-plot", tabindex: "0" });
-new ResizeObserver(() => drawPlot()).observe(plotEl);
-
-function buildChart() {
-  const d = state.data;
-  const names = shortNames(d.nodes);
-  const minutes = Math.round((d.history_seconds ?? 900) / 60);
-  chartEl.replaceChildren(
-    h("div", { class: "cm-chart-head" },
-      h("h2", {}, "SingleStore CPU"),
-      h("span", { class: "s2-subtitle" }, `% of each node's core limit · last ${minutes} min`),
-      h("span", { class: "s2-spacer" }),
-      h("div", { class: "cm-seg", role: "group", "aria-label": "Nodes to show" },
-        GROUPS.map(([key, label]) => h("button", { "aria-pressed": String(state.chart.group === key),
-          onclick: () => { state.chart.group = key; state.chart.hidden.clear(); buildChart(); } }, label)))),
-    h("div", { class: "cm-legend", role: "group", "aria-label": "Toggle nodes" },
-      d.nodes.map((n, i) => inGroup(n) ? h("button", { "aria-pressed": String(!state.chart.hidden.has(n.id)), title: `${n.host} (${n.type_label})`,
-        onclick: () => { state.chart.hidden.has(n.id) ? state.chart.hidden.delete(n.id) : state.chart.hidden.add(n.id); buildChart(); } },
-        h("span", { class: "cm-key", style: { background: nodeColor(i) } }), names[n.id]) : null)),
-    plotEl);
-  drawPlot();
+// A line chart over time, one line per series, with direct labels, crosshair and tooltip.
+// plot.spec = { hist: [{t, ...}], series: [{id, name, color, get(point) -> number|null}], tick(v), value(v),
+//               cap (max of the y axis, e.g. 100 for %), floor (smallest y range), what (aria text), empty, none }
+function createPlot(label) {
+  const plot = { el: h("div", { class: "cm-plot", tabindex: "0", "aria-label": label }), spec: null, hoverT: null, geo: null };
+  let frame = 0;
+  new ResizeObserver(() => { cancelAnimationFrame(frame); frame = requestAnimationFrame(() => drawSeriesPlot(plot)); }).observe(plot.el);
+  const nearest = (t) => {
+    const hist = plot.spec.hist;
+    return hist.reduce((best, p, i) => (Math.abs(p.t - t) < Math.abs(hist[best].t - t) ? i : best), 0);
+  };
+  plot.el.addEventListener("pointermove", (e) => {
+    const geo = plot.geo;
+    if (!geo) return;
+    const rect = plot.el.getBoundingClientRect();
+    const px = ((e.clientX - rect.left) / rect.width) * geo.W;
+    if (px < geo.l - 8 || px > geo.l + geo.pw + 8) { if (plot.hoverT != null) { plot.hoverT = null; drawSeriesPlot(plot); } return; }
+    plot.hoverT = geo.t0 + ((px - geo.l) / geo.pw) * (geo.t1 - geo.t0);
+    drawSeriesPlot(plot);
+  });
+  plot.el.addEventListener("pointerleave", () => { plot.hoverT = null; drawSeriesPlot(plot); });
+  plot.el.addEventListener("keydown", (e) => {
+    const hist = plot.spec?.hist ?? [];
+    if (!hist.length) return;
+    if (e.key === "Escape") { plot.hoverT = null; drawSeriesPlot(plot); return; }
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    let i = plot.hoverT == null ? hist.length - 1 : nearest(plot.hoverT);
+    i = Math.max(0, Math.min(hist.length - 1, i + (e.key === "ArrowLeft" ? -1 : 1)));
+    plot.hoverT = hist[i].t;
+    drawSeriesPlot(plot);
+  });
+  plot.nearest = nearest;
+  return plot;
 }
 
-function drawPlot() {
-  const d = state.data;
-  if (!d) return;
-  const hist = state.history;
-  const names = shortNames(d.nodes);
-  const series = d.nodes.map((n, i) => ({ n, i, name: names[n.id] })).filter((s) => inGroup(s.n) && !state.chart.hidden.has(s.n.id));
-  if (hist.length < 2 || !series.length) {
-    plotEl.replaceChildren(h("div", { class: "cm-chart-empty" },
-      !series.length ? "No nodes selected." : "Collecting CPU readings — the chart fills in as the monitor refreshes."));
+function setPlot(plot, spec) {
+  plot.spec = spec;
+  drawSeriesPlot(plot);
+  return plot.el;
+}
+
+function drawSeriesPlot(plot) {
+  const spec = plot.spec;
+  if (!spec) return;
+  const { hist, series } = spec;
+  const el = plot.el;
+  const has = (s) => hist.some((p) => s.get(p) != null);
+  if (hist.length < 2 || !series.length || !series.some(has)) {
+    plot.geo = null;
+    el.replaceChildren(h("div", { class: "cm-chart-empty" }, !series.length ? (spec.none ?? "No nodes selected.") : spec.empty));
     return;
   }
-  const W = Math.max(320, plotEl.clientWidth || 600);
-  const H = S2.displayMode === "fullscreen" ? Math.max(260, Math.round(window.innerHeight * 0.4)) : 230;
-  const m = { l: 40, r: 104, t: 10, b: 24 };
+  const W = Math.max(320, el.clientWidth || 600);
+  // Height follows the width (about 2.4 : 1) so a wide window doesn't flatten the lines.
+  const maxH = S2.displayMode === "fullscreen" ? Math.max(260, Math.round(window.innerHeight * 0.5)) : (spec.maxH ?? 340);
+  const H = Math.max(spec.minH ?? 200, Math.min(maxH, Math.round(W / 2.4)));
+  const m = { l: spec.left ?? 40, r: spec.right ?? 104, t: 10, b: 24 };
   const pw = W - m.l - m.r, ph = H - m.t - m.b;
   const t1 = hist.at(-1).t, t0 = Math.min(hist[0].t, t1 - 60);
   const x = (t) => m.l + ((t - t0) / (t1 - t0)) * pw;
   let vmax = 0;
-  for (const p of hist) for (const s of series) vmax = Math.max(vmax, p.cpu[s.n.id] ?? 0);
-  const { max: ymax, step } = niceCeil(Math.min(100, Math.max(1, vmax * 1.15)));
+  for (const p of hist) for (const s of series) vmax = Math.max(vmax, s.get(p) ?? 0);
+  const { max: ymax, step } = niceCeil(Math.min(spec.cap ?? Infinity, Math.max(spec.floor ?? 1, vmax * 1.15)));
   const y = (v) => m.t + ph - (v / ymax) * ph;
 
   const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img",
-    "aria-label": `SingleStore CPU over the last ${Math.round((t1 - t0) / 60)} minutes for ${series.map((s) => s.name).join(", ")}; peak ${vmax.toFixed(1)}%` });
+    "aria-label": `${spec.what} over the last ${Math.round((t1 - t0) / 60)} minutes for ${series.map((s) => s.name).join(", ")}; peak ${spec.value(vmax)}` });
   for (let v = 0; v <= ymax + 1e-9; v += step) {
     svg.append(svgEl("line", { class: v === 0 ? "base" : "grid", x1: m.l, x2: m.l + pw, y1: y(v), y2: y(v) }));
-    svg.append(svgEl("text", { class: "tick", x: m.l - 6, y: y(v) + 4, "text-anchor": "end" }, `${+v.toFixed(2)}%`));
+    svg.append(svgEl("text", { class: "tick", x: m.l - 6, y: y(v) + 4, "text-anchor": "end" }, spec.tick(v)));
   }
   const span = t1 - t0;
   const tstep = [10, 15, 30, 60, 120, 300, 600].find((s) => span / s <= 6) ?? 900;
@@ -210,13 +272,13 @@ function drawPlot() {
   for (const s of series) {
     let dpath = "", pen = false, last = null;
     for (const p of hist) {
-      const v = p.cpu[s.n.id];
+      const v = s.get(p);
       if (v == null) { pen = false; continue; }
       dpath += `${pen ? "L" : "M"}${x(p.t).toFixed(1)},${y(v).toFixed(1)}`;
       pen = true;
       last = v;
     }
-    svg.append(svgEl("path", { class: "series", d: dpath, stroke: nodeColor(s.i) }));
+    if (dpath) svg.append(svgEl("path", { class: "series", d: dpath, stroke: s.color }));
     if (last != null) labels.push({ s, y: y(last), v: last });
   }
   // Direct labels at the line ends, nudged apart so they never overlap.
@@ -225,56 +287,81 @@ function drawPlot() {
   const overflow = labels.length ? labels.at(-1).y - (m.t + ph) : 0;
   if (overflow > 0) for (const l of labels) l.y -= overflow;
   for (const l of labels) {
-    svg.append(svgEl("line", { x1: m.l + pw + 6, x2: m.l + pw + 16, y1: l.y, y2: l.y, stroke: nodeColor(l.s.i), "stroke-width": 2, "stroke-linecap": "round" }));
-    svg.append(svgEl("text", { class: "label", x: m.l + pw + 20, y: l.y + 4 }, `${l.s.name} ${l.v.toFixed(1)}%`));
+    svg.append(svgEl("line", { x1: m.l + pw + 6, x2: m.l + pw + 16, y1: l.y, y2: l.y, stroke: l.s.color, "stroke-width": 2, "stroke-linecap": "round" }));
+    svg.append(svgEl("text", { class: "label", x: m.l + pw + 20, y: l.y + 4 }, `${l.s.name} ${spec.value(l.v)}`));
   }
 
   // Crosshair + tooltip: snap to the nearest reading.
-  const idx = state.chart.hoverT == null ? null
-    : hist.reduce((best, p, i) => (Math.abs(p.t - state.chart.hoverT) < Math.abs(hist[best].t - state.chart.hoverT) ? i : best), 0);
+  const idx = plot.hoverT == null ? null : plot.nearest(plot.hoverT);
   let tip = null;
   if (idx != null) {
     const p = hist[idx], cx = x(p.t);
     svg.append(svgEl("line", { class: "cross", x1: cx, x2: cx, y1: m.t, y2: m.t + ph }));
-    const rows = series.filter((s) => p.cpu[s.n.id] != null).sort((a, b) => p.cpu[b.n.id] - p.cpu[a.n.id]);
-    for (const s of rows) svg.append(svgEl("circle", { class: "dot", cx, cy: y(p.cpu[s.n.id]), r: 4, fill: nodeColor(s.i) }));
+    const rows = series.filter((s) => s.get(p) != null).sort((a, b) => (b.get(p) ?? 0) - (a.get(p) ?? 0));
+    for (const s of rows) svg.append(svgEl("circle", { class: "dot", cx, cy: y(s.get(p)), r: 4, fill: s.color }));
     tip = h("div", { class: "cm-tip" },
       h("div", { class: "when" }, timeLabel(p.t, true)),
       rows.map((s) => h("div", { class: "row" },
-        h("span", { class: "cm-key", style: { background: nodeColor(s.i) } }),
-        h("strong", {}, `${p.cpu[s.n.id].toFixed(1)}%`),
+        h("span", { class: "cm-key", style: { background: s.color } }),
+        h("strong", {}, spec.value(s.get(p))),
         h("span", {}, s.name))));
     const left = cx + 14;
     tip.style.left = `${left}px`;
     requestAnimationFrame(() => { if (left + tip.offsetWidth > W - 4) tip.style.left = `${cx - tip.offsetWidth - 14}px`; });
   }
-  plotEl.replaceChildren(svg, ...(tip ? [tip] : []));
-  plotEl.dataset.plot = JSON.stringify({ l: m.l, pw, t0, t1, W });
+  el.replaceChildren(svg, ...(tip ? [tip] : []));
+  plot.geo = { l: m.l, pw, t0, t1, W };
 }
 
-function hoverAt(clientX) {
-  const geo = plotEl.dataset.plot && JSON.parse(plotEl.dataset.plot);
-  if (!geo) return;
-  const rect = plotEl.getBoundingClientRect();
-  const px = ((clientX - rect.left) / rect.width) * geo.W;
-  if (px < geo.l - 8 || px > geo.l + geo.pw + 8) { if (state.chart.hoverT != null) { state.chart.hoverT = null; drawPlot(); } return; }
-  state.chart.hoverT = geo.t0 + ((px - geo.l) / geo.pw) * (geo.t1 - geo.t0);
+// Header row of a chart card: title, subtitle, segmented controls.
+function seg(label, options, current, onPick) {
+  return h("div", { class: "cm-seg", role: "group", "aria-label": label },
+    options.map(([key, text]) => h("button", { "aria-pressed": String(current === key), onclick: () => onPick(key) }, text)));
+}
+
+function nodeLegend(nodes, chart, rebuild) {
+  const names = shortNames(nodes);
+  return h("div", { class: "cm-legend", role: "group", "aria-label": "Toggle nodes" },
+    nodes.map((n, i) => inGroupOf(chart, n) ? h("button", { "aria-pressed": String(!chart.hidden.has(n.id)), title: `${n.host} (${n.type_label})`,
+      onclick: () => { chart.hidden.has(n.id) ? chart.hidden.delete(n.id) : chart.hidden.add(n.id); rebuild(); } },
+      h("span", { class: "cm-key", style: { background: nodeColor(i) } }), names[n.id]) : null));
+}
+
+function nodeSeries(nodes, chart, get) {
+  const names = shortNames(nodes);
+  return nodes.map((n, i) => ({ n, i })).filter(({ n }) => inGroupOf(chart, n) && !chart.hidden.has(n.id))
+    .map(({ n, i }) => ({ id: n.id, name: names[n.id], color: nodeColor(i), get: (p) => get(p, n.id) }));
+}
+
+// ---- CPU chart (Overview tab)
+const chartEl = h("section", { class: "s2-card cm-chart", "aria-label": "SingleStore CPU per node" });
+const cpuPlot = createPlot("SingleStore CPU per node");
+
+function buildChart() {
+  const d = state.data;
+  const minutes = Math.round((d.history_seconds ?? 900) / 60);
+  chartEl.replaceChildren(
+    h("div", { class: "cm-chart-head" },
+      h("h2", {}, "SingleStore CPU"),
+      h("span", { class: "s2-subtitle" }, `% of each node's core limit · last ${minutes} min`),
+      h("span", { class: "s2-spacer" }),
+      seg("Nodes to show", GROUPS, state.chart.group, (key) => { state.chart.group = key; state.chart.hidden.clear(); buildChart(); })),
+    nodeLegend(d.nodes, state.chart, buildChart),
+    cpuPlot.el);
   drawPlot();
 }
-plotEl.addEventListener("pointermove", (e) => hoverAt(e.clientX));
-plotEl.addEventListener("pointerleave", () => { state.chart.hoverT = null; drawPlot(); });
-plotEl.addEventListener("keydown", (e) => {
-  const hist = state.history;
-  if (!hist.length) return;
-  if (e.key === "Escape") { state.chart.hoverT = null; drawPlot(); return; }
-  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
-  e.preventDefault();
-  let i = state.chart.hoverT == null ? hist.length - 1
-    : hist.reduce((best, p, k) => (Math.abs(p.t - state.chart.hoverT) < Math.abs(hist[best].t - state.chart.hoverT) ? k : best), 0);
-  i = Math.max(0, Math.min(hist.length - 1, i + (e.key === "ArrowLeft" ? -1 : 1)));
-  state.chart.hoverT = hist[i].t;
-  drawPlot();
-});
+
+function drawPlot() {
+  const d = state.data;
+  if (!d) return;
+  setPlot(cpuPlot, {
+    hist: state.history,
+    series: nodeSeries(d.nodes, state.chart, (p, id) => p.cpu?.[id] ?? null),
+    tick: (v) => `${+v.toFixed(2)}%`, value: (v) => `${v.toFixed(1)}%`, cap: 100, floor: 1,
+    what: "SingleStore CPU",
+    empty: "Collecting CPU readings — the chart fills in as the monitor refreshes.",
+  });
+}
 
 function nodeCard(n, name, index) {
   const online = (n.state || "").toLowerCase() === "online";
@@ -327,7 +414,8 @@ function queriesTable(qs, names) {
           h("span", {}, `Client ${q.client}`),
           q.transaction ? h("span", {}, `Transaction: ${q.transaction}`) : null,
           q.resource_pool ? h("span", {}, `Resource pool: ${q.resource_pool}`) : null,
-          q.queued_reason ? h("span", { class: "s2-badge warn" }, `Queued: ${q.queued_reason}`) : null),
+          q.queued_reason ? h("button", { class: "s2-badge warn", style: { cursor: "pointer", border: 0 }, title: "Open the resource pools and the workload manager queue in the Security view",
+            onclick: (e) => { e.stopPropagation(); openPools(); } }, `Queued: ${q.queued_reason} →`) : null),
         q.sql ? h("button", { class: "s2-btn", onclick: (e) => { e.stopPropagation(); askAbout(q); } }, "Ask Claude about this query") : null)));
     }
   }
@@ -335,8 +423,353 @@ function queriesTable(qs, names) {
     h("table", { class: "s2-table cm-q" }, h("thead", {}, h("tr", {}, cols.map((c) => h("th", { class: c === "Conn" || c === "Time" ? "num" : "" }, c)))), body));
 }
 
+// Statements the aggregators ran in the last minute (plan cache): the many short queries that finish
+// between two refreshes and so never appear under "Running now".
+function recentTable(rs, names) {
+  const secs = state.data.recent_seconds ?? 60;
+  if (!rs.length) return h("div", { class: "s2-empty" }, `No user statements ran in the last ${secs} s`);
+  const body = h("tbody");
+  for (const r of rs) {
+    const k = `recent:${r.node_id}:${r.database}:${r.sql}`;
+    const open = state.open.has(k);
+    body.append(h("tr", { class: open ? "open" : "", onclick: () => { open ? state.open.delete(k) : state.open.add(k); render(); } },
+      h("td", { class: "num ago" }, r.ago_s ? `${r.ago_s}s ago` : "now"),
+      h("td", { title: r.node }, names[r.node_id] ?? r.node),
+      h("td", {}, r.database),
+      h("td", { class: "num ms" }, r.avg_ms != null ? `${fmt.number(r.avg_ms)} ms` : "–"),
+      h("td", { class: "num", title: "Runs since this plan was compiled, not only in the last minute" }, fmt.number(r.runs)),
+      h("td", { class: "sql", title: open ? "" : r.sql }, r.sql)));
+    if (open) {
+      body.append(h("tr", { class: "cm-q-detail" }, h("td", { colspan: "6" },
+        h("div", { class: "row" }, h("span", {}, `${fmt.number(r.runs)} runs since compiled`), r.rollbacks ? h("span", {}, `${fmt.number(r.rollbacks)} rolled back`) : null,
+          h("span", {}, "Constants are shown as ^ (parameterized plan text)")),
+        h("button", { class: "s2-btn", onclick: (e) => { e.stopPropagation(); S2.sendPrompt(`This statement ran on SingleStore (database ${r.database}, average ${r.avg_ms} ms over ${r.runs} runs since its plan was compiled). Explain what it does and whether it could be faster:\n\n${r.sql}`); } }, "Ask Claude about this statement"))));
+    }
+  }
+  return h("div", { class: "s2-table-wrap cm-q-wrap recent" },
+    h("table", { class: "s2-table cm-q" }, h("thead", {}, h("tr", {},
+      ["Last run", "Node", "Database", "Avg time", "Runs", "Statement"].map((c) => h("th", { class: ["Last run", "Avg time", "Runs"].includes(c) ? "num" : "" }, c)))), body));
+}
+
+// Queued queries: show the pools and the queue in the Security view (a Workspace view, or its own window).
+function openPools() {
+  if (S2.embedded()) { S2.openView("security", { tab: "pools" }); return; }
+  S2.openAppInBrowser("security", { tab: "pools" }).catch((err) => S2.toast(String(err.message ?? err), "err"));
+}
+
 function askAbout(q) {
   S2.sendPrompt(`This query has been running for ${q.seconds}s on SingleStore node ${q.node} (user ${q.user}, database ${q.database ?? "none"}, state "${q.state}"). Explain what it does and whether its runtime or resource use is a concern:\n\n${q.sql}`);
+}
+
+// ---------------------------------------------------------------- Disk, Bottomless and IO tabs
+// Each has its own app tool, only called while the tab is open, so the overview refresh stays light.
+const TAB_TOOLS = { disk: "cluster_monitor_disk", bottomless: "cluster_monitor_bottomless", io: "cluster_monitor_io" };
+const DISK_REFRESH_MS = 60000;  // directory sizes are measured by walking the directories: once a minute is plenty
+const MBs = (b) => (b == null ? null : b / 1e6);
+const mbText = (v) => (v == null ? "–" : v >= 100 ? `${v.toFixed(0)} MB/s` : v >= 1 ? `${v.toFixed(1)} MB/s` : `${v.toFixed(2)} MB/s`);
+const bytesOrDash = (b) => (b == null ? "–" : fmt.bytes(b));
+const agoText = (s) => s == null ? "–" : s < 90 ? `${Math.round(s)} s ago` : s < 5400 ? `${Math.round(s / 60)} min ago`
+  : s < 172800 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} days ago`;
+const pctOf = (a, b) => (a != null && b ? (a / b) * 100 : null);
+
+async function refreshTab(force = false) {
+  const tab = state.tab, tool = TAB_TOOLS[tab];
+  if (!tool) return;
+  const slot = state.extra[tab];
+  if (slot.loading) return;
+  if (tab === "disk" && !force && slot.data && Date.now() - slot.at < DISK_REFRESH_MS) return;
+  slot.loading = true;
+  if (state.tab === tab) render();
+  try {
+    slot.data = await S2.callTool(tool, tab === "disk" && force ? { force: true } : {});
+    slot.error = null;
+    slot.at = Date.now();
+  } catch (e) {
+    slot.error = e;
+  } finally {
+    slot.loading = false;
+    if (state.tab === tab) render();
+  }
+}
+
+function tabStatus(slot, what) {
+  if (slot.error) return h("div", { class: "s2-error", style: { marginBottom: "10px" } }, `${what} failed: ${slot.error.message}`);
+  return null;
+}
+
+function stackBar(parts, total, label) {
+  // parts: [{label, bytes, color}] — widths relative to total.
+  return h("div", { class: "cm-stack", role: "img", "aria-label": `${label}: ${parts.map((p) => `${p.label} ${fmt.bytes(p.bytes)}`).join(", ")}` },
+    parts.filter((p) => p.bytes > 0 && total > 0).map((p) => h("span", { style: { width: `${Math.max(0.4, (p.bytes / total) * 100)}%`, background: p.color }, title: `${p.label}: ${fmt.bytes(p.bytes)} (${((p.bytes / total) * 100).toFixed(1)}%)` })));
+}
+
+function legendRows(parts, total) {
+  return h("div", { class: "cm-parts" }, parts.map((p) => h("div", { class: "cm-part", title: p.title ?? "" },
+    h("span", { class: "cm-sw", style: { background: p.color } }),
+    h("span", { class: "lbl" }, p.label),
+    h("strong", {}, p.bytes == null ? "–" : fmt.bytes(p.bytes)),
+    h("span", { class: "pct" }, p.bytes != null && total ? `${((p.bytes / total) * 100).toFixed(p.bytes / total < 0.01 ? 2 : 0)}%` : ""))));
+}
+
+// Types of SingleStore data on a node's disk (MV_DISK_USAGE + MV_DATA_DISK_USAGE).
+const DISK_TYPES = [
+  ["columnstore_blobs_b", "Columnstore data (blobs)", "var(--series-1)", "Compressed columnstore segment files (BLOBS_B)"],
+  ["transaction_logs_b", "Transaction logs", "var(--series-2)", "Write-ahead logs of every partition (LOGS_B)"],
+  ["rowstore_snapshots_b", "Rowstore snapshots", "var(--series-3)", "Snapshots of the in-memory rowstore data (SNAPSHOTS_B)"],
+  ["temp_blobs_b", "Temporary table blobs", "var(--series-7)", "TEMP_BLOBS_B"],
+  ["other_database_files_b", "Other database files", "var(--series-5)", "OTHER_B"],
+  ["user_data_unattributed_b", "Other user data", "var(--s2-border)", "user_data the per-database view doesn't explain"],
+  ["plan_cache_b", "Plan cache", "var(--series-4)", "Compiled query plans on disk (plancache)"],
+  ["trace_logs_b", "Trace logs", "var(--series-6)", "tracelogs"],
+  ["audit_logs_b", "Audit logs", "var(--series-8)", "auditlogs"],
+  ["system_files_b", "System files", "var(--s2-text-3)", "other_data: SingleStore's own system files"],
+];
+
+function mountCard(g, nodes, names) {
+  const members = nodes.filter((n) => g.node_ids.includes(n.id));
+  const parts = [
+    { label: "SingleStore (these nodes)", bytes: g.singlestore_b, color: "var(--s2-info)", title: "Sum of the nodes' SingleStore directories (MV_DISK_USAGE)" },
+    { label: "Other / not SingleStore", bytes: g.other_b, color: "var(--s2-warn)", title: "Used space no SingleStore node on this mount accounts for: other software, file system overhead" },
+    { label: "Free", bytes: g.free_b, color: "var(--s2-bg-3)" },
+  ];
+  return h("div", { class: "s2-card cm-node" },
+    h("div", { class: "cm-node-head" },
+      h("span", { class: "cm-node-name" }, `Mount ${g.mount_point}`),
+      h("span", { class: `s2-badge ${g.shared ? "info" : "plain"}` }, g.shared ? `shared by ${g.node_ids.length} nodes` : "one node"),
+      g.server ? h("span", { class: "s2-badge plain", title: g.mount_names.join("\n") }, `network storage ${g.server}`) : null),
+    h("div", { class: "cm-node-meta" }, g.shared
+      ? `Total, used and free are for the whole file system: every node on it (${members.map((n) => names[n.id]).join(", ")}) reports the same numbers.`
+      : `Used by ${members.map((n) => names[n.id]).join(", ")}.`),
+    meter("Used", `${fmt.bytes(g.used_b)} of ${fmt.bytes(g.total_b)}`, pctOf(g.used_b, g.total_b), `${fmt.bytes(g.free_b)} free`),
+    stackBar(parts, g.total_b, "Mount usage"),
+    legendRows(parts, g.total_b),
+    h("div", { class: "cm-sub" }, "SingleStore per node: ", members.map((n) => `${names[n.id]} ${fmt.bytes(n.singlestore_b)}`).join(" · ")));
+}
+
+function diskNodeCard(n, name, index, compact) {
+  const u = n.usage;
+  const parts = DISK_TYPES.map(([k, label, color, title]) => ({ label, bytes: u[k], color, title })).filter((p) => p.bytes > 0 || !compact);
+  const bc = n.blob_cache;
+  const limit = bc.limit_adjusted_b ?? bc.limit_b;
+  const top = (rows, key, label) => rows.length ? h("div", { class: "cm-top" },
+    h("div", { class: "cm-top-h" }, label),
+    rows.slice(0, compact ? 3 : 6).map((r) => h("div", { class: "cm-top-r" },
+      h("span", { class: "s2-mono", title: key(r) }, key(r)), h("strong", {}, fmt.bytes(r.bytes))))) : null;
+  return h("div", { class: `s2-card cm-node${compact ? " compact" : ""}` },
+    h("div", { class: "cm-node-head" },
+      h("span", { class: "cm-key", style: { background: nodeColor(index) } }),
+      h("span", { class: "cm-node-name", title: n.host }, name),
+      h("span", { class: `s2-badge plain ${n.type === "LEAF" ? "" : "info"}` }, n.type_label),
+      h("span", { class: "s2-spacer" }),
+      h("strong", { class: "cm-total", title: "This node's SingleStore directories (MV_DISK_USAGE)" }, fmt.bytes(n.singlestore_b))),
+    h("div", { class: "cm-node-meta" }, "This node's own SingleStore files, by type"),
+    stackBar(parts, n.singlestore_b, `${name} disk use by type`),
+    legendRows(parts, n.singlestore_b),
+    h("div", { class: "cm-kv" },
+      h("div", { title: "MV_CACHED_BLOBS (bottomless databases only); limit = maximum_blob_cache_size_mb, adjusted by the engine for low disk" },
+        h("span", {}, "Blob cache (bottomless)"),
+        h("strong", {}, bc.blobs ? `${fmt.bytes(bc.bytes)} of ${bytesOrDash(limit)}` : `empty · limit ${bytesOrDash(limit)}`)),
+      n.spilling.used_b != null ? h("div", { title: "Disk_spilling_usage_mb / Disk_spilling_usage_limit_mb" },
+        h("span", {}, "Query spilling"), h("strong", {}, `${fmt.bytes(n.spilling.used_b)}${n.spilling.limit_b ? ` of ${fmt.bytes(n.spilling.limit_b)}` : ""}`)) : null,
+      n.engine_disk.uncategorized_b != null ? h("div", { title: "Disk_uncategorized_usage_mb: used space on this disk the engine doesn't attribute to this node's SingleStore files. On a shared mount this includes the other nodes' data." },
+        h("span", {}, "Not this node's (engine view)"), h("strong", {}, fmt.bytes(n.engine_disk.uncategorized_b))) : null),
+    compact ? null : top(n.databases, (r) => r.database, "Largest databases on this node"),
+    top(n.tables, (r) => `${r.database}.${r.table}`, "Largest columnstore tables on this node"));
+}
+
+function diskTab(d, names) {
+  const slot = state.extra.disk;
+  const x = slot.data;
+  const head = h("div", { class: "cm-section", style: { marginTop: 0 } },
+    h("h2", {}, "Disk"),
+    h("span", { class: "s2-faint s2-small" }, x ? `Directory sizes measured ${fmt.relTime(x.dirs_measured_at)} · refreshed every minute` : ""),
+    h("span", { class: "s2-spacer" }),
+    h("button", { class: "s2-btn", disabled: slot.loading, title: "Measure the SingleStore directories again now (takes a few seconds on network storage)",
+      onclick: () => refreshTab(true) }, slot.loading ? h("span", { class: "s2-spinner" }) : null, "Measure again"));
+  if (!x) return [head, tabStatus(slot, "Disk") ?? h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Measuring disk use per node…")];
+  const nodeIndex = Object.fromEntries(d.nodes.map((n, i) => [n.id, i]));
+  const leaves = x.nodes.filter((n) => n.type === "LEAF"), aggs = x.nodes.filter((n) => n.type !== "LEAF");
+  return [head, tabStatus(slot, "Disk refresh"),
+    h("div", { class: "s2-small s2-muted", style: { marginBottom: "8px" } },
+      h("strong", {}, "Per mount"), " = the file system (MV_SYSINFO_DISK). ", h("strong", {}, "Per node"),
+      " = that node's own SingleStore directories (MV_DISK_USAGE, split per database by MV_DATA_DISK_USAGE). Largest tables: compressed columnstore size on that node (COLUMNAR_SEGMENTS); rowstore tables live in memory and reach disk only as their database's snapshots and logs."),
+    h("div", { class: "cm-nodes cm-wide" }, x.mounts.map((g) => mountCard(g, x.nodes, names))),
+    h("div", { class: "cm-section" }, h("h2", {}, `Leaves (${leaves.length})`)),
+    h("div", { class: "cm-nodes cm-wide" }, leaves.map((n) => diskNodeCard(n, names[n.id] ?? n.host, nodeIndex[n.id] ?? 0, false))),
+    h("div", { class: "cm-section" }, h("h2", {}, `Aggregators (${aggs.length})`)),
+    h("div", { class: "cm-nodes" }, aggs.map((n) => diskNodeCard(n, names[n.id] ?? n.host, nodeIndex[n.id] ?? 0, true))),
+    x.bottomless_cache_in_use ? null : h("div", { class: "s2-small s2-faint", style: { marginTop: "8px" } },
+      "The blob cache only holds data of bottomless (unlimited storage) databases; with none on this cluster it stays empty. Its limit is maximum_blob_cache_size_mb per node.")];
+}
+
+const BL_COLS = [["UPLOADED_BYTES", "Upload"], ["BLOB_CACHE_DOWNLOADED_BYTES", "Fetch"], ["BLOB_CACHE_EVICTED_BYTES", "Evict"]];
+
+function blTable(rows, first, firstLabel) {
+  const body = rows.map((r) => {
+    const t = r.totals ?? {}, rt = r.rates ?? {};
+    return h("tr", {},
+      h("td", {}, first(r)),
+      ...BL_COLS.map(([k]) => h("td", { class: "num", title: `Total ${bytesOrDash(t[k])}` }, mbText(MBs(rt[k])))),
+      ...BL_COLS.map(([k]) => h("td", { class: "num" }, bytesOrDash(t[k]))),
+      h("td", { class: "num", title: "GET / PUT requests per second" }, rt.NUM_GET_REQUESTS != null ? `${rt.NUM_GET_REQUESTS.toFixed(1)} / ${(rt.NUM_PUT_REQUESTS ?? 0).toFixed(1)}` : "–"),
+      h("td", { class: `num ${r.upload_lag_s > 60 ? "long" : ""}`, title: "UPLOAD_QUEUE_WAIT_SECS: how far uploads lag behind" }, r.upload_lag_s != null ? fmt.duration(r.upload_lag_s) : "–"),
+      h("td", { class: "num" }, r.since_last_upload_s != null ? fmt.duration(r.since_last_upload_s) : "–"),
+      h("td", { class: "num" }, fmt.number(r.outstanding_requests ?? 0)),
+      h("td", { class: "num", title: "Failed API requests (total)" }, fmt.number(t.NUM_FAILED_API_REQUESTS ?? 0)),
+      h("td", {}, r.rate_limited ? h("span", { class: "s2-badge warn" }, "rate limited") : (r.last_upload_results ?? []).join(", ")));
+  });
+  const cols = [firstLabel, "Upload /s", "Fetch /s", "Evict /s", "Uploaded", "Fetched", "Evicted", "GET / PUT /s", "Upload lag", "Last upload", "Pending req.", "Failed", "State"];
+  return h("div", { class: "s2-table-wrap" }, h("table", { class: "s2-table cm-q" },
+    h("thead", {}, h("tr", {}, cols.map((c, i) => h("th", { class: i ? "num" : "" }, c)))), h("tbody", {}, body)));
+}
+
+function bottomlessTab(d, names) {
+  const slot = state.extra.bottomless;
+  const x = slot.data;
+  const head = h("div", { class: "cm-section", style: { marginTop: 0 } },
+    h("h2", {}, "Bottomless (remote storage)"),
+    h("span", { class: "s2-faint s2-small" }, x?.sample_seconds ? `rates over the last ${x.sample_seconds}s · refreshed every ${REFRESH_MS / 1000}s` : "rates appear from the second refresh"));
+  if (!x) return [head, tabStatus(slot, "Bottomless") ?? h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Reading remote storage status…")];
+  if (!x.has_bottomless) {
+    return [head, tabStatus(slot, "Bottomless refresh"), h("div", { class: "s2-card", style: { padding: "16px" } },
+      h("div", {}, h("strong", {}, "No bottomless (unlimited storage) databases on this cluster.")),
+      h("div", { class: "s2-small s2-muted", style: { marginTop: "6px" } },
+        "Every database keeps its data on the nodes' local disks, so nothing is uploaded to or fetched from object storage and there is no remote traffic to show. ",
+        "Checked MV_BOTTOMLESS_STATUS_EXTENDED (no partitions) and MV_BOTTOMLESS_SUMMARY_PER_NODE. The Schema Explorer marks each database as bottomless or local."))];
+  }
+  const ev = x.nodes.filter((n) => Object.keys(n.events ?? {}).length);
+  const remote = state.remote;
+  return [head, tabStatus(slot, "Bottomless refresh"),
+    h("div", { class: "s2-small s2-muted", style: { marginBottom: "6px" } },
+      "Per node, summed over its partitions (MV_BOTTOMLESS_STATUS_EXTENDED). Rates are measured here from the change in its running byte counts between refreshes. ",
+      "Blob cache hit ratio: not available. SingleStore 9.0 has no hit counter; fetches are cache misses."),
+    blTable(x.nodes.filter((n) => n.totals), (n) => h("span", { title: n.host }, names[n.id] ?? n.host), "Node"),
+    h("div", { class: "cm-section" }, h("h2", {}, `Per database (${x.databases.length})`)),
+    blTable(x.databases, (r) => h("span", { title: [r.bucket, r.directory].filter(Boolean).join("/") }, r.database), "Database"),
+    h("div", { class: "cm-section" }, h("h2", {}, "Engine's own rates"),
+      h("span", { class: "s2-faint s2-small" }, "MV_BOTTOMLESS_SUMMARY_PER_NODE, as reported")),
+    h("div", { class: "s2-table-wrap" }, h("table", { class: "s2-table cm-q" },
+      h("thead", {}, h("tr", {}, ["Node", "Upload MB/s", "Fetch MB/s", "Evict MB/s", "API req/s", "Upload wait", "Last upload", "Object store"].map((c, i) => h("th", { class: i ? "num" : "" }, c)))),
+      h("tbody", {}, x.nodes.filter((n) => n.engine).map((n) => h("tr", {},
+        h("td", {}, names[n.id] ?? n.host), h("td", { class: "num" }, String(n.engine.upload_mb_s ?? "–")), h("td", { class: "num" }, String(n.engine.download_mb_s ?? "–")),
+        h("td", { class: "num" }, String(n.engine.eviction_mb_s ?? "–")), h("td", { class: "num" }, String(n.engine.api_requests_s ?? "–")),
+        h("td", { class: "num" }, String(n.engine.upload_queue_wait_s ?? "–")), h("td", { class: "num" }, String(n.engine.last_upload_result ?? "–")),
+        h("td", { class: "num" }, String(n.engine.object_store_availability ?? "–"))))))),
+    ev.length ? h("div", { class: "cm-section" }, h("h2", {}, "Blob cache events"),
+      h("span", { class: "s2-faint s2-small" }, "The fetches and evictions the engine still keeps (MV_BLOB_CACHE_EVENTS)")) : null,
+    ev.length ? h("div", { class: "s2-table-wrap" }, h("table", { class: "s2-table cm-q" },
+      h("thead", {}, h("tr", {}, ["Node", "Fetches", "Fetched", "Avg fetch", "Max fetch", "Evictions", "Evicted"].map((c, i) => h("th", { class: i ? "num" : "" }, c)))),
+      h("tbody", {}, ev.map((n) => { const f = n.events.fetch ?? {}, e = n.events.eviction ?? {}; return h("tr", {},
+        h("td", {}, names[n.id] ?? n.host), h("td", { class: "num" }, fmt.number(f.count ?? 0)), h("td", { class: "num" }, bytesOrDash(f.bytes)),
+        h("td", { class: "num" }, f.avg_fetch_ms != null ? `${fmt.number(f.avg_fetch_ms)} ms` : "–"), h("td", { class: "num" }, f.max_fetch_ms != null ? `${fmt.number(f.max_fetch_ms)} ms` : "–"),
+        h("td", { class: "num" }, fmt.number(e.count ?? 0)), h("td", { class: "num" }, bytesOrDash(e.bytes))); })))) : null,
+    h("div", { class: "cm-section" }, h("h2", {}, "Stored in remote storage"),
+      h("span", { class: "s2-faint s2-small" }, "MV_BOTTOMLESS_REMOTE_STATS queries the object store itself, so it only runs when you ask."),
+      h("button", { class: "s2-btn", disabled: remote.status === "loading", onclick: loadRemote }, remote.status === "loading" ? h("span", { class: "s2-spinner" }) : null, "Measure remote storage")),
+    remote.status === "error" ? S2.errorBox(remote.error) : null,
+    remote.status === "ok" ? S2.dataTable(["Database", "Total", "Blobs", "Log chunks", "Snapshots", "Other", "Complete"],
+      remote.data.databases.map((r) => ({ Database: r.database, Total: r.bytes, Blobs: r.blobs, "Log chunks": r.logs, Snapshots: r.snapshots, Other: r.other, Complete: r.incomplete ? "not yet (retry)" : "yes" })),
+      { maxHeight: "260px", render: { Total: fmt.bytes, Blobs: fmt.bytes, "Log chunks": fmt.bytes, Snapshots: fmt.bytes, Other: fmt.bytes } }) : null];
+}
+
+async function loadRemote() {
+  state.remote = { status: "loading" };
+  render();
+  try { state.remote = { status: "ok", data: await S2.callTool("cluster_monitor_remote_stats", {}) }; }
+  catch (e) { state.remote = { status: "error", error: e }; }
+  render();
+}
+
+// ---- IO tab: two charts over the session (disk throughput, blob cache traffic) + statements waiting on the blob cache
+const diskPlot = createPlot("Disk throughput per node");
+const cachePlot = createPlot("Blob cache traffic per node");
+const DISK_METRICS = [["rd", "Read"], ["wr", "Write"]];
+const CACHE_METRICS = [["down", "Fetched"], ["evict", "Evicted"], ["up", "Uploaded"]];
+const mbSpec = (hist, series, what, empty) => ({
+  hist, series, what, empty,
+  tick: (v) => `${+v.toPrecision(3)}`, value: mbText, floor: 0.1, left: 44, right: 170,
+});
+
+function ioCharts(d) {
+  const io = state.ioChart;
+  const x = state.extra.io.data;
+  const diskCard = h("section", { class: "s2-card cm-chart", "aria-label": "Disk throughput per node" },
+    h("div", { class: "cm-chart-head" },
+      h("h2", {}, "Disk throughput"),
+      h("span", { class: "s2-subtitle" }, "MB/s the node's SingleStore process read or wrote · per node · MV_SYSINFO_DISK"),
+      h("span", { class: "s2-spacer" }),
+      seg("Metric", DISK_METRICS, io.disk, (k) => { io.disk = k; render(); }),
+      seg("Nodes to show", GROUPS, io.group, (k) => { io.group = k; io.hidden.clear(); render(); })),
+    nodeLegend(d.nodes, io, render),
+    setPlot(diskPlot, mbSpec(state.history, nodeSeries(d.nodes, io, (p, id) => MBs(p[io.disk]?.[id])),
+      `Disk ${io.disk === "rd" ? "reads" : "writes"}`, "Collecting disk readings — the chart fills in as the monitor refreshes.")));
+  const bl = x?.bottomless;
+  const cacheCard = h("section", { class: "s2-card cm-chart", "aria-label": "Blob cache traffic per node" },
+    h("div", { class: "cm-chart-head" },
+      h("h2", {}, "Blob cache traffic"),
+      h("span", { class: "s2-subtitle" }, "MB/s fetched from / evicted to / uploaded to remote storage · per node"),
+      h("span", { class: "s2-spacer" }),
+      seg("Metric", CACHE_METRICS, io.cache, (k) => { io.cache = k; render(); })),
+    bl && !bl.has_bottomless
+      ? h("div", { class: "cm-chart-empty" }, "No bottomless databases: the blob cache isn't used, so there is no fetch / eviction traffic.")
+      : setPlot(cachePlot, mbSpec(x?.io_history ?? [], nodeSeries(d.nodes, io, (p, id) => MBs(p[io.cache]?.[id])),
+        `Blob cache ${io.cache}`, "Collecting blob cache readings — the chart fills in while this tab is open.")));
+  return h("div", { class: "cm-io-charts" }, diskCard, cacheCard);
+}
+
+function ioNow(d, names) {
+  const rows = d.nodes.map((n) => {
+    const m = n.disks[0];
+    return { n, m };
+  });
+  const iops = rows.some(({ m }) => (m?.read_iops ?? 0) + (m?.write_iops ?? 0) > 0);
+  return [h("div", { class: "s2-table-wrap" }, h("table", { class: "s2-table cm-q" },
+    h("thead", {}, h("tr", {}, ["Node", "Mount", "Read", "Write", ...(iops ? ["Read IOPS", "Write IOPS"] : [])].map((c, i) => h("th", { class: i > 1 ? "num" : "" }, c)))),
+    h("tbody", {}, rows.map(({ n, m }) => h("tr", {},
+      h("td", { title: n.host }, names[n.id]), h("td", { class: "s2-mono" }, m?.mount_point ?? "–"),
+      h("td", { class: "num" }, mbText(MBs(m?.read_bps))), h("td", { class: "num" }, mbText(MBs(m?.write_bps))),
+      ...(iops ? [h("td", { class: "num" }, String(m?.read_iops ?? "–")), h("td", { class: "num" }, String(m?.write_iops ?? "–"))] : [])))))),
+  iops];
+}
+
+function blobWaitTable(ws, names) {
+  if (!ws.length) return h("div", { class: "s2-empty" }, "No cached plan has waited on the blob cache");
+  const body = h("tbody");
+  for (const w of ws) {
+    const k = `bw:${w.node_id}:${w.database}:${w.sql}`;
+    const open = state.open.has(k);
+    body.append(h("tr", { class: open ? "open" : "", onclick: () => { open ? state.open.delete(k) : state.open.add(k); render(); } },
+      h("td", { title: w.node_type }, names[w.node_id] ?? w.node_id),
+      h("td", {}, w.database),
+      h("td", { class: "num", title: "BLOB_CACHE_WAIT_TIME_MS: total over all execution threads and runs since the plan was compiled" }, `${fmt.number(w.wait_ms)} ms`),
+      h("td", { class: "num" }, fmt.number(w.runs)),
+      h("td", { class: "num", title: "AVERAGE_BLOB_CACHE_MISS_BYTES: bytes per run not in the cache, fetched from remote storage" }, bytesOrDash(w.avg_miss_bytes)),
+      h("td", { class: "num ms" }, w.avg_ms != null ? `${fmt.number(w.avg_ms)} ms` : "–"),
+      h("td", { class: "num ago" }, agoText(w.ago_s)),
+      h("td", { class: "sql", title: open ? "" : w.sql }, w.sql)));
+  }
+  return h("div", { class: "s2-table-wrap cm-q-wrap recent" }, h("table", { class: "s2-table cm-q" },
+    h("thead", {}, h("tr", {}, ["Node", "Database", "Cache wait", "Runs", "Avg miss", "Avg time", "Last run", "Statement"].map((c) => h("th", { class: ["Cache wait", "Runs", "Avg miss", "Avg time", "Last run"].includes(c) ? "num" : "" }, c)))), body));
+}
+
+function ioTab(d, names) {
+  const slot = state.extra.io;
+  const x = slot.data;
+  const [nowTable, iops] = ioNow(d, names);
+  return [
+    h("div", { class: "cm-section", style: { marginTop: 0 } }, h("h2", {}, "IO"),
+      h("span", { class: "s2-faint s2-small" }, `charts over this session (up to ${Math.round((d.history_seconds ?? 900) / 60)} min) · refreshed every ${REFRESH_MS / 1000}s`)),
+    tabStatus(slot, "IO refresh"),
+    ioCharts(d),
+    h("div", { class: "cm-section" }, h("h2", {}, "Now"),
+      h("span", { class: "s2-faint s2-small" }, iops ? "" : "IOPS not shown: the devices report no operation counts (e.g. network storage).")),
+    nowTable,
+    h("div", { class: "cm-kv", style: { marginTop: "8px" } },
+      h("div", {}, h("span", {}, "Blob cache hit ratio"), h("strong", { title: "SingleStore 9.0 exposes no blob cache hit counter. Fetches (cache misses) are in the chart above and on the Bottomless tab." }, "not available in SingleStore 9.0"))),
+    h("div", { class: "cm-section" }, h("h2", {}, "Statements waiting on the blob cache"),
+      h("span", { class: "s2-faint s2-small" }, "From every node's plan cache, most total wait first. Leaf plans are the per-partition part of a query.")),
+    x ? blobWaitTable(x.blob_waits ?? [], names) : h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Loading…"),
+  ];
 }
 
 function render() {
@@ -361,26 +794,52 @@ function render() {
       S2.openInBrowserButton("cluster_monitor", () => ({})),
       S2.fullscreenButton()),
     state.error ? h("div", { class: "s2-error", style: { marginBottom: "10px" } }, `Refresh failed: ${state.error.message}`) : null,
-    chartEl,
-    h("div", { class: "cm-section" }, h("h2", {}, "Nodes")),
-    h("div", { class: "cm-nodes" }, d.nodes.map((n, i) => nodeCard(n, names[n.id], i))),
-    h("div", { class: "cm-section" },
-      h("h2", {}, `Active queries (${d.queries.length})`),
-      h("span", { class: "s2-faint s2-small" }, `${d.idle_connections} idle connection${d.idle_connections === 1 ? "" : "s"}`),
+    tabs(d),
+    ...(state.tab === "queries" ? queriesTab(d, names) : state.tab === "disk" ? diskTab(d, names)
+      : state.tab === "bottomless" ? bottomlessTab(d, names) : state.tab === "io" ? ioTab(d, names) : [
+      h("div", { class: "cm-overview" },
+        chartEl,
+        h("div", {}, h("div", { class: "cm-nodes" }, d.nodes.map((n, i) => nodeCard(n, names[n.id], i))))),
+    ]),
+  ].filter(Boolean));
+  if (state.tab === "overview") buildChart();
+}
+
+function tabs(d) {
+  const recent = (d.recent ?? []).length;
+  const tab = (key, label, count, busy) => h("button", { role: "tab", "aria-selected": String(state.tab === key),
+    onclick: () => { state.tab = key; render(); refreshTab(); } }, label, count != null ? h("span", { class: `count${busy ? " busy" : ""}` }, String(count)) : null);
+  return h("div", { class: "cm-tabs", role: "tablist" },
+    tab("overview", "Overview"),
+    tab("queries", "Queries", d.queries.length, d.queries.length > 0),
+    tab("disk", "Disk"),
+    tab("bottomless", "Bottomless"),
+    tab("io", "IO"),
+    recent ? h("span", { class: "s2-faint s2-small", style: { alignSelf: "center", marginLeft: "6px" } }, `${recent} ran in the last ${d.recent_seconds ?? 60} s`) : null);
+}
+
+function queriesTab(d, names) {
+  return [
+    h("div", { class: "cm-section", style: { marginTop: 0 } },
+      h("h2", {}, `Running now (${d.queries.length})`),
+      h("span", { class: "s2-faint s2-small" }, `${d.idle_connections} idle connection${d.idle_connections === 1 ? "" : "s"} · refreshed every ${REFRESH_MS / 1000}s`),
       h("span", { class: "s2-spacer" }),
       h("label", { class: "cm-auto s2-small s2-muted", title: "Also show the work leaves do on behalf of user queries (user 'distributed')" },
         h("input", { type: "checkbox", checked: state.includeInternal, onchange: (e) => { state.includeInternal = e.target.checked; refresh(); } }),
         "Include internal leaf activity")),
     queriesTable(d.queries, names),
-  ].filter(Boolean));
-  buildChart();
+    h("div", { class: "cm-section" },
+      h("h2", {}, `Ran in the last ${d.recent_seconds ?? 60} s (${(d.recent ?? []).length})`),
+      h("span", { class: "s2-faint s2-small" }, "From the aggregators' plan caches: also the short statements that finish between two refreshes. System-view reads are left out.")),
+    recentTable(d.recent ?? [], names),
+  ];
 }
 
 function accept(data) {
   state.data = data;
   state.error = null;
   if (data.history) state.history = data.history;
-  const live = new Set(data.queries.map(qkey));
+  const live = new Set([...data.queries.map(qkey), ...(data.recent ?? []).map((r) => `recent:${r.node_id}:${r.database}:${r.sql}`)]);
   for (const k of state.open) if (!live.has(k)) state.open.delete(k);
   reportContext();
 }
@@ -402,7 +861,10 @@ async function refresh() {
   if (state.loading) return;
   state.loading = true;
   try {
+    // The open tab's own data in parallel (Disk: at most once a minute).
+    const extra = refreshTab();
     accept(await S2.callTool("cluster_monitor_data", { include_internal: state.includeInternal }));
+    await extra;
   } catch (e) {
     state.error = e;
   } finally {

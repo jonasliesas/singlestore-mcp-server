@@ -31,7 +31,7 @@ from ._core import page_html
 HOST_NAME = "singlestore-browser-view"
 _HOST_PAGE = Path(__file__).with_name("browser_host.html")
 # Plain (non-app) tools the apps' buttons call.
-_EXTRA_TOOLS = {"start_pipeline", "stop_pipeline", "test_pipeline", "browser_link"}
+_EXTRA_TOOLS = {"start_pipeline", "stop_pipeline", "test_pipeline", "browser_link", "workload_status", "workload_stop"}
 _MAX_BODY = 1_000_000
 
 

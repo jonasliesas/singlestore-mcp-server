@@ -27,8 +27,9 @@ import sys
 import threading
 import time
 from pathlib import Path
-from .paths import data_dir
 from typing import Any
+
+from .paths import data_dir
 
 # What SingleStore's example notebooks expect besides the kernel itself.
 PACKAGES = ["ipykernel", "jupyter_client", "pandas", "matplotlib", "singlestoredb",

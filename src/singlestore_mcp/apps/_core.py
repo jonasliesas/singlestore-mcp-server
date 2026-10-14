@@ -13,12 +13,12 @@ Each app is one HTML template in this directory. ``register_app`` expands its
 
 from __future__ import annotations
 
-import hashlib
-import os
 import datetime
 import decimal
 import functools
+import hashlib
 import math
+import os
 import re
 import threading
 import time

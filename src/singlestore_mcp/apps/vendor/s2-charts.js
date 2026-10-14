@@ -493,7 +493,13 @@
       else { const a = el("a", { href: URL.createObjectURL(new Blob([text], { type: "image/svg+xml" })), download: name }); document.body.append(a); a.click(); a.remove(); }
     }
 
-    new ResizeObserver(() => { if (data && !data.error) { const node = plot.querySelector("svg"); if (node && Math.abs(Number(node.getAttribute("width")) - plot.clientWidth) > 8) { T = STYLES[s.style] ?? STYLES.singlestore; plot.replaceChildren(draw(plot, data, s, hidden, tip)); } } }).observe(plot);
+    // Redraw in the next frame, not inside the observer callback: redrawing there changes the plot's
+    // size again in the same frame, which the browser reports as a "ResizeObserver loop" error.
+    let resizeFrame = 0;
+    new ResizeObserver(() => {
+      cancelAnimationFrame(resizeFrame);
+      resizeFrame = requestAnimationFrame(() => { if (data && !data.error) { const node = plot.querySelector("svg"); if (node && Math.abs(Number(node.getAttribute("width")) - plot.clientWidth) > 8) { T = STYLES[s.style] ?? STYLES.singlestore; plot.replaceChildren(draw(plot, data, s, hidden, tip)); } } });
+    }).observe(plot);
     render();
     onChange?.(s);
     return box;

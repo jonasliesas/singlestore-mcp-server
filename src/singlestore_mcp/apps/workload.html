@@ -1,0 +1,910 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workload</title>
+<!--S2:HEAD-->
+<!--S2:VENDOR:s2-charts.js-->
+<style>
+  .wl-top { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0 10px; }
+  .wl-top select { min-width: 220px; }
+  .wl-card { padding: 10px 12px; margin-bottom: 12px; }
+  .wl-card h2 { font-size: var(--font-text-md-size, 14px); margin: 0 0 8px; display: flex; align-items: center; gap: 8px; }
+  .wl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 8px 12px; margin-bottom: 10px; }
+  .wl-grid label, .wl-field { display: flex; flex-direction: column; gap: 3px; font-size: var(--s2-fs-xs); color: var(--s2-text-2); }
+  .wl-grid .check { flex-direction: row; align-items: center; gap: 6px; }
+  .wl-stmt { border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius-sm); padding: 8px; margin-bottom: 8px; background: var(--s2-bg); }
+  .wl-stmt.off { opacity: .6; }
+  .wl-stmt .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 6px; font-size: var(--s2-fs-xs); }
+  .wl-stmt .row input[type=text] { min-width: 160px; }
+  .wl-stmt .row input[type=number] { width: 80px; }
+  .wl-stmt textarea { width: 100%; box-sizing: border-box; min-height: 64px; font-family: var(--s2-mono, ui-monospace, Consolas, monospace); font-size: 12px; resize: vertical; }
+  .wl-test { font-size: 11px; margin-top: 4px; }
+  .wl-kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; margin: 6px 0 10px; }
+  .wl-kpi { border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius-sm); padding: 6px 8px; background: var(--s2-bg); }
+  .wl-kpi .v { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .wl-kpi .k { font-size: 11px; color: var(--s2-text-3); }
+  .wl-progress { height: 6px; background: var(--s2-bg-3); border-radius: 3px; overflow: hidden; margin: 4px 0 8px; }
+  .wl-progress > div { height: 100%; background: var(--s2-accent, #7c3aed); transition: width .5s; }
+  .wl-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; margin-bottom: 10px; }
+  .wl-charts h3 { font-size: 12px; margin: 0 0 4px; color: var(--s2-text-2); }
+  table.wl-t { width: 100%; border-collapse: collapse; font-size: var(--s2-fs-xs); font-variant-numeric: tabular-nums; }
+  table.wl-t th, table.wl-t td { padding: 4px 6px; border-bottom: 1px solid var(--s2-border-2); text-align: left; vertical-align: top; }
+  table.wl-t th.n, table.wl-t td.n { text-align: right; white-space: nowrap; }
+  .better { color: var(--s2-ok, #1a7f37); font-weight: 600; }
+  .worse { color: var(--s2-err, #cf222e); font-weight: 600; }
+  .wl-tabs { display: inline-flex; border: 1px solid var(--s2-border); border-radius: var(--s2-radius-sm); overflow: hidden; }
+  .wl-tabs button { border: 0; background: transparent; padding: 4px 12px; font-size: var(--s2-fs-xs); cursor: pointer; color: var(--s2-text-2); }
+  .wl-tabs button + button { border-left: 1px solid var(--s2-border); }
+  .wl-tabs button[aria-pressed="true"] { background: var(--s2-bg-3); color: var(--s2-text); font-weight: 600; }
+  .wl-tune { margin: 6px 0; padding: 8px; border-left: 3px solid var(--s2-info, #0969da); background: var(--s2-bg-2); }
+  .wl-tune li { margin-bottom: 6px; }
+  .wl-note { font-size: 11px; color: var(--s2-text-3); line-height: 1.5; }
+  .wl-stmt.sel { border-color: var(--s2-info); }
+  .wl-pending { margin: 0 0 10px; padding: 8px 10px; border-radius: var(--s2-radius-sm); background: var(--s2-warn-bg); font-size: var(--s2-fs-xs); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  /* Claude panel on the right, like the SQL Editor's and the Notebook's */
+  .wl-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; align-items: start; }
+  .wl-layout.chat-open { grid-template-columns: minmax(0, 1fr) 360px; }
+  @media (max-width: 860px) { .wl-layout.chat-open { grid-template-columns: minmax(0, 1fr); } }
+  .wl-chat { position: sticky; top: 8px; display: flex; flex-direction: column; height: min(780px, calc(100vh - 20px)); min-height: 360px;
+    border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); overflow: hidden; background: var(--s2-bg); }
+  .wl-chat[hidden] { display: none; }
+  .wl-chat .top { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--s2-border-2); background: var(--s2-bg-2); font-size: var(--s2-fs-xs); }
+  .wl-chat .top strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wl-msgs { flex: 1; overflow: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+  .wl-msg { max-width: 96%; font-size: var(--s2-fs-xs); line-height: 1.5; }
+  .wl-msg.you { align-self: flex-end; background: var(--s2-info-bg); border-radius: 10px 10px 2px 10px; padding: 6px 10px; white-space: pre-wrap; }
+  .wl-msg.claude { align-self: flex-start; background: var(--s2-bg-2); border-radius: 10px 10px 10px 2px; padding: 6px 10px; width: 96%; box-sizing: border-box; }
+  .wl-msg.error { align-self: flex-start; background: var(--s2-err-bg, var(--s2-warn-bg)); border-radius: 10px; padding: 6px 10px; width: 96%; box-sizing: border-box; }
+  .wl-msg.note { align-self: center; color: var(--s2-text-3); font-style: italic; }
+  .wl-msg.note .s2-btn { font-style: normal; margin-left: 6px; }
+  .wl-msg .who { font-size: 11px; color: var(--s2-text-3); margin-bottom: 2px; }
+  .wl-msg p { margin: 0 0 4px; white-space: pre-wrap; }
+  .wl-msg p code { font-family: var(--s2-mono); font-size: 11.5px; background: var(--s2-bg-3); border-radius: 3px; padding: 0 3px; }
+  .wl-code { margin: 6px 0; border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius-sm); overflow: hidden; background: var(--s2-bg); }
+  .wl-code pre { margin: 0; padding: 7px 9px; font-family: var(--s2-mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; }
+  .wl-code .bar { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding: 4px 6px; border-top: 1px solid var(--s2-border-2); background: var(--s2-bg-2); }
+  .wl-code .bar .s2-btn { font-size: 11px; padding: 1px 7px; }
+  .wl-code .bar select { font-size: 11px; padding: 0 2px; height: auto; width: auto; max-width: 120px; }
+  .wl-code .res { padding: 3px 8px 5px; font-size: 11px; }
+  .wl-ask { display: flex; gap: 6px; align-items: flex-end; padding: 6px 8px; border-top: 1px solid var(--s2-border-2); }
+  .wl-ask textarea { flex: 1; resize: none; min-height: 34px; max-height: 120px; font-size: var(--s2-fs-xs); }
+  .wl-ask-opts { font-size: 11px; color: var(--s2-text-3); padding: 0 8px 6px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .wl-ask-opts select { font-size: 11px; padding: 1px 4px; height: auto; width: auto; }
+  .wl-claude .count { background: var(--s2-info); color: #fff; border-radius: 999px; font-size: 10px; padding: 0 6px; font-weight: 600; margin-left: 4px; }
+  .wl-sqlcell { max-width: 420px; font-family: var(--s2-mono, ui-monospace, Consolas, monospace); font-size: 11px; color: var(--s2-text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+</style>
+</head>
+<body>
+<div id="root"><div class="s2-empty"><span class="s2-spinner"></span> Loading workloads…</div></div>
+<script type="module">
+const { h, fmt } = S2;
+const root = document.getElementById("root");
+const fill = (el, ...kids) => el.replaceChildren(...kids.flat(Infinity).filter((k) => k != null && k !== false));
+const ms = (v) => (v == null ? "–" : v >= 10000 ? `${fmt.number(v / 1000, 1)} s` : `${fmt.number(v, v < 10 ? 1 : 0)} ms`);
+const pct = (v) => (v == null ? "–" : `${v > 0 ? "+" : ""}${fmt.number(v, 1)}%`);
+const when = (t) => (t ? new Date(t * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "–");
+const clone = (x) => JSON.parse(JSON.stringify(x));
+
+const NEW_STMT = (i) => ({ id: `s${i}`, name: `Statement ${i}`, sql: "", database: null, per_minute: 6, enabled: true });
+const DEFAULT_SETTINGS = { pacing: "rate", arrivals: "even", concurrency: 4, duration_s: 60, timeout_s: 60, think_ms: 0, fetch_rows: true, allow_writes: false, trace_all: false };
+
+const state = {
+  data: null, error: null, sel: null, draft: null, original: null, dirty: false, saving: false,
+  tab: "run", runId: null, run: null, timeline: [], polling: false, label: "",
+  tests: {}, tune: {}, compare: { base: null, new: null, result: null, loading: false }, databases: [],
+  selStmt: 0,          // the statement last clicked (the chat's "Replace statement N" default)
+  loadedUpdated: null, // the saved workload's "updated" when the draft was taken from it
+  pendingAdd: null,    // statements from the SQL Editor waiting for "discard unsaved changes?"
+};
+// The page: the workload (re-rendered) and the Claude panel (kept, so typing in it survives re-renders).
+const mainEl = h("div", { class: "wl-main", style: { minWidth: "0" } });
+const layoutEl = h("div", { class: "wl-layout" }, mainEl);
+root.replaceChildren(layoutEl);
+
+// ---------------------------------------------------------------- data
+async function load(selectName) {
+  try {
+    state.data = await S2.callTool("workload_overview", {});
+    state.error = null;
+  } catch (e) { state.error = e; }
+  if (selectName !== undefined) select(selectName);
+  else if (!state.sel && !state.draft && state.data?.workloads?.length) select(state.data.workloads[0].name);
+  else if (state.sel && !state.dirty) {
+    // Saved elsewhere meanwhile (e.g. the SQL Editor's "Update in workload"): show the saved version.
+    const w = workloadNamed(state.sel);
+    if (w && w.updated !== state.loadedUpdated) takeDraft(w);
+  }
+  if (state.data?.running && !state.polling) follow(state.data.running.id);
+  render();
+}
+function workloadNamed(name) { return state.data?.workloads.find((w) => w.name === name) ?? null; }
+function takeDraft(w) {
+  state.draft = w ? clone({ name: w.name, description: w.description, database: w.database, settings: { ...DEFAULT_SETTINGS, ...w.settings }, statements: w.statements }) : null;
+  state.loadedUpdated = w?.updated ?? null;
+}
+function select(name) {
+  const w = workloadNamed(name);
+  state.sel = w ? w.name : null;
+  takeDraft(w);
+  state.original = w ? w.name : null;
+  state.dirty = false; state.tests = {}; state.tune = {}; state.selStmt = 0;
+  const runs = runsOf(state.sel);
+  if (!state.polling) { state.runId = runs[0]?.id ?? null; state.run = null; state.timeline = []; if (state.runId) showRun(state.runId); }
+  state.compare = { base: runs[1]?.id ?? null, new: runs[0]?.id ?? null, result: null, loading: false };
+}
+const runsOf = (name) => (state.data?.runs ?? []).filter((r) => r.workload === name);
+function newWorkload(statements) {
+  state.sel = null; state.original = null;
+  state.draft = { name: "", description: "", database: state.databases.includes("SASDP") ? "SASDP" : null, settings: { ...DEFAULT_SETTINGS },
+    statements: statements?.length ? statements : [NEW_STMT(1)] };
+  state.dirty = true; state.tests = {}; state.tune = {}; state.selStmt = 0; state.loadedUpdated = null;
+  state.runId = null; state.run = null; state.timeline = [];
+  render();
+}
+const touch = () => { state.dirty = true; renderSaveBar(); };
+
+async function save() {
+  state.saving = true; renderSaveBar();
+  try {
+    const r = await S2.callTool("workload_save", { workload: state.draft, original_name: state.original });
+    state.data = { workloads: r.workloads, running: r.running, runs: r.runs };
+    S2.toast(`Saved ${r.workload.name}`, "ok");
+    select(r.workload.name);
+  } catch (e) { S2.toast(e.message, "err"); }
+  state.saving = false; render();
+}
+
+async function remove(ev) {
+  if (!state.sel) return;
+  if (!(await S2.confirmInline(ev.currentTarget, `Delete workload "${state.sel}" and its saved runs?`, "Delete"))) return;
+  try {
+    const r = await S2.callTool("workload_delete", { name: state.sel, runs_too: true });
+    state.data = { workloads: r.workloads, running: r.running, runs: r.runs };
+    state.sel = null; state.draft = null; state.run = null; state.runId = null;
+    if (state.data.workloads.length) select(state.data.workloads[0].name);
+  } catch (e) { S2.toast(e.message, "err"); }
+  render();
+}
+
+async function fromHistory(btn) {
+  btn.disabled = true;
+  try {
+    const r = await S2.callTool("workload_from_history", { hours: 24, top: 10 });
+    if (!r.statements.length) { S2.toast("No read-only queries in the last 24 hours of the query history", "err"); return; }
+    newWorkload(r.statements);
+    state.draft.name = "From history " + new Date().toISOString().slice(0, 10);
+    render();
+    S2.toast(`${r.statements.length} statements from the last 24 h (runs per minute = how often they ran). Save to keep them.`, "ok");
+  } catch (e) { S2.toast(e.message, "err"); }
+  finally { btn.disabled = false; }
+}
+
+// ---------------------------------------------------------------- running
+async function start() {
+  if (state.dirty) { await save(); if (state.dirty) return; }
+  try {
+    const r = await S2.callTool("workload_run", { name: state.sel, label: state.label });
+    state.label = "";
+    state.tab = "run";
+    follow(r.id);
+  } catch (e) { S2.toast(e.message, "err"); }
+}
+async function stopRun() {
+  try { await S2.callTool("workload_stop", { run_id: state.runId }); S2.toast("Stopping…", "ok"); }
+  catch (e) { S2.toast(e.message, "err"); }
+}
+function follow(runId) {
+  state.runId = runId; state.timeline = []; state.run = null; state.polling = true;
+  const tick = async () => {
+    if (state.runId !== runId) { state.polling = false; return; }
+    try {
+      const since = state.timeline.length ? state.timeline[state.timeline.length - 1].t : 0;
+      const r = await S2.callTool("workload_status", { run_id: runId, since });
+      state.timeline = state.timeline.filter((p) => p.t < since).concat(r.timeline ?? []);
+      state.run = r;
+      if (!["starting", "running"].includes(r.state)) {
+        state.polling = false;
+        await load();
+        S2.toast(r.state === "error" ? `Run failed: ${r.error}` : `Run ${r.state}: ${fmt.number(r.totals.count)} executions`, r.state === "error" ? "err" : "ok");
+        return;
+      }
+    } catch (e) { state.run = state.run ?? { error: e.message }; }
+    render();
+    setTimeout(tick, 1000);
+  };
+  tick();
+}
+async function showRun(runId) {
+  state.runId = runId; state.run = null; state.timeline = [];
+  render();
+  try {
+    const r = await S2.callTool("workload_status", { run_id: runId, since: 0 });
+    if (state.runId !== runId) return;
+    state.run = r; state.timeline = r.timeline ?? [];
+    if (["starting", "running"].includes(r.state) && !state.polling) follow(runId);
+  } catch (e) { state.run = { error: e.message }; }
+  render();
+}
+
+// ---------------------------------------------------------------- per-statement helpers
+async function testStatement(i) {
+  const s = state.draft.statements[i];
+  state.tests[i] = { loading: true }; render();
+  try { state.tests[i] = { result: await S2.callTool("workload_test_statement", { sql: s.sql, database: s.database || state.draft.database }) }; }
+  catch (e) { state.tests[i] = { error: e.message }; }
+  render();
+}
+async function tune(s) {
+  state.tune[s.id] = { loading: true }; render();
+  try { state.tune[s.id] = { result: await S2.callTool("workload_tune", { sql: s.sql, database: s.database, p50_ms: s.p50_ms, rows: s.rows_avg }) }; }
+  catch (e) { state.tune[s.id] = { error: e.message }; }
+  render();
+}
+function toEditor(sql, database) {
+  if (S2.embedded()) S2.openView("sql", { sql, database: database ?? null, append: true });
+  else S2.openAppInBrowser("sql_editor", { sql, database: database ?? null }).catch((e) => S2.toast(e.message, "err"));
+}
+
+// ---------------------------------------------------------------- compare
+async function runCompare() {
+  const c = state.compare;
+  if (!c.base || !c.new || c.base === c.new) { S2.toast("Pick two different runs", "err"); return; }
+  c.loading = true; c.result = null; render();
+  try { c.result = await S2.callTool("workload_compare", { base_run_id: c.base, new_run_id: c.new }); }
+  catch (e) { S2.toast(e.message, "err"); }
+  c.loading = false; render();
+}
+function compareText(c) {
+  const t = c.totals;
+  return [`Workload run comparison: "${c.base.label || c.base.id}" (before) vs "${c.new.label || c.new.id}" (after).`,
+    `All statements: p50 ${t.base_p50_ms} -> ${t.new_p50_ms} ms, p95 ${t.base_p95_ms} -> ${t.new_p95_ms} ms, ${t.base_qps} -> ${t.new_qps} executions/s, errors ${t.base_errors} -> ${t.new_errors}.`,
+    ...c.statements.map((s) => `- ${s.name}: p50 ${s.base_p50_ms} -> ${s.new_p50_ms} ms (${pct(s.p50_change_pct)}), p95 ${s.base_p95_ms} -> ${s.new_p95_ms} ms (${pct(s.p95_change_pct)}), errors ${s.base_errors} -> ${s.new_errors}${s.sql_changed ? ", SQL changed" : ""}${s.rows_differ ? ", row counts differ" : ""}\n  ${s.sql.replace(/\s+/g, " ").slice(0, 300)}`),
+    ...c.notes.map((n) => `Note: ${n}`)].join("\n");
+}
+
+// ---------------------------------------------------------------- rendering
+function field(label, input, title) { return h("label", { title }, label, input); }
+function settingsGrid(d) {
+  const st = d.settings;
+  const set = (k, v) => { st[k] = v; touch(); };
+  const num = (k, min, max, step = 1) => h("input", { class: "s2-input", type: "number", min, max, step, value: st[k], onchange: (e) => set(k, Number(e.target.value)) });
+  return h("div", { class: "wl-grid" },
+    field("Name", h("input", { class: "s2-input", type: "text", value: d.name, placeholder: "e.g. Cars dashboard", oninput: (e) => { d.name = e.target.value; touch(); } })),
+    field("Default database", h("select", { class: "s2-input", onchange: (e) => { d.database = e.target.value || null; touch(); } },
+      h("option", { value: "" }, "(connection default)"),
+      [...new Set([...state.databases, d.database].filter(Boolean))].map((x) => h("option", { value: x, selected: x === d.database }, x)))),
+    field("Pacing", h("select", { class: "s2-input", onchange: (e) => { set("pacing", e.target.value); render(); } },
+      h("option", { value: "rate", selected: st.pacing === "rate" }, "Fixed rate (runs per minute)"),
+      h("option", { value: "max", selected: st.pacing === "max" }, "As fast as possible (weights)")),
+      "Fixed rate: each statement runs its number of times a minute. As fast as possible: every connection runs statements back to back, mixed by the numbers as weights."),
+    st.pacing === "rate" ? field("Arrivals", h("select", { class: "s2-input", onchange: (e) => set("arrivals", e.target.value) },
+      h("option", { value: "even", selected: st.arrivals === "even" }, "Evenly spaced"),
+      h("option", { value: "random", selected: st.arrivals === "random" }, "Random (Poisson)")), "Random arrivals give bursts like real users, at the same average rate.")
+      : field("Think time (ms)", num("think_ms", 0, 60000), "Pause between statements on each connection"),
+    field("Connections", num("concurrency", 1, 64), "Parallel workers, each with its own connection"),
+    field("Duration (s)", num("duration_s", 5, 14400)),
+    field("Timeout per statement (s)", num("timeout_s", 1, 3600), "A statement running longer is cancelled (KILL QUERY) and counted as an error"),
+    h("label", { class: "check", title: "Read every result row (realistic client cost). Off: rows are still sent but not counted." },
+      h("input", { type: "checkbox", checked: st.fetch_rows, onchange: (e) => set("fetch_rows", e.target.checked) }), "Read all rows"),
+    h("label", { class: "check", title: "Statements other than SELECT / WITH run repeatedly: point them at a test table" },
+      h("input", { type: "checkbox", checked: st.allow_writes, onchange: (e) => set("allow_writes", e.target.checked) }), "Allow writes"),
+    h("label", { class: "check", title: "Optional, needs the ALTER EVENT TRACE permission. Sets the cluster's Query_completion trace to record every query (Duration_threshold_ms = 0) for the run, so every execution is in Query History, then puts the previous setting back. Tracing everything costs cluster performance: compare traced runs only with traced runs. Without the permission the run goes ahead untraced; the workload's own timings never need it." },
+      h("input", { type: "checkbox", checked: st.trace_all, onchange: (e) => set("trace_all", e.target.checked) }), "Trace every query during the run"),
+  );
+}
+
+function statementCard(s, i) {
+  const d = state.draft;
+  const t = state.tests[i];
+  const upd = (k, v) => { s[k] = v; touch(); };
+  const move = (dir) => { const a = d.statements; const j = i + dir; if (j < 0 || j >= a.length) return; [a[i], a[j]] = [a[j], a[i]]; touch(); render(); };
+  return h("div", { class: `wl-stmt${s.enabled ? "" : " off"}${i === state.selStmt ? " sel" : ""}`, dataset: { stmt: s.id },
+    onfocusin: () => selectStatement(i), onpointerdown: () => selectStatement(i) },
+    h("div", { class: "row" },
+      h("input", { type: "checkbox", checked: s.enabled, title: "Include in runs", "aria-label": "Enabled", onchange: (e) => { upd("enabled", e.target.checked); render(); } }),
+      h("input", { class: "s2-input", type: "text", value: s.name, "aria-label": "Statement name", oninput: (e) => upd("name", e.target.value) }),
+      h("span", {}, d.settings.pacing === "rate" ? "runs / min" : "weight"),
+      h("input", { class: "s2-input", type: "number", min: "0", step: "any", value: s.per_minute, "aria-label": "Runs per minute", onchange: (e) => upd("per_minute", Number(e.target.value)) }),
+      h("span", {}, "database"),
+      h("input", { class: "s2-input", type: "text", value: s.database ?? "", placeholder: d.database ?? "default", list: "wl-dbs", style: { minWidth: "110px", width: "110px" }, "aria-label": "Database", oninput: (e) => upd("database", e.target.value || null) }),
+      h("span", { class: "s2-spacer" }),
+      h("button", { class: "s2-btn ghost", title: "Run once to check it (read-only statements)", onclick: () => testStatement(i) }, "Test"),
+      h("button", { class: "s2-btn ghost", title: "Open this statement in a new SQL Editor tab; its \"Update in workload\" button writes your changes back here (and saves the workload)",
+        onclick: () => openStatementInEditor(s) }, "Open in SQL Editor"),
+      h("button", { class: "s2-btn ghost", title: "Move up", "aria-label": "Move up", onclick: () => move(-1) }, "↑"),
+      h("button", { class: "s2-btn ghost", title: "Move down", "aria-label": "Move down", onclick: () => move(1) }, "↓"),
+      h("button", { class: "s2-btn ghost danger", title: "Remove", "aria-label": "Remove statement", onclick: () => { d.statements.splice(i, 1); state.tests = {}; touch(); render(); } }, "🗑")),
+    h("textarea", { class: "s2-input", spellcheck: "false", placeholder: "SELECT … (placeholders: {{int:1:1000}}, {{pick:a|b}}, {{date:2024-01-01:2024-12-31}})",
+      value: s.sql, oninput: (e) => upd("sql", e.target.value) }),
+    s.history ? h("div", { class: "wl-note" }, `From the history: ${fmt.number(s.history.runs)} runs, median ${ms(s.history.median_ms)}`) : null,
+    t ? h("div", { class: "wl-test" }, t.loading ? [h("span", { class: "s2-spinner" }), " Running once…"]
+      : t.error ? h("span", { class: "s2-error" }, t.error)
+      : t.result.ran ? h("span", { class: "s2-badge ok" }, `${fmt.number(t.result.rows)}${t.result.more ? "+" : ""} rows in ${ms(t.result.ms)}`)
+      : h("span", { class: "s2-badge warn" }, "Not run (writes aren't test-run); placeholders OK")) : null);
+}
+
+function renderSaveBar() {
+  const b = document.getElementById("wl-save");
+  if (b) b.disabled = state.saving || !state.dirty;
+  const r = document.getElementById("wl-run");
+  if (r) r.textContent = state.dirty ? "Save and run" : "Run";
+}
+
+function definition() {
+  const d = state.draft;
+  if (!d) return h("div", { class: "s2-card wl-card" }, h("div", { class: "s2-empty" }, "No workload yet. Click New, or take the heaviest queries From history."));
+  const running = state.data?.running;
+  return h("section", { class: "s2-card wl-card", "aria-label": "Workload definition" },
+    h("h2", {}, state.original ? `Workload: ${state.original}` : "New workload", state.dirty ? h("span", { class: "s2-badge warn plain" }, "unsaved") : null),
+    settingsGrid(d),
+    h("label", { class: "wl-field", style: { marginBottom: "8px" } }, "Description",
+      h("input", { class: "s2-input", type: "text", value: d.description ?? "", placeholder: "What this workload represents", oninput: (e) => { d.description = e.target.value; touch(); } })),
+    h("datalist", { id: "wl-dbs" }, state.databases.map((x) => h("option", { value: x }))),
+    d.statements.map(statementCard),
+    h("div", { style: { display: "flex", gap: "6px", flexWrap: "wrap", alignItems: "center" } },
+      h("button", { class: "s2-btn", onclick: () => { d.statements.push(NEW_STMT(nextId(d))); touch(); render(); } }, "+ Statement"),
+      h("span", { class: "s2-spacer" }),
+      h("button", { id: "wl-save", class: "s2-btn", disabled: state.saving || !state.dirty, onclick: save }, "Save"),
+      h("input", { class: "s2-input", type: "text", placeholder: "Run label, e.g. baseline", value: state.label, style: { width: "180px" }, "aria-label": "Run label",
+        oninput: (e) => { state.label = e.target.value; } }),
+      running ? h("button", { class: "s2-btn danger", onclick: stopRun }, "Stop run")
+        : h("button", { id: "wl-run", class: "s2-btn primary", disabled: !d.name, onclick: start }, state.dirty ? "Save and run" : "Run")),
+    h("p", { class: "wl-note" }, "Each statement is tagged /* workload:name stmt:id */ so it shows in Query History with the source \"Workload: name\". ",
+      "Only SELECT / WITH runs unless \"Allow writes\" is on. Workloads and runs are saved in the workloads folder of the server's data folder."));
+}
+function nextId(d) { let i = d.statements.length + 1; while (d.statements.some((s) => s.id === `s${i}`)) i++; return i; }
+
+function kpi(label, value, title) { return h("div", { class: "wl-kpi", title }, h("div", { class: "v" }, value), h("div", { class: "k" }, label)); }
+
+function chart(columns, rows, settings) {
+  if (!globalThis.S2Charts || rows.length < 2) return h("div", { class: "s2-empty s2-small" }, "Waiting for data…");
+  return S2Charts.view(columns, rows, { settings: { agg: "none", split: "", stacked: false, sort: "none", ...settings } });
+}
+
+function tuneBlock(s) {
+  const t = state.tune[s.id];
+  if (!t) return null;
+  if (t.loading) return h("div", { class: "wl-tune" }, h("span", { class: "s2-spinner" }), " EXPLAIN and table design…");
+  if (t.error) return h("div", { class: "wl-tune" }, S2.errorBox(new Error(t.error)));
+  const r = t.result;
+  return h("div", { class: "wl-tune" },
+    r.recommendations?.length ? h("ul", { style: { margin: 0, paddingLeft: "18px" } }, r.recommendations.map((x) =>
+      h("li", {}, h("span", { class: `s2-badge ${x.severity === "high" ? "err" : x.severity === "medium" ? "warn" : "info"}` }, x.severity), " ", h("b", {}, x.title), h("div", { class: "s2-small" }, x.detail),
+        x.sql ? h("pre", { class: "s2-pre", style: { margin: "4px 0" } }, x.sql) : null,
+        x.sql ? h("button", { class: "s2-btn ghost", onclick: () => toEditor(x.sql, s.database) }, "Open in SQL Editor") : null)))
+      : h("div", { class: "s2-small" }, "No recommendations for this statement."),
+    r.explain?.lines?.length ? h("details", {}, h("summary", {}, "EXPLAIN"), h("pre", { class: "s2-pre" }, r.explain.lines.join("\n"))) : r.explain?.error ? h("div", { class: "s2-small s2-faint" }, r.explain.error) : null);
+}
+
+function runPanel() {
+  const r = state.run;
+  if (!state.runId) return h("div", { class: "s2-empty" }, "No runs yet. Save the workload and click Run.");
+  if (!r) return h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Loading the run…");
+  if (!r.totals) return S2.errorBox(new Error(r.error ?? "Couldn't load the run"));
+  const live = ["starting", "running"].includes(r.state);
+  const t = r.totals;
+  const progress = Math.min(100, (r.elapsed_s / r.duration_s) * 100);
+  const tl = state.timeline.map((p) => ({ second: p.t, "executions/s": p.n, errors: p.errors, "p50 ms": p.p50_ms, "p95 ms": p.p95_ms }));
+  return h("div", {},
+    h("div", { style: { display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" } },
+      h("b", {}, `${r.label || "Run"} · ${r.id}`),
+      h("span", { class: `s2-badge ${r.state === "done" ? "ok" : r.state === "error" ? "err" : live ? "info" : "warn"}` }, r.state === "starting" ? "connecting…" : r.state),
+      h("span", { class: "s2-small s2-faint" }, `${when(r.started)} · ${r.settings.concurrency} connections · ${r.settings.pacing === "rate" ? "fixed rate" : "as fast as possible"}${r.rtt_ms != null ? ` · network round trip ${ms(r.rtt_ms)}` : ""}`),
+      h("span", { class: "s2-spacer" }),
+      live ? h("button", { class: "s2-btn danger", onclick: stopRun }, "Stop") : null,
+      !live ? h("button", { class: "s2-btn ghost", title: "Ask Claude in the chat to interpret this run", onclick: () => S2.sendPrompt(`Analyze this SingleStore workload run and suggest what to tune:\n\n${runText(r)}`) }, "Ask Claude") : null,
+      !live && S2.embedded() ? h("button", { class: "s2-btn ghost", title: "Statements slower than the cluster's trace threshold (or all of them with \"Trace every query\") are in Query History, Source = Workload: " + r.workload, onclick: () => S2.openView("history") }, "Open Query History") : null),
+    live ? h("div", { class: "wl-progress", "aria-label": "Progress" }, h("div", { style: { width: `${progress}%` } })) : null,
+    r.error ? h("div", { class: "s2-error", style: { margin: "6px 0" } }, r.error) : null,
+    (r.notes ?? []).map((n) => h("div", { class: "s2-small s2-faint" }, n)),
+    h("div", { class: "wl-kpis" },
+      kpi("elapsed", `${fmt.number(r.elapsed_s, 0)} / ${r.duration_s} s`),
+      kpi("executions", fmt.number(t.count)), kpi("per second", fmt.number(t.qps, 1)),
+      kpi("p50", ms(t.p50_ms)), kpi("p95", ms(t.p95_ms)), kpi("p99", ms(t.p99_ms)),
+      kpi("errors", fmt.number(t.errors), t.errors ? "See the statements below" : ""),
+      t.skipped ? kpi("skipped", fmt.number(t.skipped), "Releases skipped because every connection was busy: the cluster (or the number of connections) couldn't keep up with the rate") : null),
+    h("div", { class: "wl-charts" },
+      h("div", {}, h("h3", {}, "Executions per second"), chart(["second", "executions/s", "errors"], tl, { type: "line", x: "second", ys: ["executions/s", "errors"] })),
+      h("div", {}, h("h3", {}, "Latency per second"), chart(["second", "p50 ms", "p95 ms"], tl, { type: "line", x: "second", ys: ["p50 ms", "p95 ms"] }))),
+    h("table", { class: "wl-t" },
+      h("thead", {}, h("tr", {}, h("th", {}, "Statement"), ...["Runs", "/min (target)", "p50", "p95", "p99", "max", "Errors", "Queue p95", "Rows avg"].map((x) => h("th", { class: "n" }, x)), h("th", {}, ""))),
+      h("tbody", {}, r.statements.map((s) => [
+        h("tr", {},
+          h("td", {}, h("div", {}, s.name), h("div", { class: "wl-sqlcell", title: s.sql }, s.sql)),
+          h("td", { class: "n" }, fmt.number(s.count)),
+          h("td", { class: "n" }, `${fmt.number(s.per_minute, 1)} (${fmt.number(s.target_per_minute, 1)})`),
+          h("td", { class: "n" }, ms(s.p50_ms)), h("td", { class: "n" }, ms(s.p95_ms)), h("td", { class: "n" }, ms(s.p99_ms)), h("td", { class: "n" }, ms(s.max_ms)),
+          h("td", { class: `n${s.errors ? " worse" : ""}`, title: (s.error_samples ?? []).map((e) => `${e.count}× ${e.error}`).join("\n") }, fmt.number(s.errors)),
+          h("td", { class: "n", title: "How long executions waited for a free connection" }, ms(s.wait_p95_ms)),
+          h("td", { class: "n" }, s.rows_avg == null ? "–" : fmt.number(s.rows_avg, 1)),
+          h("td", { style: { whiteSpace: "nowrap" } },
+            h("button", { class: "s2-btn ghost", title: "EXPLAIN and table-design recommendations", onclick: () => tune(s) }, "Tune"),
+            h("button", { class: "s2-btn ghost", title: "Open in the SQL Editor", onclick: () => toEditor(s.sql, s.database) }, "SQL"))),
+        (s.error_samples ?? []).length ? h("tr", {}, h("td", { colspan: 11 }, h("div", { class: "s2-error s2-small" }, s.error_samples.map((e) => `${e.count}× ${e.error}`).join(" · ")))) : null,
+        state.tune[s.id] ? h("tr", {}, h("td", { colspan: 11 }, tuneBlock(s))) : null]))));
+}
+function runText(r) {
+  const t = r.totals;
+  return [`Workload "${r.workload}" run ${r.id} (${r.label || "no label"}): ${r.state}, ${r.elapsed_s} s, ${r.settings.concurrency} connections, ${r.settings.pacing} pacing, network round trip ${r.rtt_ms} ms.`,
+    `Total ${t.count} executions (${t.qps}/s), errors ${t.errors}, p50 ${t.p50_ms} ms, p95 ${t.p95_ms} ms, p99 ${t.p99_ms} ms.`,
+    ...r.statements.map((s) => `- ${s.name} (database ${s.database ?? "default"}): ${s.count} runs at ${s.per_minute}/min (target ${s.target_per_minute}), p50 ${s.p50_ms} / p95 ${s.p95_ms} / max ${s.max_ms} ms, errors ${s.errors}, queue wait p95 ${s.wait_p95_ms} ms, rows avg ${s.rows_avg}\n  ${s.sql.replace(/\s+/g, " ").slice(0, 400)}`)].join("\n");
+}
+
+function runsPanel() {
+  const runs = runsOf(state.sel);
+  if (!runs.length) return h("div", { class: "s2-empty" }, "No saved runs of this workload yet.");
+  return h("table", { class: "wl-t" },
+    h("thead", {}, h("tr", {}, h("th", {}, "Started"), h("th", {}, "Label"), h("th", {}, "State"), ...["Executions", "per s", "p50", "p95", "Errors", "Conns"].map((x) => h("th", { class: "n" }, x)), h("th", {}, ""))),
+    h("tbody", {}, runs.map((r) => h("tr", {},
+      h("td", {}, when(r.started)), h("td", {}, r.label || h("span", { class: "s2-faint" }, "–")), h("td", {}, r.state),
+      h("td", { class: "n" }, fmt.number(r.totals?.count)), h("td", { class: "n" }, fmt.number(r.totals?.qps, 1)),
+      h("td", { class: "n" }, ms(r.totals?.p50_ms)), h("td", { class: "n" }, ms(r.totals?.p95_ms)), h("td", { class: "n" }, fmt.number(r.totals?.errors)),
+      h("td", { class: "n" }, r.settings?.concurrency ?? "–"),
+      h("td", { style: { whiteSpace: "nowrap" } },
+        h("button", { class: "s2-btn ghost", onclick: () => { state.tab = "run"; showRun(r.id); } }, "Open"),
+        h("button", { class: "s2-btn ghost", title: "Use as the baseline in Compare", onclick: () => { state.compare.base = r.id; state.tab = "compare"; render(); } }, "Baseline"),
+        h("button", { class: "s2-btn ghost danger", title: "Delete this run", onclick: async (ev) => {
+          if (!(await S2.confirmInline(ev.currentTarget, "Delete this run?", "Delete"))) return;
+          try { const x = await S2.callTool("workload_delete_run", { run_id: r.id }); state.data = { workloads: x.workloads, running: x.running, runs: x.runs }; if (state.runId === r.id) { state.runId = null; state.run = null; } render(); }
+          catch (e) { S2.toast(e.message, "err"); } } }, "🗑"))))));
+}
+
+function comparePanel() {
+  const runs = runsOf(state.sel).filter((r) => !["starting", "running"].includes(r.state));
+  const c = state.compare;
+  if (runs.length < 2) return h("div", { class: "s2-empty" }, "Compare needs two finished runs: run a baseline, make your change (sort key, index, shard key …), then run again.");
+  const pick = (k, label) => h("label", { class: "wl-field" }, label, h("select", { class: "s2-input", onchange: (e) => { c[k] = e.target.value; c.result = null; render(); } },
+    runs.map((r) => h("option", { value: r.id, selected: r.id === c[k] }, `${when(r.started)} · ${r.label || r.id} · p95 ${ms(r.totals?.p95_ms)}`))));
+  const res = c.result;
+  const cls = (v) => (v == null ? "" : v <= -5 ? "better" : v >= 5 ? "worse" : "");
+  return h("div", {},
+    h("div", { style: { display: "flex", gap: "10px", alignItems: "flex-end", flexWrap: "wrap", marginBottom: "10px" } },
+      pick("base", "Before (baseline)"), pick("new", "After"),
+      h("button", { class: "s2-btn primary", disabled: c.loading, onclick: runCompare }, c.loading ? h("span", { class: "s2-spinner" }) : null, "Compare"),
+      res ? h("button", { class: "s2-btn ghost", title: "Ask Claude in the chat to interpret the comparison", onclick: () => S2.sendPrompt(`Interpret this before/after comparison of a SingleStore workload and say whether the change helped:\n\n${compareText(res)}`) }, "Ask Claude") : null),
+    res ? [
+      h("div", { class: "wl-kpis" },
+        kpi("p50 before → after", `${ms(res.totals.base_p50_ms)} → ${ms(res.totals.new_p50_ms)}`),
+        kpi("p95 before → after", `${ms(res.totals.base_p95_ms)} → ${ms(res.totals.new_p95_ms)}`),
+        kpi("per second", `${fmt.number(res.totals.base_qps, 1)} → ${fmt.number(res.totals.new_qps, 1)}`),
+        kpi("errors", `${fmt.number(res.totals.base_errors)} → ${fmt.number(res.totals.new_errors)}`)),
+      res.notes.map((n) => h("div", { class: "s2-small s2-faint" }, n)),
+      h("div", { class: "wl-charts" }, h("div", {}, h("h3", {}, "p95 latency per statement (ms)"),
+        chart(["statement", "before", "after"], res.statements.map((s) => ({ statement: s.name, before: s.base_p95_ms, after: s.new_p95_ms })), { type: "bar", x: "statement", ys: ["before", "after"] }))),
+      h("table", { class: "wl-t" },
+        h("thead", {}, h("tr", {}, h("th", {}, "Statement"), ...["p50 before", "p50 after", "change", "p95 before", "p95 after", "change", "Speed-up", "Errors"].map((x) => h("th", { class: "n" }, x)), h("th", {}, ""))),
+        h("tbody", {}, res.statements.map((s) => h("tr", {},
+          h("td", {}, s.name, s.sql_changed ? h("span", { class: "s2-badge warn plain", title: "The SQL differs between the runs" }, " SQL changed") : null,
+            s.rows_differ ? h("span", { class: "s2-badge err plain", title: "Average rows returned differ: check the results are the same" }, " rows differ") : null),
+          h("td", { class: "n" }, ms(s.base_p50_ms)), h("td", { class: "n" }, ms(s.new_p50_ms)), h("td", { class: `n ${cls(s.p50_change_pct)}` }, pct(s.p50_change_pct)),
+          h("td", { class: "n" }, ms(s.base_p95_ms)), h("td", { class: "n" }, ms(s.new_p95_ms)), h("td", { class: `n ${cls(s.p95_change_pct)}` }, pct(s.p95_change_pct)),
+          h("td", { class: "n" }, s.speedup ? `×${fmt.number(s.speedup, 2)}` : "–"),
+          h("td", { class: "n" }, `${fmt.number(s.base_errors)} → ${fmt.number(s.new_errors)}`),
+          h("td", {}, h("button", { class: "s2-btn ghost", onclick: () => toEditor(s.sql) }, "SQL"))))))]
+      : c.loading ? null : h("div", { class: "s2-small s2-faint" }, "Changes of 5% or more are coloured; small differences are usually noise (run longer, or more times, to be sure)."));
+}
+
+function render() {
+  if (!state.data) { fill(mainEl, state.error ? S2.errorBox(state.error) : h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Loading workloads…")); return; }
+  const ws = state.data.workloads;
+  renderClaudeBtn();
+  fill(mainEl,
+    h("div", { class: "s2-header" },
+      h("div", {}, h("h1", { class: "s2-title" }, "Workload"),
+        h("div", { class: "s2-subtitle" }, "Replay SQL statements at set rates, watch latency and throughput, compare runs before and after a change")),
+      h("span", { class: "s2-spacer" }),
+      claudeBtn,
+      S2.openInBrowserButton("workload", () => (state.sel ? { name: state.sel } : {})),
+      S2.fullscreenButton()),
+    h("div", { class: "wl-top" },
+      h("select", { class: "s2-input", "aria-label": "Workload", onchange: (e) => { select(e.target.value); render(); } },
+        !state.original ? h("option", { value: "", selected: true }, state.draft ? "(new workload)" : "(no workloads)") : null,
+        ws.map((w) => h("option", { value: w.name, selected: w.name === state.original }, `${w.name} · ${w.statements.length} statements · ${w.runs} runs`))),
+      h("button", { class: "s2-btn", onclick: () => newWorkload() }, "New"),
+      h("button", { class: "s2-btn", title: "A new workload from the heaviest read-only queries of the last 24 hours", onclick: (e) => fromHistory(e.currentTarget) }, "From history"),
+      state.draft && state.original ? h("button", { class: "s2-btn ghost", title: "Copy this workload", onclick: () => { const d = clone(state.draft); newWorkload(d.statements); Object.assign(state.draft, { ...d, name: `${d.name} copy` }); render(); } }, "Duplicate") : null,
+      state.original ? h("button", { class: "s2-btn ghost danger", onclick: remove }, "Delete") : null,
+      state.data.running && state.data.running.workload !== state.sel ? h("span", { class: "s2-badge info" }, `Running: ${state.data.running.workload}`) : null),
+    pendingAddBanner(),
+    definition(),
+    state.original ? h("section", { class: "s2-card wl-card", "aria-label": "Results" },
+      h("h2", {}, "Results", h("span", { class: "wl-tabs", role: "group" },
+        [["run", "Run"], ["runs", `Saved runs (${runsOf(state.sel).length})`], ["compare", "Compare"]].map(([k, label]) =>
+          h("button", { "aria-pressed": String(state.tab === k), onclick: () => { state.tab = k; render(); } }, label)))),
+      state.tab === "run" ? runPanel() : state.tab === "runs" ? runsPanel() : comparePanel()) : null);
+  const r = state.run;
+  syncChat();
+  S2.updateModelContext(`User is viewing the Workload app${state.sel ? `, workload "${state.sel}" (${state.draft?.statements.length} statements)` : ""}.` +
+    ` Its Claude chat id is "${currentChat().id}" (send answers there with sql_editor_reply).` +
+    (r?.totals ? `\nShown run ${r.id} (${r.label || "no label"}, ${r.state}): ${r.totals.count} executions, p50 ${r.totals.p50_ms} ms, p95 ${r.totals.p95_ms} ms, errors ${r.totals.errors}.` : "") +
+    (state.compare.result ? `\nComparison shown:\n${compareText(state.compare.result)}` : ""));
+}
+
+// ---------------------------------------------------------------- statements from and to the SQL Editor
+// Appends statements ({name, sql, per_minute, …} without ids) to the draft, giving them ids; a statement whose
+// database differs from the workload's keeps its own.
+function appendStatements(stmts, database) {
+  if (!state.draft) newWorkload([]);
+  const d = state.draft;
+  d.statements = d.statements.filter((s) => s.sql.trim());
+  for (const s of stmts) {
+    const db = s.database ?? database ?? null;
+    d.statements.push({ ...NEW_STMT(nextId(d)), name: s.name, sql: s.sql, per_minute: s.per_minute ?? 60, enabled: s.enabled ?? true,
+      database: db && db !== d.database ? db : null });
+  }
+  touch(); render();
+}
+// From the SQL Editor's "→ Workload": {statements, database, workload (existing) | new_name}.
+function addFromEditor(p) {
+  if (!state.data) { setTimeout(() => addFromEditor(p), 300); return; }
+  const n = p.statements.length;
+  const target = p.workload && workloadNamed(p.workload) ? p.workload : null;
+  if (target && state.original !== target && state.dirty && state.draft) { state.pendingAdd = p; render(); return; }
+  state.pendingAdd = null;
+  if (target) {
+    if (state.original !== target) select(target);
+    appendStatements(p.statements, p.database);
+    S2.toast(`${n} statement${n === 1 ? "" : "s"} added to ${target}: review and Save`, "ok");
+  } else {
+    if (state.dirty && state.draft && !state.original) {  // a new, unsaved workload is open: add to it
+      appendStatements(p.statements, p.database);
+    } else {
+      newWorkload([]);
+      state.draft.name = p.new_name || p.workload || "";
+      state.draft.database = p.database ?? state.draft.database;
+      appendStatements(p.statements, p.database);
+    }
+    S2.toast(`${n} statement${n === 1 ? "" : "s"} in a new workload: check the settings and Save`, "ok");
+  }
+  state.selStmt = Math.max(0, state.draft.statements.length - n);
+}
+function pendingAddBanner() {
+  const p = state.pendingAdd;
+  if (!p) return null;
+  return h("div", { class: "wl-pending", role: "alert" },
+    `${p.statements.length} statement(s) from the SQL Editor for workload ${p.workload}, but ${state.original ?? "this new workload"} has unsaved changes.`,
+    h("button", { class: "s2-btn danger", onclick: () => { state.dirty = false; addFromEditor(p); } }, `Discard them and open ${p.workload}`),
+    h("button", { class: "s2-btn", onclick: () => { state.pendingAdd = null; appendStatements(p.statements, p.database); S2.toast("Added here instead", "ok"); } }, "Add them here instead"),
+    h("button", { class: "s2-btn ghost", onclick: () => { state.pendingAdd = null; render(); } }, "Cancel"));
+}
+
+// Hand-off from other views: Query History's "Add to workload" (one statement) or the SQL Editor's "→ Workload".
+window.addEventListener("s2:set-sql", (e) => {
+  const d = e.detail ?? {};
+  if (d.statements?.length) { addFromEditor(d); return; }
+  const { sql, database } = d;
+  if (!sql) return;
+  appendStatements([{ name: sql.replace(/\s+/g, " ").slice(0, 60), sql, per_minute: NEW_STMT(1).per_minute }], database);
+  S2.toast("Statement added: save the workload to keep it", "ok");
+});
+
+// "Open in SQL Editor": a new editor tab with the statement, which remembers it (workload + statement id) and
+// offers "Update in workload". In the Workspace via the tab bar; elsewhere the tab is made on the server and the
+// Workspace opens in the browser on it.
+async function openStatementInEditor(s) {
+  const d = state.draft;
+  const database = s.database || d.database || null;
+  const origin = state.original ? { workload: state.original, statement_id: s.id, statement_name: s.name } : null;
+  if (!origin) S2.toast("This workload isn't saved yet: save it so the editor can write changes back", "");
+  else if (state.dirty) S2.toast("Unsaved changes here: \"Update in workload\" writes to the saved workload (Save first to keep them)", "");
+  if (S2.embedded()) { S2.openView("sql:new", { sql: s.sql, database, origin }); return; }
+  try {
+    const t = await S2.callTool("sql_editor_tab_new", {});
+    await S2.callTool("sql_editor_save_draft", { tab_id: t.tab.id, sql: s.sql, database, dirty: true, origin,
+      anchor: s.sql.length, head: s.sql.length });
+    await S2.openAppInBrowser("sql_editor", { database, view: "sql" });
+  } catch (e) { S2.toast(e.message, "err"); }
+}
+
+// The SQL Editor's "Update in workload" saved a workload (in the Workspace): show the new SQL without
+// losing unsaved changes here.
+window.addEventListener("message", (ev) => {
+  if (ev.source !== window.parent || ev.data?.type !== "s2-workload-updated" || !state.data) return;
+  const w = ev.data.workload;
+  if (!w?.name) return;
+  const k = state.data.workloads.findIndex((x) => x.name === w.name);
+  if (k >= 0) state.data.workloads[k] = { ...state.data.workloads[k], ...w };
+  if (state.original === w.name) {
+    const saved = w.statements.find((x) => x.id === ev.data.statement_id);
+    const mine = state.draft?.statements.find((x) => x.id === ev.data.statement_id);
+    if (state.dirty && saved && mine) Object.assign(mine, { sql: saved.sql, name: saved.name, per_minute: saved.per_minute, database: saved.database });
+    else if (!state.dirty) takeDraft(w);
+    if (!state.dirty) state.loadedUpdated = w.updated;
+  }
+  render();
+});
+
+// ---------------------------------------------------------------- Claude panel
+// Same as the SQL Editor's: answered in the app by the in-app assistant (workload_ask; read-only database
+// access, answers land in the chat's inbox, polled) or, as a fallback, in the Claude chat (the question goes
+// to the chat box; Claude answers with sql_editor_reply). One conversation per workload, for this page's session.
+const rand = () => Array.from(crypto.getRandomValues(new Uint8Array(3)), (b) => b.toString(16).padStart(2, "0")).join("");
+const pageId = rand();
+let chatSeq = 0;
+const chats = new Map();   // workload name ("" for a new one) -> {id, messages, lastSeq, waiting, waitingMode, job, unread, tests, picks}
+const chat = { open: false, assistant: null, mode: "app", warmed: {}, sig: null };
+try { if (localStorage.getItem("s2-sql-chat-mode") === "chat") chat.mode = "chat"; } catch {}
+const chatKey = () => state.original ?? "";
+function currentChat() {
+  const k = chatKey();
+  if (!chats.has(k)) chats.set(k, { id: `wc-${pageId}-${++chatSeq}`, messages: [], lastSeq: 0, waiting: false, waitingMode: null, job: null, unread: 0, tests: {}, picks: {} });
+  return chats.get(k);
+}
+const claudeBtn = h("button", { class: "s2-btn wl-claude", title: "Ask Claude to build or vary this workload's statements", onclick: () => toggleChat() });
+function renderClaudeBtn() {
+  const c = currentChat();
+  const unread = [...chats.values()].reduce((n, x) => n + x.unread, 0);
+  claudeBtn.className = `s2-btn wl-claude${chat.open ? " primary" : ""}`;
+  claudeBtn.setAttribute("aria-pressed", String(chat.open));
+  claudeBtn.replaceChildren(...["Claude", c.waiting ? h("span", { class: "s2-spinner", style: { marginLeft: "4px" } }) : unread ? h("span", { class: "count" }, unread) : null].filter(Boolean));
+}
+
+const msgsEl = h("div", { class: "wl-msgs", "aria-live": "polite" });
+const askBox = h("textarea", { class: "s2-input", rows: 2, placeholder: "Ask Claude, e.g. “add 3 variants with realistic filters” (Enter sends, Shift+Enter: new line)",
+  "aria-label": "Question for Claude", onkeydown: (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(); } } });
+const modeSelect = h("select", { class: "s2-input", "aria-label": "Who answers",
+  onchange: (e) => { chat.mode = e.target.value; try { localStorage.setItem("s2-sql-chat-mode", chat.mode); } catch {} renderChat(); warmAssistant(); } });
+const profileSelect = h("select", { class: "s2-input", "aria-label": "Assistant speed", title: "Fast: Haiku. Balanced: Sonnet, medium effort. Thorough: Opus, high effort.",
+  onchange: (e) => { try { localStorage.setItem("s2-sql-chat-profile", e.target.value); } catch {} warmAssistant(); } },
+  h("option", { value: "fast" }, "Fast"), h("option", { value: "balanced" }, "Balanced"), h("option", { value: "thorough" }, "Thorough"));
+try { profileSelect.value = localStorage.getItem("s2-sql-chat-profile") || "balanced"; } catch { profileSelect.value = "balanced"; }
+const profileLabel = h("label", {}, "Speed ", profileSelect);
+const modeHint = h("span", {});
+const chatTitle = h("strong", {}, "Claude");
+const chatEl = h("aside", { class: "wl-chat", hidden: true, "aria-label": "Chat with Claude about the workload" },
+  h("div", { class: "top" }, chatTitle, h("button", { class: "s2-btn ghost", title: "Close", "aria-label": "Close chat", onclick: () => toggleChat(false) }, "✕")),
+  msgsEl,
+  h("div", { class: "wl-ask" }, askBox, h("button", { class: "s2-btn primary", onclick: () => ask() }, "Send")),
+  h("div", { class: "wl-ask-opts" }, h("label", {}, "Answer ", modeSelect), profileLabel, modeHint));
+layoutEl.append(chatEl);
+
+const chatAvailable = () => !S2.inBrowserView();
+const appAvailable = () => chat.assistant?.available !== false;
+function effectiveMode() {
+  if (chat.mode === "chat" && chatAvailable()) return "chat";
+  return appAvailable() ? "app" : chatAvailable() ? "chat" : null;
+}
+function toggleChat(open = !chat.open) {
+  chat.open = open;
+  chatEl.hidden = !open;
+  layoutEl.classList.toggle("chat-open", open);
+  if (open) { currentChat().unread = 0; renderChat(); askBox.focus(); warmAssistant(); }
+  renderClaudeBtn();
+}
+function warmAssistant() {
+  const c = currentChat();
+  if (effectiveMode() !== "app" || !chat.assistant?.available || c.waiting || chat.warmed[c.id] === profileSelect.value) return;
+  chat.warmed[c.id] = profileSelect.value;
+  S2.callTool("workload_assistant_warm", { chat_id: c.id, profile: profileSelect.value }).catch(() => { delete chat.warmed[c.id]; });
+}
+async function loadAssistantStatus() {
+  try { chat.assistant = await S2.callTool("sql_editor_assistant", {}); }
+  catch (e) { chat.assistant = { available: false, reason: e.message }; }
+  if (chat.open) { renderChat(); warmAssistant(); }
+}
+
+// Inline **bold** and `code` only; everything else stays plain text (no HTML).
+function inline(text) {
+  const out = [], re = /\*\*([^*\n]+)\*\*|`([^`\n]+)`/g;
+  let last = 0, m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    out.push(m[1] !== undefined ? h("strong", {}, m[1]) : h("code", {}, m[2]));
+    last = re.lastIndex;
+  }
+  out.push(text.slice(last));
+  return out;
+}
+// Text with ``` fenced blocks; SQL blocks get the buttons (not while the answer is still being written).
+function messageBody(text, key, actions = true) {
+  const parts = [], re = /```([\w-]*)\n?([\s\S]*?)```/g;
+  let last = 0, m, n = 0;
+  const textPart = (t) => (t.trim() ? h("p", {}, ...inline(t.trim())) : null);
+  while ((m = re.exec(text))) {
+    const code = m[2].replace(/\s+$/, "");
+    parts.push(textPart(text.slice(last, m.index)),
+      actions && /^(sql|mysql|)$/i.test(m[1]) ? codeBlock(code, `${key}:${n++}`) : h("div", { class: "wl-code" }, h("pre", {}, code)));
+    last = re.lastIndex;
+  }
+  parts.push(textPart(text.slice(last)));
+  return parts.filter(Boolean);
+}
+async function parsed(code) {
+  const { statements } = await S2.callTool("workload_parse_statements", { sql: [code], per_minute: 60 });
+  if (!statements.length) throw new Error("This block has no SQL.");
+  return statements[0];
+}
+function codeBlock(code, key) {
+  const c = currentChat();
+  const stmts = state.draft?.statements ?? [];
+  const pick = Math.min(c.picks[key] ?? state.selStmt, Math.max(0, stmts.length - 1));
+  const t = c.tests[key];
+  const replaceBtn = h("button", { class: "s2-btn", disabled: !stmts.length, title: "Put this SQL in place of the chosen statement (its -- name / -- per_minute lines apply too)",
+    onclick: async () => {
+      try {
+        const p = await parsed(code), s = state.draft.statements[Number(target.value)];
+        if (!s) return;
+        s.sql = p.sql;
+        if (p.hints?.name) s.name = p.name;
+        if (p.hints?.per_minute != null) s.per_minute = p.per_minute;
+        touch(); render();
+        S2.toast(`Replaced statement ${Number(target.value) + 1} (${s.name}): save the workload to keep it`, "ok");
+      } catch (e) { S2.toast(e.message, "err"); }
+    } }, `Replace statement ${pick + 1}`);
+  const target = h("select", { class: "s2-input", "aria-label": "Statement to replace", disabled: !stmts.length,
+    onchange: (e) => { c.picks[key] = Number(e.target.value); replaceBtn.textContent = `Replace statement ${Number(e.target.value) + 1}`; } },
+    stmts.map((s, i) => h("option", { value: String(i), selected: i === pick }, `${i + 1}. ${s.name}`.slice(0, 40))));
+  return h("div", { class: "wl-code", dataset: { key } }, h("pre", {}, code),
+    h("div", { class: "bar" },
+      h("button", { class: "s2-btn primary", title: "Add as a new statement (named and paced by its -- name / -- per_minute lines; else 60 a minute)",
+        onclick: async () => {
+          try {
+            const p = await parsed(code);
+            appendStatements([p], null);
+            state.selStmt = state.draft.statements.length - 1;
+            render();
+            S2.toast(`Added "${p.name}" (${p.per_minute}/min): save the workload to keep it`, "ok");
+          } catch (e) { S2.toast(e.message, "err"); }
+        } }, "Add to workload"),
+      replaceBtn, target,
+      h("button", { class: "s2-btn ghost", title: "Run once, read-only (placeholders filled in), to check it", onclick: async () => {
+        c.tests[key] = { loading: true }; renderChat(false);
+        try { c.tests[key] = { result: await S2.callTool("workload_test_statement", { sql: code, database: state.draft?.database ?? null }) }; }
+        catch (e) { c.tests[key] = { error: e.message }; }
+        renderChat(false);
+      } }, "Test"),
+      h("button", { class: "s2-btn ghost", onclick: () => S2.copy(code) }, "Copy")),
+    t ? h("div", { class: "res" }, t.loading ? [h("span", { class: "s2-spinner" }), " Running once…"]
+      : t.error ? h("span", { class: "s2-error" }, t.error)
+      : t.result.ran ? h("span", { class: "s2-badge ok" }, `${fmt.number(t.result.rows)}${t.result.more ? "+" : ""} rows in ${ms(t.result.ms)}`)
+      : h("span", { class: "s2-badge warn" }, "Not run: only read-only statements are test-run")) : null);
+}
+function renderChat(scroll = true) {
+  const c = currentChat();
+  chat.sig = chatSig();
+  chatEl.dataset.chatId = c.id;  // where sql_editor_reply sends answers (also in the model context)
+  const opts = [];
+  if (appAvailable()) opts.push(h("option", { value: "app" }, "here"));
+  if (chatAvailable()) opts.push(h("option", { value: "chat" }, "in the Claude chat"));
+  modeSelect.replaceChildren(...opts);
+  const mode = effectiveMode();
+  modeSelect.value = mode ?? "";
+  modeSelect.disabled = opts.length < 2;
+  profileLabel.hidden = mode !== "app";
+  modeHint.textContent = mode === "app" ? "Claude can run read-only queries to find real values."
+    : mode === "chat" ? "Your question goes to the Claude chat box; click Send there." : chat.assistant?.reason ?? "";
+  chatTitle.textContent = `Claude · ${state.original ?? (state.draft ? "new workload" : "no workload")}`;
+  const items = c.messages.map((m, i) => m.from === "you" ? h("div", { class: "wl-msg you" }, m.text)
+    : m.from === "note" ? h("div", { class: "wl-msg note" }, m.text)
+    : h("div", { class: `wl-msg ${m.from === "error" ? "error" : "claude"}` }, h("div", { class: "who" }, m.from === "error" ? "Couldn't answer" : "Claude"),
+      messageBody(m.text, String(i), m.from !== "error")));
+  if (!items.length) items.push(h("div", { class: "wl-msg note" }, "Ask for statements to test with, e.g. “3 variants of statement 1 with realistic filters”, “a heavier version of the slowest statement” or “a realistic mix of rates”. Claude sees the workload, the last run and the tables."));
+  if (c.waiting) {
+    const j = c.job;
+    items.push(c.waitingMode === "chat"
+      ? h("div", { class: "wl-msg note" }, h("span", { class: "s2-spinner" }), " Waiting for Claude… (your question is in the Claude chat box; click Send there)")
+      : h("div", { class: "wl-msg claude" }, h("div", { class: "who" }, h("span", { class: "s2-spinner" }), ` ${j ? `${j.activity}${j.seconds >= 5 ? ` · ${j.seconds}s` : ""}` : "Starting Claude…"}`,
+          h("button", { class: "s2-btn ghost", style: { marginLeft: "6px" }, onclick: stopAsking }, "Stop")),
+        j?.partial ? messageBody(j.partial, "partial", false) : null));
+  }
+  const atBottom = msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight < 40;
+  const top = msgsEl.scrollTop;
+  msgsEl.replaceChildren(...items);
+  msgsEl.scrollTop = scroll || atBottom ? msgsEl.scrollHeight : top;
+}
+// Re-render the panel only when what it shows depends on changed (another workload, other statements).
+const chatSig = () => `${chatKey()}|${(state.draft?.statements ?? []).map((s) => `${s.id}:${s.name}`).join(",")}|${state.selStmt}`;
+function syncChat() { if (chat.open && chat.sig !== chatSig()) renderChat(false); }
+function selectStatement(i) {
+  if (state.selStmt === i) return;
+  state.selStmt = i;
+  mainEl.querySelectorAll(".wl-stmt").forEach((el, k) => el.classList.toggle("sel", k === i));
+  syncChat();
+}
+
+// What the question is about: the workload as it is on screen (saved or not) and the last run shown.
+function chatPayload() {
+  const d = state.draft ?? { name: "", database: null, settings: DEFAULT_SETTINGS, statements: [] };
+  const workload = { name: d.name || state.original || "", description: d.description ?? "", database: d.database ?? null, settings: d.settings,
+    statements: d.statements.map((s) => ({ id: s.id, name: s.name, per_minute: s.per_minute, database: s.database ?? null, sql: s.sql, enabled: s.enabled })) };
+  const r = state.run;
+  const run = r?.totals && r.workload === state.original ? {
+    id: r.id, label: r.label, state: r.state, elapsed_s: r.elapsed_s,
+    totals: { count: r.totals.count, qps: r.totals.qps, p50_ms: r.totals.p50_ms, p95_ms: r.totals.p95_ms, errors: r.totals.errors },
+    statements: r.statements.map((s) => ({ id: s.id, name: s.name, count: s.count, p50_ms: s.p50_ms, p95_ms: s.p95_ms, errors: s.errors,
+      rows_avg: s.rows_avg, error_samples: (s.error_samples ?? []).slice(0, 1) })) } : null;
+  return { workload, run };
+}
+async function ask() {
+  const question = askBox.value.trim();
+  const c = currentChat();
+  if (!question || c.waiting) return;
+  const mode = effectiveMode();
+  if (!mode) { S2.toast(chat.assistant?.reason ?? "Chat isn't available here", "err"); return; }
+  c.messages.push({ from: "you", text: question });
+  askBox.value = "";
+  c.waiting = true; c.waitingMode = mode; c.job = null;
+  renderChat(); renderClaudeBtn();
+  let failed = null;
+  const { workload, run } = chatPayload();
+  try {
+    if (mode === "app") {
+      await S2.callTool("workload_ask", { chat_id: c.id, question, workload, run, profile: profileSelect.value });
+    } else {
+      const { text } = await S2.callTool("workload_chat_context", { workload, run, limit: 12000 });
+      const prompt = `[Workload ${c.id} · ${workload.name || "new workload"}] ${question}\n\n${text}\n\n` +
+        `(Answer with sql_editor_reply, editor_id "${c.id}", so it appears in the Workload view's chat. Put each proposed statement in its own \`\`\`sql block, ` +
+        "optionally starting with \"-- name: …\" and \"-- per_minute: N\" lines; placeholders {{int:a:b}}, {{float:a:b}}, {{pick:a|b}}, {{date:a:b}}. Read-only queries only.)";
+      if (!(await S2.sendPrompt(prompt, { quiet: true }))) failed = "Couldn't send the question to the Claude chat.";
+    }
+  } catch (e) { failed = e.message; }
+  if (failed) { c.waiting = false; c.messages.push({ from: "error", text: failed }); renderChat(); renderClaudeBtn(); }
+}
+async function stopAsking() {
+  const c = currentChat();
+  delete chat.warmed[c.id];
+  try { await S2.callTool("sql_editor_ask_cancel", { editor_id: c.id }); } catch (e) { S2.toast(`Couldn't stop: ${e.message}`, "err"); }
+}
+async function pollChat(c) {
+  try {
+    const { messages, job } = await S2.callTool("sql_editor_inbox", { editor_id: c.id, after: c.lastSeq });
+    const changed = JSON.stringify(job) !== JSON.stringify(c.job);
+    c.job = job ?? null;
+    for (const m of messages) {
+      c.messages.push({ from: m.kind === "error" ? "error" : m.kind === "note" ? "note" : "claude", text: m.text });
+      c.lastSeq = Math.max(c.lastSeq, m.seq);
+    }
+    if (messages.length && !job) c.waiting = false;
+    const shown = c === currentChat() && chat.open;
+    if (messages.length && !shown) c.unread += messages.length;
+    if (shown && (messages.length || (c.waiting && changed))) renderChat(Boolean(messages.length));
+    if (messages.length) renderClaudeBtn();
+  } catch { /* transient (host busy, server restarting): the next poll retries */ }
+}
+// Chats waiting for an answer every 1.5 s; the one shown every 6 s (answers Claude sends unasked).
+let pollTick = 0;
+(function chatLoop() {
+  setTimeout(async () => {
+    pollTick++;
+    if (S2.app) {
+      const due = [...chats.values()].filter((c) => c.waiting || (pollTick % 4 === 0 && c === currentChat() && !S2.isHidden()));
+      for (const c of due) await pollChat(c);
+    }
+    chatLoop();
+  }, 1500);
+})();
+
+setInterval(() => { if (!S2.isHidden() && !state.dirty && !state.polling) load(); }, 20000);
+S2.onDisplayModeChange = () => render();
+S2.callTool("schema_explorer_databases", {}).then((r) => { state.databases = (r.databases ?? []).filter((d) => !d.system).map((d) => d.name); render(); }).catch(() => {});
+// Statements from a SQL Editor outside the Workspace: the browser link carries the id they're kept under.
+let handoffId = null;
+async function takeHandoff() {
+  const id = handoffId;
+  handoffId = null;
+  try { addFromEditor(await S2.callTool("workload_handoff_take", { handoff_id: id })); }
+  catch (e) { S2.toast(e.message, "err"); }
+}
+await S2.connect({
+  name: "singlestore-workload",
+  onToolInput(args) { if (args?.handoff) handoffId = String(args.handoff); },
+  onToolResult(result) {
+    if (handoffId) setTimeout(takeHandoff, 0);
+    let d;
+    try { d = S2.resultData(result); } catch (e) { state.error = e; render(); return; }
+    if (d?.workloads) { state.data = d; if (d.selected) select(d.selected); else load(); }
+    else if (d?.base && d?.new && d?.statements) { load().then(() => { select(d.base.workload); state.compare = { base: d.base.id, new: d.new.id, result: d, loading: false }; state.tab = "compare"; render(); }); return; }
+    else if (d?.id && d?.statements) { load().then(() => { select(d.workload); state.tab = "run"; follow(d.id); }); return; }
+    else load();
+    if (state.data?.running && !state.polling) follow(state.data.running.id);
+    render();
+  },
+  onToolCancelled() { if (!state.data) mainEl.replaceChildren(h("div", { class: "s2-empty" }, "Cancelled.")); },
+});
+window.addEventListener("s2:connection-changed", () => load());
+loadAssistantStatus();
+</script>
+</body>
+</html>

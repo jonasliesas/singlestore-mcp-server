@@ -1,0 +1,601 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Security</title>
+<!--S2:HEAD-->
+<style>
+  .sc-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--s2-border); margin: 4px 0 12px; }
+  .sc-tabs button { border: 0; border-bottom: 2px solid transparent; background: none; padding: 6px 12px; cursor: pointer;
+    font-size: var(--s2-fs-sm, 13px); color: var(--s2-text-2); margin-bottom: -1px; display: inline-flex; align-items: center; gap: 6px; }
+  .sc-tabs button[aria-selected="true"] { color: var(--s2-text); font-weight: var(--font-weight-semibold, 600); border-bottom-color: var(--s2-info); }
+  .sc-tabs .count { font-size: 11px; padding: 0 6px; border-radius: 9px; background: var(--s2-bg-3); color: var(--s2-text-2); font-variant-numeric: tabular-nums; }
+  .sc-tabs .count.busy { background: var(--s2-warn-bg); color: var(--s2-warn); }
+  .sc-section { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 16px 0 8px; }
+  .sc-section h2 { font-size: var(--font-text-md-size, 14px); font-weight: var(--font-weight-semibold, 600); margin: 0; }
+  .sc-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .sc-bar .s2-input[type="search"] { width: 220px; }
+  .sc-chip { border: 1px solid var(--s2-border); background: var(--s2-bg); border-radius: 999px; padding: 2px 10px; cursor: pointer;
+    font-size: var(--s2-fs-xs); color: var(--s2-text-2); display: inline-flex; gap: 5px; align-items: center; }
+  .sc-chip[aria-pressed="true"] { background: var(--s2-info-bg); color: var(--s2-info); border-color: var(--s2-info); }
+  .sc-chip .n { font-variant-numeric: tabular-nums; color: var(--s2-text-3); }
+  .sc-chip[aria-pressed="true"] .n { color: inherit; }
+  .sc-chip:disabled { opacity: .45; cursor: default; }
+  .sc-notice { padding: 7px 10px; border-radius: var(--s2-radius-sm); background: var(--s2-info-bg); color: var(--s2-text-2);
+    font-size: var(--s2-fs-xs); margin-bottom: 8px; }
+  .sc-notice.warn { background: var(--s2-warn-bg); color: var(--s2-warn); }
+  .sc-wrap { max-height: 460px; }
+  html[data-display-mode="fullscreen"] .sc-wrap.tall { max-height: calc(100vh - 260px); }
+  .sc-table td.mono, .sc-table td.user { font-family: var(--s2-mono); }
+  .sc-table tbody tr.row { cursor: pointer; }
+  .sc-table tr.open td { background: var(--s2-bg-2); }
+  .sc-table td.wrap { white-space: normal; max-width: 520px; }
+  .sc-flags { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+  .sc-flags .s2-badge { font-size: 11px; padding: 0 7px; }
+  .sc-detail td { background: var(--s2-bg-2); white-space: normal !important; max-width: none !important; padding: 10px 12px 14px !important; }
+  .sc-detail h3 { font-size: var(--s2-fs-xs); margin: 10px 0 5px; color: var(--s2-text-2); font-weight: var(--font-weight-semibold, 600); }
+  .sc-detail h3:first-child { margin-top: 0; }
+  .sc-chain { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: var(--s2-fs-xs); }
+  .sc-node { font-family: var(--s2-mono); border: 1px solid var(--s2-border); border-radius: var(--s2-radius-sm); padding: 1px 6px; background: var(--s2-bg); }
+  .sc-node.u { border-color: var(--s2-info); color: var(--s2-info); }
+  .sc-node.g { border-style: dashed; }
+  .sc-arrow { color: var(--s2-text-3); }
+  .sc-how { font-size: 11px; }
+  .sc-how.direct { color: var(--s2-text); }
+  .sc-how.role { color: var(--s2-info); }
+  .sc-how.global { color: var(--s2-warn); }
+  .sc-grants { display: flex; gap: 6px; align-items: flex-start; }
+  .sc-grants pre { flex: 1; max-height: 220px; overflow: auto; }
+  .sc-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; align-items: start; }
+  @media (max-width: 1000px) { .sc-grid { grid-template-columns: minmax(0, 1fr); } }
+  .sc-card { padding: 10px 12px; }
+  .sc-card h2 { font-size: var(--font-text-md-size, 14px); font-weight: var(--font-weight-semibold, 600); margin: 0 0 8px; }
+  .sc-privs { font-family: var(--s2-mono); font-size: 11px; color: var(--s2-text-2); }
+  .sc-tag { display: inline-block; font-family: var(--s2-mono); font-size: 11px; padding: 0 5px; margin: 1px 3px 1px 0; border-radius: 4px;
+    background: var(--s2-bg-3); color: var(--s2-text-2); }
+  .sc-tag.user { background: var(--s2-info-bg); color: var(--s2-info); }
+  .sc-tag.role { background: var(--s2-ok-bg); color: var(--s2-ok); }
+  .sc-pools td.num { min-width: 52px; }
+  .sc-spark { display: block; }
+  .sc-spark .run { stroke: var(--s2-info); fill: none; stroke-width: 1.5; }
+  .sc-spark .que { stroke: var(--s2-warn); fill: none; stroke-width: 1.5; }
+  .sc-res { display: grid; grid-template-columns: auto auto; gap: 1px 8px; font-size: 11px; font-variant-numeric: tabular-nums; }
+  .sc-res .lack { color: var(--s2-err); font-weight: var(--font-weight-semibold, 600); }
+  .sc-key { display: inline-block; width: 10px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 4px; }
+  .sc-auto { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+</style>
+</head>
+<body>
+<div id="root"><div class="s2-empty"><span class="s2-spinner"></span> Reading users and privileges…</div></div>
+<script type="module">
+const { h, fmt } = S2;
+const root = document.getElementById("root");
+const POOL_REFRESH_MS = 5000;
+
+const FLAGS = {
+  all: ["ALL on *.*", "err", "SHOW GRANTS has ALL PRIVILEGES ON *.*"],
+  super: ["SUPER", "err", "Has the SUPER privilege (directly or through a role)"],
+  grant_option: ["grant option", "warn", "Global privileges WITH GRANT OPTION: can pass them on to others"],
+  any_host: ["host %", "warn", "Can connect from any host"],
+  no_pw_expiry: ["no expiry", "plain", "PASSWORD_EXPIRATION is NULL: password_expiration_seconds isn't enabled, so the password never expires"],
+  locked: ["locked", "err", "ACCOUNT_STATUS = LOCKED (failed logins exceeded the limit)"],
+  unused: ["unused", "warn", "No traced query in the local Query History store for the chosen number of days"],
+};
+
+const state = {
+  tab: "users",
+  users: null, roles: null, pools: null,
+  errors: {}, loading: {},
+  // Users tab
+  search: "", flags: new Set(), unusedDays: 90, openUser: null, detail: {}, detailErr: {},
+  // Roles tab
+  roleSearch: "", onlyUsed: true, whoDb: "", whoTable: "", whoTables: [], who: null, whoErr: null, whoLoading: false,
+  // Pools tab
+  auto: true, timer: null,
+};
+const ukey = (u) => `${u.user}@${u.host}`;
+const qid = (s) => `'${String(s).replace(/\\/g, "\\\\").replace(/'/g, "''")}'`;
+const acct = (user, host) => `${qid(user)}@${qid(host)}`;
+const bt = (s) => "`" + String(s).replace(/`/g, "``") + "`";
+
+// ---------------------------------------------------------------- loading
+const LOADERS = {
+  users: () => S2.callTool("security_users", { unused_days: state.unusedDays }),
+  roles: () => S2.callTool("security_roles", {}),
+  pools: () => S2.callTool("security_pools", {}),
+};
+
+async function load(tab, quiet) {
+  if (state.loading[tab]) return;
+  state.loading[tab] = true;
+  if (!quiet) render();
+  try {
+    state[tab] = await LOADERS[tab]();
+    delete state.errors[tab];
+    if (tab === "roles" && !state.whoDb && state.roles.databases?.length) state.whoDb = state.roles.databases.find((d) => d !== "information_schema") ?? "";
+  } catch (e) {
+    state.errors[tab] = e;
+  } finally {
+    state.loading[tab] = false;
+    render();
+    reportContext();
+  }
+}
+
+function setTab(tab) {
+  state.tab = tab;
+  if (!state[tab] && !state.loading[tab]) load(tab);
+  syncTimer();
+  render();
+  reportContext();
+}
+
+function syncTimer() {
+  clearInterval(state.timer);
+  state.timer = state.tab === "pools" && state.auto ? setInterval(() => { if (!S2.isHidden()) load("pools", true); }, POOL_REFRESH_MS) : null;
+}
+
+// ---------------------------------------------------------------- shell
+function render() {
+  const t = state.tab;
+  const queued = state.pools ? state.pools.queue.length : null;
+  const tab = (key, label, count, busy) => h("button", { role: "tab", "aria-selected": String(t === key), onclick: () => setTab(key) },
+    label, count != null ? h("span", { class: `count${busy ? " busy" : ""}` }, String(count)) : null);
+  const me = state.users?.me;
+  root.replaceChildren(...[
+    h("div", { class: "s2-header" },
+      h("div", {}, h("h1", { class: "s2-title" }, "Security"),
+        h("div", { class: "s2-subtitle" }, `${me ? `Connected as ${me.user}@${me.host} · ` : ""}read-only: nothing is granted or changed from here; copy the SQL shown and run it yourself`)),
+      h("span", { class: "s2-spacer" }),
+      h("button", { class: "s2-btn", disabled: state.loading[t], onclick: () => { if (t === "users") state.detail = {}; load(t); } },
+        state.loading[t] ? h("span", { class: "s2-spinner" }) : null, "Refresh"),
+      S2.openInBrowserButton("security", () => ({ tab: state.tab })),
+      S2.fullscreenButton()),
+    h("div", { class: "sc-tabs", role: "tablist" },
+      tab("users", "Users", state.users?.users?.length ?? null),
+      tab("roles", "Roles & groups", state.roles ? state.roles.roles.length : null),
+      tab("pools", "Resource pools", queued, queued > 0)),
+    state.errors[t] ? h("div", { class: "s2-error", style: { marginBottom: "8px" } }, String(state.errors[t].message ?? state.errors[t])) : null,
+    ...(state[t] ? { users: usersTab, roles: rolesTab, pools: poolsTab }[t]() :
+      state.errors[t] ? [] : [h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Loading…")]),
+  ].filter(Boolean));
+}
+
+// ---------------------------------------------------------------- Users tab
+const userSearch = h("input", { class: "s2-input", type: "search", placeholder: "Filter users, groups…", "aria-label": "Filter users",
+  oninput: (e) => { state.search = e.target.value; render(); requestAnimationFrame(() => { userSearch.focus(); }); } });
+
+function usersTab() {
+  const d = state.users;
+  if (d.mode === "limited") return limitedView(d);
+  const q = state.search.trim().toLowerCase();
+  const list = d.users.filter((u) => (!q || ukey(u).toLowerCase().includes(q) || u.groups.some((g) => g.toLowerCase().includes(q))
+    || (u.default_pool ?? "").toLowerCase().includes(q)) && [...state.flags].every((f) => u.flags.includes(f)));
+  const hist = d.history ?? {};
+  const covers = hist.covers_days;
+  return [
+    h("div", { class: "sc-bar" }, userSearch,
+      Object.entries(FLAGS).map(([f, [label, , title]]) => {
+        const n = d.users.filter((u) => u.flags.includes(f)).length;
+        return h("button", { class: "sc-chip", title, "aria-pressed": String(state.flags.has(f)), disabled: !n && !state.flags.has(f),
+          onclick: () => { state.flags.has(f) ? state.flags.delete(f) : state.flags.add(f); render(); } }, label, h("span", { class: "n" }, String(n)));
+      }),
+      h("span", { class: "s2-spacer" }),
+      h("label", { class: "s2-small s2-muted" }, "Unused after ",
+        h("select", { class: "s2-input", onchange: (e) => { state.unusedDays = Number(e.target.value); load("users"); } },
+          [30, 60, 90, 180, 365].map((n) => h("option", { value: String(n), selected: n === state.unusedDays }, `${n} days`))))),
+    h("div", { class: "sc-notice" },
+      `"Unused" reads the local Query History store (${hist.source ?? "this connection"}): ${hist.note ?? ""} `,
+      hist.error ? `It couldn't be read: ${hist.error}. ` :
+        covers == null ? "It holds no queries yet, so unused accounts can't be told. " :
+        `It covers ${covers} day${covers === 1 ? "" : "s"} (since ${fmt.dateTime(hist.oldest)})` +
+          (covers < state.unusedDays ? `, less than ${state.unusedDays}: users without queries there show "–", not unused. ` : ". "),
+      d.password_expiration_seconds != null ? `password_expiration_seconds = ${d.password_expiration_seconds}.` : ""),
+    Object.keys(d.errors ?? {}).length ? h("div", { class: "sc-notice warn" }, "Some views couldn't be read: " +
+      Object.entries(d.errors).map(([k, v]) => `${k} (${v})`).join("; ")) : null,
+    usersTable(list),
+  ];
+}
+
+function limitedView(d) {
+  return [
+    h("div", { class: "sc-notice warn" }, d.notice),
+    h("div", { class: "s2-card sc-card" },
+      h("h2", {}, `${d.me.user}@${d.me.host}`),
+      h("div", { class: "sc-chain" }, h("span", { class: "sc-node u" }, `${d.me.user}@${d.me.host}`),
+        d.groups.length ? [h("span", { class: "sc-arrow" }, "→ groups"), d.groups.map((g) => h("span", { class: "sc-node g" }, g))] : h("span", { class: "s2-faint" }, "no groups"),
+        d.roles.length ? [h("span", { class: "sc-arrow" }, "→ roles"), d.roles.map((r) => h("span", { class: "sc-node" }, r))] : null),
+      h("h3", { class: "s2-small s2-muted" }, "SHOW GRANTS (password hash hidden)"),
+      grantsBlock(d.grants)),
+  ];
+}
+
+function grantsBlock(lines) {
+  const text = (lines ?? []).map((l) => `${l};`).join("\n");
+  return h("div", { class: "sc-grants" }, h("pre", { class: "s2-pre" }, text || "(none)"),
+    h("button", { class: "s2-btn", onclick: (e) => { e.stopPropagation(); S2.copy(text, "Grants copied"); } }, "Copy"));
+}
+
+function pwCell(u) {
+  if (String(u.type).toUpperCase() === "JWT") return h("span", { class: "s2-faint", title: "JWT users sign in with a token" }, "JWT");
+  const age = u.password_age_days;
+  const exp = u.password_expires_in_s;
+  return h("span", { title: `Password changed ${fmt.dateTime(u.password_updated)}` },
+    age == null ? "–" : `${age} d`, exp != null ? h("span", { class: "s2-faint" }, ` · expires in ${fmt.duration(exp)}`) : null);
+}
+
+function usersTable(list) {
+  if (!list.length) return h("div", { class: "s2-empty" }, "No users match.");
+  const cols = ["User", "Type", "Status", "Conns", "Password age", "Default pool", "Groups", "Last traced query", "Flags"];
+  const body = h("tbody");
+  for (const u of list) {
+    const k = ukey(u);
+    const open = state.openUser === k;
+    body.append(h("tr", { class: `row${open ? " open" : ""}`, onclick: () => toggleUser(u) },
+      h("td", { class: "user", title: k }, u.user, h("span", { class: "s2-faint" }, `@${u.host}`), u.is_local ? h("span", { class: "s2-faint", title: "IS_LOCAL: local to the node, not a distributed user" }, " (local)") : null),
+      h("td", {}, u.type),
+      h("td", { title: `EFFECTIVE_FAILED_LOGIN_ATTEMPTS ${u.failed_login_attempts ?? "?"} · EFFECTIVE_PASSWORD_LOCK_TIME ${u.password_lock_time ?? "?"} ms` },
+        h("span", { class: `s2-badge ${String(u.account_status).toUpperCase() === "LOCKED" ? "err" : "plain"}` }, u.account_status ?? "?"),
+        u.failed_login_attempts ? h("span", { class: "s2-faint" }, ` ${u.failed_login_attempts} failed`) : null),
+      h("td", { class: "num" }, String(u.connections)),
+      h("td", {}, pwCell(u)),
+      h("td", { class: u.default_pool ? "mono" : "null" }, u.default_pool ?? "–"),
+      h("td", { title: u.groups.join(", ") }, u.groups.length ? `${u.groups.length}: ${u.groups.slice(0, 2).join(", ")}${u.groups.length > 2 ? " …" : ""}` : "–"),
+      h("td", { title: u.last_seen ? `${u.history_queries} traced queries in the store` : "" },
+        u.last_seen ? fmt.relTime(u.last_seen) : u.unused === true ? h("span", { class: "s2-faint" }, "none") : h("span", { class: "s2-faint" }, "–")),
+      h("td", {}, h("span", { class: "sc-flags" }, u.flags.map((f) => h("span", { class: `s2-badge ${FLAGS[f][1]}`, title: FLAGS[f][2] }, FLAGS[f][0])),
+        u.all_checked === false ? h("span", { class: "s2-faint", title: "SHOW GRANTS couldn't be read for this user, so ALL PRIVILEGES wasn't checked" }, "?") : null))));
+    if (open) body.append(h("tr", { class: "sc-detail" }, h("td", { colspan: String(cols.length) }, userDetail(u))));
+  }
+  return h("div", { class: "s2-table-wrap sc-wrap tall" },
+    h("table", { class: "s2-table sc-table" }, h("thead", {}, h("tr", {}, cols.map((c) => h("th", { class: c === "Conns" ? "num" : "" }, c)))), body));
+}
+
+async function toggleUser(u) {
+  const k = ukey(u);
+  state.openUser = state.openUser === k ? null : k;
+  render();
+  if (state.openUser && !state.detail[k]) {
+    try { state.detail[k] = await S2.callTool("security_user_detail", { user: u.user, host: u.host }); delete state.detailErr[k]; }
+    catch (e) { state.detailErr[k] = e; }
+    render();
+    reportContext();
+  }
+}
+
+function privLevel(obj) {
+  // "*.*", "db.*", "db.table" -> GRANT/REVOKE priv_level
+  const m = /^(.*?)\.(.*)$/.exec(obj);
+  if (!m) return obj;
+  return `${m[1] === "*" ? "*" : bt(m[1])}.${m[2] === "*" ? "*" : bt(m[2])}`;
+}
+
+// Copy-only SQL that would take these privileges away along one path ("direct" or "via role R ← group G").
+function revokeFor(privs, object, scope, how, d) {
+  const list = privs.join(", ");
+  if (how === "direct") {
+    return scope === "column" ? [] : [["⧉ REVOKE", `REVOKE ${list} ON ${privLevel(object)} FROM ${acct(d.user, d.host)};`, "Removes these privileges from the user"]];
+  }
+  const m = /^via role (.+) ← group (.+)$/.exec(how);
+  if (!m) return [];
+  return [
+    ["⧉ REVOKE GROUP", `REVOKE GROUP ${qid(m[2])} FROM ${acct(d.user, d.host)};`, `Takes the user out of group ${m[2]}: removes everything that group gives the user`],
+    ["⧉ FROM ROLE", `REVOKE ${list} ON ${privLevel(object)} FROM ROLE ${qid(m[1])};`, `Removes the privileges from role ${m[1]}: affects every group and user with that role`],
+  ];
+}
+
+function userDetail(u) {
+  const k = ukey(u);
+  const d = state.detail[k];
+  if (state.detailErr[k]) return S2.errorBox(state.detailErr[k]);
+  if (!d) return h("div", { class: "s2-small s2-muted" }, h("span", { class: "s2-spinner" }), " Reading privileges…");
+  const roles = [...new Set(d.chain.map(([, r]) => r))];
+  return h("div", {},
+    h("h3", {}, "Membership"),
+    h("div", { class: "sc-chain" }, h("span", { class: "sc-node u" }, `${d.user}@${d.host}`),
+      d.groups.length ? d.groups.map((g) => [h("span", { class: "sc-arrow" }, "→"), h("span", { class: "sc-node g", title: "group" }, g),
+        h("span", { class: "sc-arrow" }, "→"), ...(d.chain.filter(([cg]) => cg === g).map(([, r]) => h("span", { class: "sc-node", title: "role" }, r))),
+        d.chain.some(([cg]) => cg === g) ? null : h("span", { class: "s2-faint" }, "(no roles)"), h("span", { style: { width: "12px" } })])
+        : h("span", { class: "s2-faint" }, "not in any group: only direct grants apply")),
+    h("h3", {}, `Effective privileges (${d.effective.length})`),
+    d.effective.length ? effectiveTable(d) : h("div", { class: "s2-small s2-faint" }, "No privileges beyond USAGE."),
+    d.resource_pools.length ? [h("h3", {}, "Resource pool grants"),
+      h("div", { class: "s2-small" }, d.resource_pools.map((p) => h("span", { class: "sc-tag" }, `${p.privilege} ON ${p.pool}`)))] : null,
+    h("h3", {}, "SHOW GRANTS (password hash hidden)"),
+    grantsBlock(d.show_grants),
+    String(d.account_status).toUpperCase() === "LOCKED" ? [h("h3", {}, "Unlock (run it yourself)"),
+      grantsBlock([`ALTER USER ${acct(d.user, d.host)} ACCOUNT UNLOCK`])] : null,
+    Object.keys(d.errors ?? {}).length ? h("div", { class: "sc-notice warn", style: { marginTop: "8px" } },
+      "Couldn't read: " + Object.entries(d.errors).map(([a, b]) => `${a} (${b})`).join("; ")) : null,
+    h("div", { style: { marginTop: "8px", display: "flex", gap: "6px", flexWrap: "wrap" } },
+      h("button", { class: "s2-btn", onclick: () => S2.sendPrompt(`Review the SingleStore privileges of ${d.grantee} (groups: ${d.groups.join(", ") || "none"}; roles: ${roles.join(", ") || "none"}). Use the user_privileges tool, point out anything risky or broader than needed, and suggest least-privilege GRANT/REVOKE statements I could run myself.`) },
+        "Ask Claude to review")));
+}
+
+function effectiveTable(d) {
+  // One row per object and set of paths: the privileges it gives, and each path with copy-only SQL.
+  const groups = new Map();
+  for (const r of d.effective) {
+    const key = `${r.object}\u0000${r.how.join("\u0001")}`;
+    const g = groups.get(key) ?? { object: r.object, scope: r.scope, how: r.how, privs: [], grant: [] };
+    g.privs.push(r.privilege);
+    if (r.grantable) g.grant.push(r.privilege);
+    groups.set(key, g);
+  }
+  const body = h("tbody");
+  for (const g of groups.values()) {
+    body.append(h("tr", {},
+      h("td", { class: "mono", title: g.scope }, g.object),
+      h("td", { class: "wrap sc-privs" }, g.privs.join(", "), g.grant.length ? h("div", { class: "s2-faint" }, `WITH GRANT OPTION: ${g.grant.length === g.privs.length ? "all" : g.grant.join(", ")}`) : null),
+      h("td", { class: "wrap" }, g.how.map((x) => h("div", { style: { display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" } },
+        h("span", { class: `sc-how ${x === "direct" ? "direct" : "role"}` }, x),
+        revokeFor(g.privs, g.object, g.scope, x, d).map(([label, s, title]) => h("button", { class: "s2-btn ghost", style: { padding: "0 6px", fontSize: "11px" },
+          title: `${title}. Copies:\n${s}`, onclick: () => S2.copy(s, "Statement copied: run it yourself if you mean it") }, label)))))));
+  }
+  return h("div", { class: "s2-table-wrap", style: { maxHeight: "320px" } },
+    h("table", { class: "s2-table sc-table" }, h("thead", {}, h("tr", {}, ["Object", "Privileges", "How (with copy-only SQL to remove it)"].map((c) => h("th", {}, c)))), body));
+}
+
+// ---------------------------------------------------------------- Roles & groups tab
+const roleSearch = h("input", { class: "s2-input", type: "search", placeholder: "Filter groups, roles, users…", "aria-label": "Filter groups and roles",
+  oninput: (e) => { state.roleSearch = e.target.value; render(); requestAnimationFrame(() => roleSearch.focus()); } });
+
+function rolesTab() {
+  const d = state.roles;
+  if (d.mode === "limited") return [h("div", { class: "sc-notice warn" }, d.notice), whoCard(d)];
+  const q = state.roleSearch.trim().toLowerCase();
+  const roleBy = Object.fromEntries(d.roles.map((r) => [r.role, r]));
+  const groups = d.groups.filter((g) => (!state.onlyUsed || g.members.length)
+    && (!q || g.group.toLowerCase().includes(q) || g.roles.some((r) => r.toLowerCase().includes(q)) || g.members.some((m) => m.toLowerCase().includes(q))));
+  const roles = d.roles.filter((r) => !q || r.role.toLowerCase().includes(q) || r.groups.some((g) => g.toLowerCase().includes(q))
+    || r.privileges.some((p) => p.object.toLowerCase().includes(q)));
+  return [
+    whoCard(d),
+    h("div", { class: "sc-section" }, h("h2", {}, "User → group → role → privileges"),
+      h("span", { class: "s2-faint s2-small" }, "Privileges reach users only through groups; roles hold the privileges."),
+      h("span", { class: "s2-spacer" }), roleSearch,
+      h("label", { class: "sc-auto s2-small s2-muted" }, h("input", { type: "checkbox", checked: state.onlyUsed, onchange: (e) => { state.onlyUsed = e.target.checked; render(); } }),
+        `Only groups with users (${d.groups.filter((g) => g.members.length).length} of ${d.groups.length})`)),
+    Object.keys(d.errors ?? {}).length ? h("div", { class: "sc-notice warn" }, "Some views couldn't be read: " + Object.entries(d.errors).map(([k, v]) => `${k} (${v})`).join("; ")) : null,
+    groups.length ? h("div", { class: "s2-table-wrap sc-wrap" }, h("table", { class: "s2-table sc-table" },
+      h("thead", {}, h("tr", {}, ["Users", "Group", "Roles", "Privileges (via the roles)"].map((c) => h("th", {}, c)))),
+      h("tbody", {}, groups.map((g) => h("tr", {},
+        h("td", { class: "wrap" }, g.members.length ? g.members.map((m) => h("span", { class: "sc-tag user" }, m)) : h("span", { class: "s2-faint" }, "none")),
+        h("td", { class: "mono" }, g.group),
+        h("td", { class: "wrap" }, g.roles.map((r) => h("span", { class: "sc-tag role" }, r))),
+        h("td", { class: "wrap" }, g.roles.flatMap((r) => (roleBy[r]?.privileges ?? []).map((p) =>
+          h("div", { class: "sc-privs" }, `${p.object}: ${p.privileges.join(", ")}`))))))))) : h("div", { class: "s2-empty" }, "No groups match."),
+    h("div", { class: "sc-section" }, h("h2", {}, `Roles (${roles.length})`)),
+    h("div", { class: "s2-table-wrap sc-wrap" }, h("table", { class: "s2-table sc-table" },
+      h("thead", {}, h("tr", {}, ["Role", "Granted to groups", "Privileges"].map((c) => h("th", {}, c)))),
+      h("tbody", {}, roles.map((r) => h("tr", {},
+        h("td", { class: "mono" }, r.role),
+        h("td", { class: "wrap" }, r.groups.length ? r.groups.map((g) => h("span", { class: "sc-tag" }, g)) : h("span", { class: "s2-faint" }, "none (no one gets it)")),
+        h("td", { class: "wrap" }, r.privileges.map((p) => h("div", { class: "sc-privs" }, `${p.object}: ${p.privileges.join(", ")}`)))))))),
+  ];
+}
+
+function whoCard(d) {
+  const dbs = d.databases ?? [];
+  const w = state.who;
+  return h("div", { class: "s2-card sc-card" },
+    h("h2", {}, "Who can access …"),
+    h("div", { class: "sc-bar" },
+      h("select", { class: "s2-input", "aria-label": "Database", onchange: (e) => { state.whoDb = e.target.value; state.whoTable = ""; loadTables(); } },
+        h("option", { value: "" }, "Pick a database"), dbs.map((x) => h("option", { value: x, selected: x === state.whoDb }, x))),
+      h("select", { class: "s2-input", "aria-label": "Table (optional)", onchange: (e) => { state.whoTable = e.target.value; } },
+        h("option", { value: "" }, "Whole database"), state.whoTables.map((t) => h("option", { value: t, selected: t === state.whoTable }, t))),
+      h("button", { class: "s2-btn primary", disabled: !state.whoDb || state.whoLoading, onclick: () => runWho() },
+        state.whoLoading ? h("span", { class: "s2-spinner" }) : null, "Look up")),
+    state.whoErr ? S2.errorBox(state.whoErr) : null,
+    w ? whoResult(w) : h("div", { class: "s2-small s2-faint" }, "Every user with privileges on the database or table, and how they got them: directly, through a role and group, or through a global (*.*) privilege."));
+}
+
+async function loadTables() {
+  state.whoTables = [];
+  render();
+  if (!state.whoDb) return;
+  try { state.whoTables = (await S2.callTool("security_tables", { database: state.whoDb })).tables; } catch { state.whoTables = []; }
+  render();
+}
+
+async function runWho() {
+  state.whoLoading = true; state.whoErr = null;
+  render();
+  try { state.who = await S2.callTool("security_who", { database: state.whoDb, table: state.whoTable || null }); }
+  catch (e) { state.whoErr = e; }
+  finally { state.whoLoading = false; render(); reportContext(); }
+}
+
+function whoResult(w) {
+  const target = w.database + (w.table ? `.${w.table}` : "");
+  const kinds = { global: ["global", "Via a privilege on *.* (all databases)"], direct: ["direct", "Granted to the user on this object"], role: ["role", "Through a role given to one of the user's groups"] };
+  return h("div", {},
+    h("div", { class: "s2-small s2-muted", style: { margin: "4px 0 6px" } },
+      `${w.users_with_access} of ${w.total_users} users have privileges on ${target}`, w.exists ? "" : " (no such object found: the grants are listed anyway)"),
+    w.rows.length ? h("div", { class: "s2-table-wrap", style: { maxHeight: "300px" } }, h("table", { class: "s2-table sc-table" },
+      h("thead", {}, h("tr", {}, ["User", "Privileges", "On", "How"].map((c) => h("th", {}, c)))),
+      h("tbody", {}, w.rows.map((r) => h("tr", {},
+        h("td", { class: "user" }, r.user, h("span", { class: "s2-faint" }, `@${r.host}`)),
+        h("td", { class: "wrap sc-privs" }, r.privileges.join(", ")),
+        h("td", { class: "mono" }, r.scope),
+        h("td", { class: "wrap" }, (r.hows ?? [r.how]).map((x) => h("div", { class: `sc-how ${r.kind === "global" ? "global" : x === "direct" ? "direct" : "role"}`, title: kinds[r.kind][1] }, x)))))))): h("div", { class: "s2-empty" }, "Nobody has privileges on it."),
+    h("ul", { class: "s2-small s2-faint", style: { margin: "6px 0 0", paddingLeft: "18px" } }, w.notes.map((n) => h("li", {}, n))));
+}
+
+// ---------------------------------------------------------------- Resource pools tab
+const LIMITS = [["memory_percentage", "Memory", "%"], ["query_memory_percentage", "Per query", "%"], ["query_timeout", "Timeout", " s"],
+  ["max_concurrency", "Concurrency", ""], ["max_queue_depth", "Queue depth", ""], ["soft_cpu_limit_percentage", "Soft CPU", "%"], ["hard_cpu_limit_percentage", "Hard CPU", "%"]];
+
+function spark(hist, pool) {
+  const pts = hist.map((p) => [p.t, p.running?.[pool], p.queued?.[pool]]).filter((p) => p[1] != null || p[2] != null);
+  if (pts.length < 2) return h("span", { class: "s2-faint s2-small" }, "collecting…");
+  const W = 110, H = 26;
+  const t0 = pts[0][0], t1 = pts.at(-1)[0] || t0 + 1;
+  const max = Math.max(1, ...pts.map((p) => Math.max(p[1] ?? 0, p[2] ?? 0)));
+  const path = (i) => pts.map((p, k) => `${k ? "L" : "M"}${(((p[0] - t0) / Math.max(1, t1 - t0)) * (W - 2) + 1).toFixed(1)},${(H - 2 - ((p[i] ?? 0) / max) * (H - 4)).toFixed(1)}`).join("");
+  const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  s.setAttribute("class", "sc-spark"); s.setAttribute("width", W); s.setAttribute("height", H); s.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  s.setAttribute("role", "img"); s.setAttribute("aria-label", `Running and queued queries in ${pool}, peak ${max}`);
+  for (const [i, cls] of [[1, "run"], [2, "que"]]) {
+    const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    p.setAttribute("d", path(i)); p.setAttribute("class", cls); s.append(p);
+  }
+  return h("span", { title: `Running (blue) and queued (orange) over the last ${Math.round((t1 - t0) / 60)} min, peak ${max}` }, s);
+}
+
+function poolsTab() {
+  const d = state.pools;
+  const v = d.variables ?? {};
+  return [
+    h("div", { class: "sc-bar" },
+      h("span", { class: "s2-small s2-muted" }, `Global resource_pool = `, h("strong", {}, v.resource_pool ?? "?"),
+        ` · workload_management = `, h("strong", {}, v.workload_management ?? "?"),
+        v.resource_governor_cpu_limit_mode != null ? [" · resource_governor_cpu_limit_mode = ", h("strong", {}, v.resource_governor_cpu_limit_mode)] : null,
+        v.resource_pool_statement_selector_function ? [" · selector function = ", h("strong", {}, v.resource_pool_statement_selector_function)] : null),
+      h("span", { class: "s2-spacer" }),
+      h("label", { class: "sc-auto s2-small s2-muted" }, h("input", { type: "checkbox", checked: state.auto, onchange: (e) => { state.auto = e.target.checked; syncTimer(); } }),
+        `Auto-refresh (${POOL_REFRESH_MS / 1000} s)`),
+      h("span", { class: "s2-faint s2-small" }, `updated ${fmt.relTime(d.generated_at)}`)),
+    Object.keys(d.errors ?? {}).length ? h("div", { class: "sc-notice warn" }, "Some views couldn't be read: " + Object.entries(d.errors).map(([k, x]) => `${k} (${x})`).join("; ")) : null,
+    h("div", { class: "sc-section", style: { marginTop: "4px" } }, h("h2", {}, `Pools (${d.pools.length})`),
+      h("span", { class: "s2-faint s2-small" }, "Limits from RESOURCE_POOLS (– = not set = no limit). Status summed over nodes (MV_RESOURCE_POOL_STATUS); killed / finished / queue time count since each node started."),
+      h("span", { class: "s2-small" }, h("span", { class: "sc-key", style: { background: "var(--s2-info)" } }), "running ", h("span", { class: "sc-key", style: { background: "var(--s2-warn)" } }), "queued")),
+    h("div", { class: "s2-table-wrap" }, h("table", { class: "s2-table sc-table sc-pools" },
+      h("thead", {}, h("tr", {}, ["Pool", ...LIMITS.map((l) => l[1]), "Running", "Queued", "Killed", "Finished", "Avg queue", "Memory", "Last 15 min", "Default for"]
+        .map((c, i) => h("th", { class: i > 0 && i <= LIMITS.length + 6 ? "num" : "" }, c)))),
+      h("tbody", {}, d.pools.map((p) => {
+        const st = p.status;
+        const reported = st && st.reported_nodes;
+        const na = () => h("td", { class: "num null", title: "This pool reports no status (NULL in MV_RESOURCE_POOL_STATUS)" }, "n/a");
+        return h("tr", {},
+          h("td", { class: "mono" }, p.pool),
+          LIMITS.map(([k, , unit]) => h("td", { class: `num${p.config[k] == null ? " null" : ""}` }, p.config[k] == null ? "–" : `${p.config[k]}${unit}`)),
+          reported ? [h("td", { class: "num" }, String(st.running)), h("td", { class: `num${st.queued ? " " : ""}`, style: st.queued ? { color: "var(--s2-warn)", fontWeight: 600 } : null }, String(st.queued)),
+            h("td", { class: "num" }, fmt.number(st.killed)), h("td", { class: "num" }, fmt.number(st.finished)),
+            h("td", { class: "num" }, st.avg_queue_ms == null ? "–" : `${fmt.number(st.avg_queue_ms, 1)} ms`), h("td", { class: "num" }, fmt.bytes(st.memory_bytes))]
+            : [na(), na(), na(), na(), na(), na()],
+          h("td", {}, reported ? spark(d.history ?? [], p.pool) : h("span", { class: "s2-faint s2-small" }, "n/a")),
+          h("td", { title: p.default_for.join(", ") }, p.default_for.length ? `${p.default_for.length} user${p.default_for.length === 1 ? "" : "s"}` : h("span", { class: "s2-faint" }, "–")));
+      })))),
+    h("div", { class: "sc-section" }, h("h2", {}, `Queued now (${d.queue.length})`),
+      h("span", { class: "s2-faint s2-small" }, "WORKLOAD_MANAGEMENT_QUEUE. A resource is lacking when required > limit − used (limit and used as of when the query was submitted). Small queries are never queued.")),
+    d.queue_error ? h("div", { class: "sc-notice warn" }, `Couldn't read the queue: ${d.queue_error}`) :
+    d.queue.length ? h("div", { class: "s2-table-wrap", style: { maxHeight: "320px" } }, h("table", { class: "s2-table sc-table" },
+      h("thead", {}, h("tr", {}, ["Waiting since", "Type", "Waiting for", "Threads / leaf", "Connections / leaf", "Leaf memory", "Query"].map((c) => h("th", {}, c)))),
+      h("tbody", {}, d.queue.map((q) => {
+        const lacking = q.resources.filter((r) => r.lacking);
+        return h("tr", {},
+          h("td", {}, fmt.relTime(q.start_time)),
+          h("td", {}, `${q.query_type ?? "?"} / ${q.memory_type ?? "?"} memory`),
+          h("td", {}, lacking.length ? lacking.map((r) => h("span", { class: "s2-badge err", style: { marginRight: "4px" } }, r.resource))
+            : h("span", { class: "s2-faint", title: "No resource meets required > limit − used with the values recorded at submission" }, "not determined")),
+          q.resources.map((r) => h("td", {}, h("div", { class: "sc-res" },
+            h("span", { class: "s2-faint" }, "needs"), h("span", { class: r.lacking ? "lack" : "" }, `${r.required ?? "?"}${r.unit ? " " + r.unit : ""}`),
+            h("span", { class: "s2-faint" }, "limit"), h("span", {}, String(r.limit ?? "?")),
+            h("span", { class: "s2-faint" }, "used"), h("span", {}, String(r.used ?? "?")),
+            r.used_local_queue != null ? [h("span", { class: "s2-faint", title: "Column '… USED (FROM LOCAL QUEUE)': present on 9.0, not documented" }, "local q."), h("span", {}, String(r.used_local_queue))] : null))),
+          h("td", { class: "mono", title: q.query ?? "", style: { maxWidth: "380px" } }, q.query ?? ""));
+      })))) : h("div", { class: "s2-empty" }, "No queries are waiting in the workload manager's queue."),
+    ...wlmTable(d.wlm),
+    h("div", { class: "sc-section" }, h("h2", {}, "Who uses which pool")),
+    h("div", { class: "s2-table-wrap sc-wrap" }, h("table", { class: "s2-table sc-table" },
+      h("thead", {}, h("tr", {}, ["Pool", "Default pool of", "GRANT USAGE ON RESOURCE POOL"].map((c) => h("th", {}, c)))),
+      h("tbody", {},
+        d.pools.map((p) => h("tr", {}, h("td", { class: "mono" }, p.pool),
+          h("td", { class: "wrap" }, p.default_for.length ? p.default_for.map((u) => h("span", { class: "sc-tag user" }, u)) : h("span", { class: "s2-faint" }, "–")),
+          h("td", { class: "wrap" }, p.grants.length ? p.grants.map((g) => h("span", { class: "sc-tag" }, `${g.user}${g.grantable ? " (grantable)" : ""}`)) : h("span", { class: "s2-faint" }, "–")))),
+        d.users_without_default.length ? h("tr", {}, h("td", { class: "s2-muted" }, "(no default pool)"),
+          h("td", { class: "wrap" }, d.users_without_default.map((u) => h("span", { class: "sc-tag" }, u))),
+          h("td", { class: "s2-small s2-faint wrap" }, `These users start in the global resource_pool (${v.resource_pool ?? "?"}). Users with SUPER can use every pool; the built-in pools need no grant.`)) : null))),
+    h("div", { class: "s2-small s2-faint", style: { marginTop: "6px" } },
+      "To give a user a default pool, run yourself: ", h("code", { class: "s2-mono" }, "ALTER USER 'name'@'host' SET DEFAULT RESOURCE POOL = pool_name;"),
+      " To allow a pool: ", h("code", { class: "s2-mono" }, "GRANT USAGE ON RESOURCE POOL pool_name TO 'name'@'host';")),
+  ];
+}
+
+const WLM_STATS = ["Queued Queries (from global queue)", "Queued Queries (from local queue)", "Running Queries (from global queue)", "Running Queries (from local queue)",
+  "Total Queued Queries Since Startup", "Running Memory (MB) On Leaves (from global queue)", "Running Memory (MB) On Leaves (from local queue)",
+  "Allocated Memory (MB) On Leaves (for local queue)", "Running Threads Per Leaf (from global queue)", "Running Threads Per Leaf (from local queue)",
+  "Allocated Threads Per Leaf (for local queue)", "Running Connections Per Leaf (from global queue)", "Running Connections Per Leaf (from local queue)",
+  "Allocated Connections Per Leaf (for local queue)", "Memory Threshold (MB) to Queue Locally", "Memory Threshold (MB) to Queue Globally",
+  "Threads Threshold to Queue Globally", "Connections Threshold to Queue Globally", "Total queries started since startup", "Total queries finished since startup",
+  "Total queries cancelled since startup", "Total medium queries upgraded since startup"];
+
+function wlmTable(w) {
+  if (w.error) return [h("div", { class: "sc-notice warn" }, `Couldn't read MV_WORKLOAD_MANAGEMENT_STATUS: ${w.error}`)];
+  const stats = [...WLM_STATS.filter((s) => w.stats[s]), ...Object.keys(w.stats).filter((s) => !WLM_STATS.includes(s) && !/^Node (Id|Site Queue ID)$/.test(s))];
+  return [
+    h("div", { class: "sc-section" }, h("h2", {}, "Workload management"),
+      h("span", { class: "s2-faint s2-small" }, "MV_WORKLOAD_MANAGEMENT_STATUS per aggregator. The local queue holds medium queries, the global queue large ones.")),
+    h("div", { class: "s2-table-wrap sc-wrap" }, h("table", { class: "s2-table sc-table" },
+      h("thead", {}, h("tr", {}, h("th", {}, "Statistic"), w.nodes.map((n) => h("th", { class: "num" }, `Node ${n.id} (${n.type})`)))),
+      h("tbody", {}, stats.map((s) => h("tr", {}, h("td", {}, s), w.nodes.map((n) => {
+        const val = w.stats[s]?.[String(n.id)];
+        const hot = /^Queued Queries/.test(s) && Number(val) > 0;
+        return h("td", { class: "num", style: hot ? { color: "var(--s2-warn)", fontWeight: 600 } : null }, val == null ? "–" : fmt.number(val));
+      })))))),
+  ];
+}
+
+// ---------------------------------------------------------------- model context, host wiring
+function reportContext() {
+  const parts = [`User is viewing the Security view (read-only), tab "${state.tab}".`];
+  if (state.tab === "users" && state.users?.users) {
+    const flagged = state.users.users.filter((u) => u.flags.length).slice(0, 20).map((u) => `${ukey(u)} [${u.flags.join(", ")}]`);
+    parts.push(`${state.users.users.length} users${flagged.length ? `; flagged: ${flagged.join("; ")}` : ""}.`);
+    if (state.openUser) parts.push(`Selected user: ${state.openUser}.`);
+  }
+  if (state.tab === "roles" && state.who) parts.push(`Looked up who can access ${state.who.database}${state.who.table ? "." + state.who.table : ""}: ${state.who.users_with_access} users.`);
+  if (state.tab === "pools" && state.pools) parts.push(`${state.pools.pools.length} pools; ${state.pools.queue.length} queries queued now.`);
+  S2.updateModelContext(parts.join("\n"));
+}
+
+function accept(result) {
+  const p = S2.resultData(result);
+  if (p.kind === "user") {
+    const d = p.data;
+    state.tab = "users";
+    state.openUser = `${d.user}@${d.host}`;
+    state.detail[state.openUser] = d;
+  } else if (p.kind === "who") {
+    state.tab = "roles";
+    state.who = p.data;
+    state.whoDb = p.data.database;
+    state.whoTable = p.data.table ?? "";
+  } else if (p.kind === "tab" && p.data) {
+    state.tab = p.tab;
+    state[p.tab] = p.data;
+    if (p.tab === "roles" && !state.whoDb && p.data.databases?.length) state.whoDb = p.data.databases.find((x) => x !== "information_schema") ?? "";
+  }
+}
+
+window.addEventListener("s2:connection-changed", () => {
+  state.users = state.roles = state.pools = state.who = null;
+  state.detail = {}; state.openUser = null;
+  load(state.tab);
+});
+// The Workspace can hand over a tab ("s2-open-view" with {tab}) when the view is already open.
+window.addEventListener("s2:set-sql", (e) => { if (e.detail?.tab && LOADERS[e.detail.tab]) setTab(e.detail.tab); });
+
+let started = false;
+S2.onDisplayModeChange = () => render();
+await S2.connect({
+  name: "singlestore-security",
+  onToolInput(args) { if (args?.tab && LOADERS[args.tab]) state.tab = args.tab; },
+  onToolResult(result) {
+    if (started) return;
+    started = true;
+    try { accept(result); } catch (e) { state.errors[state.tab] = e; }
+    if (!state[state.tab]) load(state.tab); else render();
+    if (state.tab === "roles" && state.whoDb && !state.whoTables.length) loadTables();
+    if (state.tab === "pools") load("pools", true);  // the opening result has no history yet
+    syncTimer();
+    reportContext();
+  },
+  onToolCancelled() { if (!state[state.tab]) root.replaceChildren(h("div", { class: "s2-empty" }, "Cancelled.")); },
+});
+</script>
+</body>
+</html>

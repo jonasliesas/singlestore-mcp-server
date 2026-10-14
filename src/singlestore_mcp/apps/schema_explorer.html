@@ -98,6 +98,24 @@
   .cu-res li { font-size: var(--s2-fs-xs); }
   .cu h3 { margin: 0 0 6px; font-size: var(--s2-fs-xs); text-transform: uppercase; letter-spacing: .04em; color: var(--s2-text-3); font-weight: 600; }
 
+  /* Storage icon (bottomless / local) in the database rows */
+  .se-store { flex: none; width: 14px; height: 14px; display: inline-flex; color: var(--s2-text-3); }
+  .se-store svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  .se-store.bottomless { color: var(--s2-info); }
+  .se-store.unknown { color: var(--s2-warn); }
+  /* Analyze panel */
+  .an { border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); padding: 10px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .an-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .an-head h3 { margin: 0; font-size: var(--s2-fs-sm, 13px); font-weight: var(--font-weight-semibold, 600); }
+  .an .stale { color: var(--s2-warn); }
+  .an .fresh { color: var(--s2-ok); }
+  .an-confirm { border: 1px solid var(--s2-warn); background: var(--s2-warn-bg); border-radius: var(--s2-radius); padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .an-confirm pre { margin: 0; max-height: 200px; overflow: auto; }
+  .an-progress { height: 6px; border-radius: 3px; background: var(--s2-bg-3); overflow: hidden; }
+  .an-progress > span { display: block; height: 100%; background: var(--s2-info); transition: width .3s; }
+  .an-res { margin: 0; padding-left: 18px; font-size: var(--s2-fs-xs); }
+  .an-res .ok { color: var(--s2-ok); } .an-res .err { color: var(--s2-err); } .an-res .warn { color: var(--s2-warn); }
+
   @media (max-width: 640px) {
     .se { grid-template-columns: minmax(0, 1fr); height: auto; }
     .se-left { max-height: 260px; }
@@ -292,6 +310,185 @@ async function queryInGrid() {
   } catch (e) { S2.toast(`Couldn't open the query grid: ${e.message}`, "err"); }
 }
 
+// ---------- storage: bottomless or local-only ----------
+// From MV_BOTTOMLESS_DATABASES / MV_BOTTOMLESS_STATUS (server side); system databases carry none.
+const SVG_NS = "http://www.w3.org/2000/svg";
+function svgIcon(paths) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("aria-hidden", "true");
+  for (const d of paths) { const p = document.createElementNS(SVG_NS, "path"); p.setAttribute("d", d); svg.append(p); }
+  return svg;
+}
+const ICON_CLOUD = ["M4.5 12.5h7.2a2.8 2.8 0 0 0 .4-5.6A4 4 0 0 0 4.4 6.2 3.2 3.2 0 0 0 4.5 12.5Z"];
+const ICON_DISK = ["M2.5 5.5h11v5h-11z", "M2.5 5.5 4 3h8l1.5 2.5", "M11 8h.01"];
+
+function storeText(d) {
+  const s = d.storage;
+  if (!s) return "";
+  if (s.kind === "bottomless") {
+    const where = s.remote_path ? `${s.provider ?? "object storage"}: ${s.remote_path}` : (s.provider ?? "object storage");
+    return `Bottomless (unlimited storage). The durable copy of the data is in remote object storage (${where}). ` +
+      "Nodes keep recent changes and a blob cache of columnstore data on local disk; data not in the cache is fetched from remote storage when queried." +
+      (s.retention_minutes ? ` Remote history is kept ${s.retention_minutes} minutes.` : "") + (s.detached && s.detached !== "ATTACHED" && s.detached !== 0 ? ` State: ${s.detached}.` : "");
+  }
+  if (s.kind === "local") {
+    return "Local-only (not bottomless). All of its data (columnstore blobs, rowstore snapshots and transaction logs) lives on the nodes' own disks" +
+      (s.data_directory ? `, under ${s.data_directory} on each node` : "") + "; nothing is copied to object storage.";
+  }
+  return `Storage type unknown${s.error ? `: ${s.error}` : ""}.`;
+}
+
+function storeIcon(d) {
+  const s = d.storage;
+  if (!s) return null;
+  const cls = s.kind === "bottomless" ? "bottomless" : s.kind === "local" ? "local" : "unknown";
+  return h("span", { class: `se-store ${cls}`, title: storeText(d), "aria-label": cls === "bottomless" ? "bottomless" : cls === "local" ? "local storage" : "storage unknown" },
+    svgIcon(cls === "bottomless" ? ICON_CLOUD : ICON_DISK));
+}
+
+// ---------- analyze (ANALYZE TABLE) ----------
+// Plan: schema_explorer_analyze_plan (read-only). Run: schema_explorer_analyze with confirm=true, one table
+// per call so progress shows and Stop takes effect between tables. Only after the user confirmed here.
+const an = { db: null, table: null, plan: null, selected: new Set(), confirm: false, running: false, stop: false, progress: null, results: [] };
+const anFor = (db, table) => an.db === db && an.table === (table ?? null);
+
+async function loadAnalyzePlan() {
+  const { db, table } = an;
+  an.plan = { status: "loading" };
+  renderRight();
+  try {
+    const data = await call("schema_explorer_analyze_plan", table ? { database: db, tables: [table] } : { database: db });
+    if (!anFor(db, table)) return;
+    an.plan = { status: "ok", data };
+    if (!an.selected.size || table) an.selected = new Set(data.tables.map((t) => t.table));
+    S2.updateModelContext(`Analyze plan for ${db}${table ? "." + table : ""}: ${data.tables.length} table(s), ${data.stale_tables} with stale or missing statistics. Nothing has run yet.`);
+  } catch (e) { an.plan = { status: "error", error: e }; }
+  renderRight();
+}
+
+function openAnalyze(db, table) {
+  Object.assign(an, { db, table: table ?? null, plan: null, selected: new Set(), confirm: false, stop: false, progress: null, results: [] });
+  loadAnalyzePlan();
+}
+function closeAnalyze() { if (an.running) return; an.db = null; renderRight(); }
+
+async function runAnalyze() {
+  const data = an.plan?.data;
+  if (!data) return;
+  const names = data.tables.map((t) => t.table).filter((n) => an.selected.has(n));
+  if (!names.length) return;
+  Object.assign(an, { running: true, stop: false, confirm: false, results: [], progress: { done: 0, total: names.length, current: names[0] } });
+  renderRight();
+  for (const name of names) {
+    if (an.stop) break;
+    an.progress.current = name;
+    renderRight();
+    try {
+      const res = await call("schema_explorer_analyze", { database: data.database, tables: [name], confirm: true });
+      an.results.push(...res.results);
+    } catch (e) {
+      an.results.push({ table: name, status: "error", error: e.message, statement: `ANALYZE TABLE ${fq(data.database, name)};` });
+    }
+    an.progress.done++;
+    renderRight();
+  }
+  const ok = an.results.filter((r) => r.status === "analyzed").length;
+  const errs = an.results.filter((r) => r.status === "error").length;
+  an.running = false;
+  an.progress = null;
+  S2.toast(`ANALYZE: ${ok} table(s) analyzed${errs ? `, ${errs} error(s)` : ""}${an.stop ? " (stopped)" : ""}`, errs ? "err" : "");
+  S2.updateModelContext(`The user ran ANALYZE TABLE in ${data.database} on ${an.results.length} table(s): ${an.results.map((r) => `${r.table} ${r.status}`).join(", ")}.`);
+  // Fresh statistics ages (read-only).
+  const results = an.results;
+  await loadAnalyzePlan();
+  an.results = results;
+  renderRight();
+}
+
+function ageText(days) {
+  if (days == null) return "–";
+  const mins = days * 1440;
+  return mins < 60 ? `${Math.max(1, Math.round(mins))} min ago` : days < 1 ? `${Math.round(days * 24)} h ago` : `${Math.round(days)} days ago`;
+}
+
+function analyzePanel(db, table) {
+  if (!anFor(db, table)) return null;
+  const p = an.plan;
+  const title = table ? `Analyze ${fq(db, table)}` : `Analyze all tables in ${qi(db)}`;
+  const head = h("div", { class: "an-head" },
+    h("h3", {}, title),
+    h("span", { class: "s2-small s2-faint" }, "Refreshes optimizer statistics with ANALYZE TABLE"),
+    h("span", { class: "s2-spacer" }),
+    h("button", { class: "s2-btn ghost", onclick: closeAnalyze, disabled: an.running, "aria-label": "Close the analyze panel" }, "Close"));
+  if (!p || p.status === "loading") return h("div", { class: "an" }, head, h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Reading the current statistics…"));
+  if (p.status === "error") return h("div", { class: "an" }, head, S2.errorBox(p.error), h("div", {}, h("button", { class: "s2-btn", onclick: loadAnalyzePlan }, "Retry")));
+  const data = p.data;
+  if (!data.tables.length) return h("div", { class: "an" }, head, h("div", { class: "s2-small" }, "No base tables to analyze" + (data.skipped_views.length ? " (views have no statistics)." : ".")));
+  const rows = data.tables.map((t) => ({
+    "": t.table, Table: t.table, Rows: t.rows, "Statistics updated": t.stats.age_days, "Columns with stats": t.stats.columns_with_stats,
+    Outdated: t.stats.outdated_columns, Histograms: t.stats.histogram_columns, Status: t.stale ? t.reasons.join("; ") : "", _t: t,
+  }));
+  const grid = S2.dataTable(table ? ["Table", "Rows", "Statistics updated", "Columns with stats", "Outdated", "Histograms", "Status"]
+    : ["", "Table", "Rows", "Statistics updated", "Columns with stats", "Outdated", "Histograms", "Status"], rows, {
+    maxHeight: "240px",
+    render: {
+      "": (name) => h("input", { type: "checkbox", checked: an.selected.has(name), disabled: an.running, "aria-label": `Select ${name}`,
+        onclick: (e) => e.stopPropagation(),
+        onchange: (e) => { e.target.checked ? an.selected.add(name) : an.selected.delete(name); an.confirm = false; renderRight(); } }),
+      Table: (v) => h("span", { class: "s2-mono" }, v),
+      Rows: (v) => rowsText(v),
+      "Statistics updated": (v, r) => h("span", { title: r._t.stats.last_updated_newest ? `LAST_UPDATED ${r._t.stats.last_updated_newest} (cluster time)` : "No statistics" }, ageText(v)),
+      "Columns with stats": (v, r) => `${v} / ${r._t.stats.columns}`,
+      Outdated: (v) => v ? h("span", { class: "stale" }, String(v)) : "0",
+      Status: (v) => v ? h("span", { class: "stale" }, "⚠ " + v) : h("span", { class: "fresh" }, "looks current"),
+    },
+  });
+  const sel = data.tables.filter((t) => an.selected.has(t.table));
+  const bar = h("div", { class: "s2-toolbar" },
+    !table ? h("span", { class: "s2-small" }, `${sel.length} of ${data.tables.length} selected · ${data.stale_tables} look stale`) : null,
+    !table ? h("button", { class: "s2-btn ghost", disabled: an.running, onclick: () => { an.selected = new Set(data.tables.map((t) => t.table)); an.confirm = false; renderRight(); } }, "Select all") : null,
+    !table ? h("button", { class: "s2-btn ghost", disabled: an.running, onclick: () => { an.selected = new Set(data.tables.filter((t) => t.stale).map((t) => t.table)); an.confirm = false; renderRight(); } }, "Select stale only") : null,
+    !table ? h("button", { class: "s2-btn ghost", disabled: an.running || !sel.length, onclick: () => { an.selected.clear(); an.confirm = false; renderRight(); } }, "Clear") : null,
+    h("span", { class: "s2-spacer" }),
+    an.running ? h("button", { class: "s2-btn", disabled: an.stop, onclick: () => { an.stop = true; renderRight(); } }, an.stop ? "Stopping after this table…" : "Stop")
+      : h("button", { class: "s2-btn primary", disabled: !sel.length, onclick: () => { an.confirm = true; an.results = []; renderRight(); } },
+        `Analyze ${sel.length} table${sel.length === 1 ? "" : "s"}…`));
+  const parts = [head,
+    h("div", { class: "s2-small s2-faint" }, "Statistics from information_schema.OPTIMIZER_STATISTICS. “Updated” is its LAST_UPDATED: when autostats or ANALYZE last refreshed the column's statistics."),
+    grid, bar];
+  if (an.confirm && sel.length && !an.running) {
+    const big = sel.reduce((a, t) => a + (Number(t.rows) || 0), 0);
+    parts.push(h("div", { class: "an-confirm", role: "alertdialog", "aria-label": "Confirm ANALYZE" },
+      h("div", {}, h("strong", {}, "This changes the shared cluster. "),
+        `ANALYZE TABLE reads each table to rebuild its statistics (${sel.length} table${sel.length === 1 ? "" : "s"}, ${fmt.number(big)} rows in total) ` +
+        "and invalidates cached query plans built on stale statistics, so they are re-optimized on their next run. Tables run one at a time; Stop ends after the current one."),
+      h("pre", { class: "s2-pre" }, sel.map((t) => t.statement).join("\n")),
+      h("div", { class: "s2-toolbar" },
+        h("button", { class: "s2-btn ghost", onclick: () => { an.confirm = false; renderRight(); } }, "Cancel"),
+        h("button", { class: "s2-btn primary", onclick: runAnalyze }, `Run ANALYZE on ${sel.length} table${sel.length === 1 ? "" : "s"} now`))));
+  }
+  if (an.progress) {
+    const pr = an.progress;
+    parts.push(h("div", {},
+      h("div", { class: "s2-small" }, h("span", { class: "s2-spinner" }), ` ${pr.done} / ${pr.total} · ANALYZE ${fq(db, pr.current)}…`),
+      h("div", { class: "an-progress", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": String(pr.total), "aria-valuenow": String(pr.done) },
+        h("span", { style: { width: `${(pr.done / pr.total) * 100}%` } }))));
+  }
+  if (an.results.length) {
+    const cls = { analyzed: "ok", error: "err", missing: "warn", skipped: "warn" };
+    parts.push(h("div", {},
+      h("div", { class: "s2-small" }, h("strong", {}, "Result")),
+      h("ul", { class: "an-res" }, an.results.map((r) => h("li", {},
+        h("span", { class: cls[r.status] ?? "" }, r.status), " ",
+        h("span", { class: "s2-mono" }, r.statement),
+        r.seconds != null ? ` · ${r.seconds} s` : "",
+        r.status === "analyzed" && r.last_updated_after ? h("span", { class: "s2-faint" }, ` · statistics updated ${r.last_updated_before ? fmt.dateTime(r.last_updated_before) : "never"} → ${fmt.dateTime(r.last_updated_after)}`) : null,
+        r.error ? h("span", { class: "s2-faint" }, ` — ${r.error}`) : null)))));
+  }
+  return h("div", { class: "an" }, ...parts.filter(Boolean));
+}
+
 // ---------- left pane ----------
 let treeEl, filterEl;
 
@@ -315,9 +512,11 @@ function renderTree() {
     const isSel = state.sel?.db === d.name && !state.sel.table;
     const total = d.tables + d.views;
     items.push(h("button", {
-      class: `se-row db${isSel ? " sel" : ""}`, title: d.name,
+      class: `se-row db${isSel ? " sel" : ""}`, title: d.storage ? `${d.name}
+${storeText(d)}` : d.name,
       onclick: () => toggleDb(d.name),
     }, h("span", { class: `se-caret${open ? " open" : ""}` }, "▶"),
+      storeIcon(d),
       h("span", { class: "se-name" }, highlight(d.name, q)),
       h("span", { class: "se-count" }, q && open && t?.status === "ok" ? `${matchingTables.length}/${total}` : total)));
     if (!open) continue;
@@ -393,11 +592,18 @@ function renderDbOverview(db) {
       h("div", { class: "se-badges" },
         meta?.system && h("span", { class: "s2-badge plain" }, "system"),
         meta && h("span", { class: "s2-badge plain" }, `${meta.tables} tables`),
-        meta?.views ? h("span", { class: "s2-badge plain" }, `${meta.views} views`) : null)),
-    h("button", { class: "s2-btn", title: "Reload tables", onclick: () => loadTables(db, true) }, "↻ Refresh"));
-  if (!t || t.status === "loading") return [head, h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Loading tables…")];
-  if (t.status === "error") return [head, S2.errorBox(t.error)];
-  if (!t.tables.length) return [head, placeholder("This database has no tables")];
+        meta?.views ? h("span", { class: "s2-badge plain" }, `${meta.views} views`) : null,
+        meta?.storage ? h("span", { class: `s2-badge ${meta.storage.kind === "bottomless" ? "info" : "plain"}`, title: storeText(meta) },
+          storeIcon(meta), meta.storage.kind === "bottomless" ? `bottomless${meta.storage.provider ? ` · ${meta.storage.provider}` : ""}`
+            : meta.storage.kind === "local" ? "local storage" : "storage unknown") : null)),
+    h("div", { class: "s2-toolbar" },
+      !meta?.system && meta?.tables ? h("button", { class: "s2-btn", title: "Refresh the optimizer statistics of every table (shows the plan first)",
+        onclick: () => openAnalyze(db, null) }, "Analyze all tables…") : null,
+      h("button", { class: "s2-btn", title: "Reload tables", onclick: () => loadTables(db, true) }, "↻ Refresh")));
+  const an = analyzePanel(db, null);
+  if (!t || t.status === "loading") return [head, an, h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Loading tables…")];
+  if (t.status === "error") return [head, an, S2.errorBox(t.error)];
+  if (!t.tables.length) return [head, an, placeholder("This database has no tables")];
   const totalRows = t.tables.reduce((a, x) => a + (Number(x.rows) || 0), 0);
   const totalSize = t.tables.reduce((a, x) => a + (Number(x.size_bytes) || 0), 0);
   const stats = h("div", { class: "se-stats" },
@@ -413,7 +619,7 @@ function renderDbOverview(db) {
     onRowClick: (r) => selectTable(db, r.Name),
     render: { Rows: (v) => rowsText(v), Size: (v) => v == null ? "–" : fmt.bytes(v), Created: (v) => fmt.dateTime(v) },
   });
-  return [head, stats, h("div", { class: "s2-small s2-faint", style: { marginBottom: "6px" } }, "Click a row to open the table."), table];
+  return [head, an, stats, h("div", { class: "s2-small s2-faint", style: { marginBottom: "6px" } }, "Click a row to open the table."), table];
 }
 
 function stat(k, v, title) {
@@ -451,6 +657,8 @@ function renderTableDetail(db, table) {
     h("div", { class: "s2-toolbar" },
       h("button", { class: "s2-btn primary", onclick: askClaude, title: "Send a question about this table to Claude" }, `Ask Claude about this ${isTable ? "table" : "view"}`),
       h("button", { class: "s2-btn", onclick: queryInGrid, title: "Ask Claude to open this table in the Query Grid" }, "Query in grid"),
+      isTable && !SYSTEM.has(db) ? h("button", { class: "s2-btn", onclick: () => openAnalyze(db, table),
+        title: "Refresh this table's optimizer statistics (ANALYZE TABLE; shows the plan first)" }, "Analyze…") : null,
       h("button", { class: "s2-btn ghost", title: "Reload", "aria-label": "Reload table", onclick: () => {
         state.previews.delete(key(db, table)); loadDetail(db, table, true);
         if (state.tab === "preview") loadPreview(db, table, true);
@@ -519,7 +727,7 @@ function renderTableDetail(db, table) {
       return /^\s*,?\s*(SHARD|SORT)\s+KEY\b|USING CLUSTERED COLUMNSTORE/i.test(line) ? h("span", { class: "hl" }, text) : text;
     }));
   }
-  return [head, stats, keysEl, info.comment && h("div", { class: "s2-small s2-muted", style: { marginBottom: "8px" } }, info.comment), tabBar, body];
+  return [head, analyzePanel(db, table), stats, keysEl, info.comment && h("div", { class: "s2-small s2-muted", style: { marginBottom: "8px" } }, info.comment), tabBar, body];
 }
 
 function renderRight() {

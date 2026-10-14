@@ -27,6 +27,7 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
+from . import workload as workload_mod
 from .apps import apps
 from .apps._core import set_browser_url_factory, surface_errors
 from .apps.browser_view import BrowserView
@@ -367,7 +368,9 @@ def sql_editor_reply(editor_id: str, message: str) -> dict[str, Any]:
     """Send an answer to the chat panel of an open SQL Editor app.
 
     Use this to answer a message that arrived from the SQL Editor (it starts
-    with "[SQL Editor <editor_id>]"), or when the user asks you to put SQL into
+    with "[SQL Editor <editor_id>]") or the Workload view's chat ("[Workload
+    <id>]": each ```sql block gets Add to workload / Replace / Test buttons there,
+    optionally preceded by "-- name: …" and "-- per_minute: N" lines), or when the user asks you to put SQL into
     their open editor (the editor reports its id in the model context). The
     message is plain text; put SQL in ```sql fenced blocks - each block gets
     Replace / Insert / Copy buttons in the editor. Keep explanations short.
@@ -432,6 +435,85 @@ def restart_server() -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
+# Test workloads (the Workload app shows them; these tools work without it)
+# --------------------------------------------------------------------------
+
+
+def _trim_run(r: dict[str, Any]) -> dict[str, Any]:
+    """A run without its per-second timeline and full SQL (keeps the result small for the model)."""
+    out = {k: v for k, v in r.items() if k != "timeline"}
+    out["statements"] = [{k: v for k, v in s.items() if k != "sql"} | {"sql": " ".join(s["sql"].split())[:300]}
+                         for s in r.get("statements", [])]
+    return out
+
+
+@tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True))
+def workload_define(
+    name: str,
+    statements: list[dict[str, Any]],
+    database: str | None = None,
+    description: str = "",
+    pacing: str = "rate",
+    concurrency: int = 4,
+    duration_s: int = 60,
+    timeout_s: float = 60,
+    arrivals: str = "even",
+    think_ms: int = 0,
+    fetch_rows: bool = True,
+    allow_writes: bool = False,
+    trace_all: bool = False,
+    original_name: str | None = None,
+) -> dict[str, Any]:
+    """Create or replace a saved test workload (it can then be run with workload_run, again and again).
+
+    Args:
+        name: Workload name (letters, digits, spaces, . - _).
+        statements: [{"sql": "...", "per_minute": 30, "name": "Top makes", "database": null, "id": "s1",
+            "enabled": true}]. per_minute is how often the statement runs (with pacing "max": its relative
+            weight). SQL may use placeholders filled per execution: {{int:1:1000}}, {{float:0:1}},
+            {{pick:a|b|c}}, {{date:2024-01-01:2024-12-31}} (quote strings yourself: '{{pick:US|EU}}').
+        database: Default database for the statements.
+        pacing: "rate" (each statement per_minute times a minute) or "max" (as fast as the connections can).
+        concurrency: Connections (parallel workers), 1-64.
+        duration_s: How long a run lasts, 5 s - 4 h.
+        timeout_s: Per-statement timeout; the statement is cancelled (KILL QUERY) after it.
+        arrivals: "even" (fixed spacing) or "random" (Poisson arrivals at the same average rate).
+        think_ms: Pause between statements per worker (pacing "max").
+        fetch_rows: Read every result row (off measures just the execute time, not the time to read rows back).
+        allow_writes: Allow statements other than SELECT / WITH (they run repeatedly: use a test table).
+        trace_all: Turn on full query tracing on the cluster for the run, so every statement (not just those
+            over the trace threshold) shows up in Query History afterwards. Affects the whole cluster.
+        original_name: The workload's current name when renaming it.
+    """
+    w = workload_mod.save({"name": name, "description": description, "database": database, "statements": statements,
+                 "settings": {"pacing": pacing, "concurrency": concurrency, "duration_s": duration_s, "timeout_s": timeout_s,
+                              "arrivals": arrivals, "think_ms": think_ms, "fetch_rows": fetch_rows,
+                              "allow_writes": allow_writes, "trace_all": trace_all}},
+                original_name)
+    return {"saved": True, "workload": w,
+            "message": f"Saved workload {w['name']!r} with {len(w['statements'])} statement(s). Run it with workload_run."}
+
+@tool(annotations=ToolAnnotations(readOnlyHint=True))
+def workload_list() -> dict[str, Any]:
+    """Saved workloads (with their statements and settings), the run going on now, and recent runs."""
+    d = {"workloads": workload_mod.list_workloads(), "running": workload_mod.running(), "runs": workload_mod.list_runs()[:30]}
+    return d
+
+@tool(annotations=ToolAnnotations(readOnlyHint=True))
+def workload_status(run_id: str, since: int = 0) -> dict[str, Any]:
+    """Progress and results of a run (live while it runs): per-statement count, throughput, p50 / p95 / p99 /
+    max latency, errors and queue wait, plus a per-second timeline from second ``since``."""
+    r = workload_mod.status(run_id, since)
+    return {"summary": workload_mod.run_summary_text(r), **_trim_run(r)}
+
+@tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=False))
+def workload_stop(run_id: str) -> dict[str, Any]:
+    """Stop a running workload (the statements running now are cancelled)."""
+    r = workload_mod.stop(run_id)
+    verb = "Stopping" if r.get("state") in ("starting", "running") else "Stopped"
+    return {"message": f"{verb} run {run_id}.", **_trim_run(r)}
+
+# --------------------------------------------------------------------------
 # Prompts: shown in Claude Code as /singlestore:<name> slash commands
 # --------------------------------------------------------------------------
 
@@ -459,8 +541,8 @@ def explain_query(sql: str, database: str = "") -> str:
     )
 
 
-@mcp.prompt(title="Create a pipeline")
-def create_pipeline(source: str, table: str = "", database: str = "") -> str:
+@mcp.prompt(name="create_pipeline", title="Create a pipeline")
+def create_pipeline_prompt(source: str, table: str = "", database: str = "") -> str:
     """Create a SingleStore pipeline from an S3 path, Kafka topic or other source."""
     target = f" into {database + '.' if database else ''}{table}" if table else ""
     return (

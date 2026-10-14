@@ -18,6 +18,7 @@ from typing import Any
 
 import singlestoredb as s2
 
+
 class ConfigurationError(RuntimeError):
     """Raised when required connection settings are missing."""
 

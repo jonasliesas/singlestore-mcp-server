@@ -94,7 +94,7 @@ function alertItem(a) {
       a.source ? h("span", { title: "Cluster (host:port of the connection)" }, a.source) : null,
       link),
     a.sql ? h("details", {}, h("summary", {}, "SQL"), h("pre", { class: "s2-pre" }, a.sql),
-      h("button", { class: "s2-btn ghost", onclick: () => navigator.clipboard?.writeText(a.sql).then(() => S2.toast("Copied", "ok")) }, "Copy")) : null);
+      h("button", { class: "s2-btn ghost", onclick: () => S2.copy(a.sql) }, "Copy")) : null);
 }
 
 function rulesPanel() {

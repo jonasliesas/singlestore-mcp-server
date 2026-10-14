@@ -40,6 +40,9 @@
   .ws-tab .x.armed { font-size: var(--s2-fs-xs); font-weight: 600; }
   .ws-tab-add { border: 0; background: none; cursor: pointer; color: var(--s2-text-2); font-size: 16px; padding: 0 8px; height: 27px; }
   .ws-tab-add:hover { color: var(--s2-info); }
+  .ws-tab.drop { box-shadow: inset 2px 0 0 var(--s2-info); }
+  .ws-tab .rename { width: 140px; margin: 0 4px 0 6px; padding: 1px 4px; font: inherit; font-size: var(--s2-fs-xs);
+    border: 1px solid var(--s2-border); border-radius: 4px; background: var(--s2-bg); color: var(--s2-text); }
   .ws-loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--s2-text-2); font-size: var(--s2-fs-xs); }
   .ws-loading[hidden] { display: none; }
   .ws-loading .s2-error { max-width: 420px; }
@@ -73,35 +76,59 @@ const ICONS = {
   cluster: '<rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><line x1="7" y1="7.5" x2="7.01" y2="7.5"/><line x1="7" y1="16.5" x2="7.01" y2="16.5"/><line x1="11" y1="7.5" x2="17" y2="7.5"/><line x1="11" y1="16.5" x2="17" y2="16.5"/>',
   history: '<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/>',
   alerts: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  workload: '<polyline points="3 17 8 11 12 14 17 7 21 10"/><line x1="3" y1="21" x2="21" y2="21"/>',
+  security: '<path d="M12 3l7 3v5c0 4.5-3 8.2-7 10-4-1.8-7-5.5-7-10V6z"/><polyline points="9 12 11 14 15 10"/>',
+  config: '<line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="8" cy="18" r="2"/>',
   connections: '<path d="M9 7V3"/><path d="M15 7V3"/><path d="M6 7h12v4a6 6 0 0 1-12 0z"/><path d="M12 17v4"/>',
   browser: '<path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
   fullscreen: '<path d="M4 9V4h5"/><path d="M20 9V4h-5"/><path d="M4 15v5h5"/><path d="M20 15v5h-5"/>',
 };
+// Rail order follows this object's order (bottom: true goes to the bottom of the rail).
 const VIEWS = {
+  schema: { label: "Schema", title: "Schema Explorer", uri: "ui://singlestore/schema-explorer.html", tool: "schema_explorer" },
   sql: { label: "SQL", title: "SQL Editor", uri: "ui://singlestore/sql-editor.html", tool: "sql_editor" },
   notebook: { label: "Notebook", title: "Notebook", uri: "ui://singlestore/notebook.html", tool: "notebook" },
-  schema: { label: "Schema", title: "Schema Explorer", uri: "ui://singlestore/schema-explorer.html", tool: "schema_explorer" },
   pipelines: { label: "Pipelines", title: "Pipeline Monitor", uri: "ui://singlestore/pipeline-monitor.html", tool: "pipeline_monitor" },
   connections: { label: "Connect", title: "Connections", uri: "ui://singlestore/connections.html", tool: "connections_window", bottom: true },
   cluster: { label: "Cluster", title: "Cluster Monitor", uri: "ui://singlestore/cluster-monitor.html", tool: "cluster_monitor" },
   history: { label: "History", title: "Query History", uri: "ui://singlestore/query-history.html", tool: "query_history" },
+  security: { label: "Security", title: "Security", uri: "ui://singlestore/security.html", tool: "security" },
+  config: { label: "Config", title: "Config", uri: "ui://singlestore/config.html", tool: "cluster_config" },
   alerts: { label: "Alerts", title: "Alerts", uri: "ui://singlestore/alerts.html", tool: "alerts" },
+  workload: { label: "Workload", title: "Workload", uri: "ui://singlestore/workload.html", tool: "workload" },
 };
 
-// Notebook tabs: each is its own view keyed "notebook", "notebook:2", … with its own kernel.
+// Tabbed views: each tab is its own view (own iframe).
+//  - Notebook tabs are keyed "notebook", "notebook:2", … each with its own kernel; they
+//    exist while their frame does.
+//  - SQL Editor tabs are keyed "sql:<tab id>"; the list (order, active tab, titles) is
+//    kept by the server (sql_editor_tabs), so it comes back after a restart, and each
+//    tab autosaves its own draft. A tab's frame loads the first time it's shown.
+//    "sql" alone means the active SQL tab.
 const viewDef = (key) => VIEWS[String(key).split(":")[0]];
 const isNotebook = (key) => String(key).startsWith("notebook");
+const isSql = (key) => String(key) === "sql" || String(key).startsWith("sql:");
+const tabGroup = (key) => (isNotebook(key) ? "notebook" : isSql(key) ? "sql" : null);
+const sqlKey = (id) => (id ? `sql:${id}` : "sql");  // "sql" alone: the tab list couldn't be loaded
+const tabIdOf = (key) => String(key).split(":")[1] ?? null;
+const baseName = (p) => (p ? String(p).split(/[\\/]/).pop() : null);
+const errText = (e) => String(e?.message ?? e).replace(/^Error executing tool [\w-]+:\s*/, "");
 let notebookSeq = 1;
 
 const ws = {
   args: {},            // the workspace's own tool arguments (sql_editor)
-  sqlResult: null,     // its tool result, which is also the SQL view's opening result
+  sqlResult: null,     // its tool result, which is also the opening result of the SQL tab active at start
+  startSqlKey: null,   // that tab (it gets the SQL Claude opened the workspace with)
   current: null,
   frames: {},          // view -> {iframe, args, result, pending: [messages after init]}
   contexts: {},        // view -> latest model-context text from that view
   titles: {},          // notebook tab -> title reported by the notebook
   lastNotebook: null,
+  sqlTabs: [],         // SQL tabs in order: {id, n, title, file, path, dirty} (server list + live updates)
+  lastSql: null,       // id of the active SQL tab
 };
+const sqlTab = (key) => ws.sqlTabs.find((t) => t.id === tabIdOf(key));
+const sqlLabel = (t) => t.title || baseName(t.file) || `untitled ${t.n}`;
 const railButtons = {};
 const mainEl = h("div", { class: "ws-main" });
 
@@ -118,7 +145,7 @@ function buildShell() {
     rail.append(h("button", { class: "tool", title: "Open the workspace full-window in your browser", "aria-label": "Open in browser",
       onclick: async () => {
         try {
-          await S2.openAppInBrowser("sql_editor", { view: ws.current, database: ws.args.database });
+          await S2.openAppInBrowser("sql_editor", { view: String(ws.current).split(":")[0], database: ws.args.database });
         } catch (e) { S2.toast(`Couldn't open in browser: ${e.message}`, "err"); }
       } }, svg(ICONS.browser)));
   }
@@ -128,6 +155,11 @@ function buildShell() {
   mainEl.append(tabsEl);
   root.replaceChildren(h("div", { class: "ws" }, rail, mainEl));
   startAlertBadge();
+  // Tab shortcuts while the focus is in the workspace itself (the SQL Editor forwards its own).
+  window.addEventListener("keydown", (e) => {
+    const action = tabKeyAction(e);
+    if (action && isSql(ws.current)) { e.preventDefault(); sqlTabKey(action); }
+  }, true);
 }
 
 // ---------------------------------------------------------------- alerts badge
@@ -172,13 +204,20 @@ async function pollAlerts() {
 function openView(view, handoff) {
   // "notebook:new" (from a notebook's New / Open): a fresh notebook tab.
   if (view === "notebook:new") view = `notebook:${++notebookSeq}`;
+  // "sql:new" (the editor's New, Ctrl+Alt+N): a fresh SQL tab; "sql" (rail, hand-offs): the active one.
+  if (view === "sql:new") { newSqlTab(handoff); return; }
+  if (view === "sql" || (isSql(view) && !sqlTab(view))) view = sqlKey(ws.lastSql);
   if (!viewDef(view)) return;
   ws.current = view;
   if (isNotebook(view)) ws.lastNotebook = view;
+  if (isSql(view) && tabIdOf(view) && ws.lastSql !== tabIdOf(view)) {
+    ws.lastSql = tabIdOf(view);
+    S2.callTool("sql_editor_tab_activate", { tab_id: ws.lastSql }).catch(() => {});  // reopens on this tab
+  }
   const base = String(view).split(":")[0];
   for (const [key, btn] of Object.entries(railButtons)) btn.setAttribute("aria-current", key === base ? "page" : "false");
   if (!ws.frames[view]) createFrame(view, handoff);
-  else if (handoff) deliver(view, { ...handoff, type: "s2-set-sql" });
+  else if (handoff) deliver(view, { ...handoff, type: handoff.type === "s2-open-file" ? "s2-open-file" : "s2-set-sql" });
   for (const [key, f] of Object.entries(ws.frames)) {
     if (!f.iframe) continue;
     f.iframe.hidden = key !== view;
@@ -216,13 +255,17 @@ function connectionChanged(name) {
   refreshConnectionLabel();
 }
 
-// ---------------------------------------------------------------- notebook tabs
+// ---------------------------------------------------------------- tabs (notebooks, SQL Editor)
 const tabsEl = h("div", { class: "ws-tabs", role: "tablist", "aria-label": "Notebooks" });
+const SQL_TAB_KEYS = "Ctrl+Alt+N: new tab · Ctrl+Tab / Ctrl+Shift+Tab (or Ctrl+Alt+PageDown / PageUp): next / previous tab";
 function renderTabs() {
-  const show = isNotebook(ws.current);
+  const group = tabGroup(ws.current);
+  const show = group === "notebook" || (group === "sql" && ws.sqlTabs.length > 0);
   tabsEl.hidden = !show;
   mainEl.classList.toggle("has-tabs", show);
   if (!show) return;
+  tabsEl.setAttribute("aria-label", group === "sql" ? "SQL Editor tabs" : "Notebooks");
+  if (group === "sql") { renderSqlTabs(); return; }
   const keys = Object.keys(ws.frames).filter(isNotebook);
   tabsEl.replaceChildren(...keys.map((key) => {
     const t = ws.titles[key] ?? { title: "untitled", dirty: false };
@@ -232,6 +275,133 @@ function renderTabs() {
         ? h("button", { class: "x armed", title: "Unsaved changes: click again to close without saving", onclick: () => closeNotebook(key) }, "Discard ×")
         : h("button", { class: "x", title: "Close this notebook (its Python kernel stops)", "aria-label": `Close ${t.title}`, onclick: () => closeNotebook(key) }, "×"));
   }), h("button", { class: "ws-tab-add", title: "New notebook tab", "aria-label": "New notebook", onclick: () => openView(`notebook:${++notebookSeq}`) }, "+"));
+}
+
+// SQL tabs: click switches, double-click renames, drag reorders, × closes (a tab with
+// unsaved changes needs a second click: dialogs are blocked in the sandbox).
+function renderSqlTabs() {
+  tabsEl.replaceChildren(...ws.sqlTabs.map((t) => {
+    const key = sqlKey(t.id), label = sqlLabel(t), on = key === ws.current;
+    const name = ws.renaming === key
+      ? h("input", { class: "rename", value: t.title ?? "", placeholder: baseName(t.file) || `untitled ${t.n}`, "aria-label": "Tab title",
+          onkeydown: (e) => { if (e.key === "Enter") e.target.blur(); if (e.key === "Escape") { ws.renaming = null; renderTabs(); } },
+          onblur: (e) => { if (ws.renaming === key) renameSqlTab(key, e.target.value); } })
+      : h("button", { class: "name", title: `${t.path ?? t.file ?? label}\nDouble-click to rename · drag to move\n${SQL_TAB_KEYS}`,
+          onclick: () => { ws.closeArmed = null; openView(key); },
+          ondblclick: () => { ws.renaming = key; renderTabs(); } }, label, t.dirty ? h("span", { class: "dirty", title: "Unsaved changes" }, " ●") : null);
+    return h("div", { class: `ws-tab${on ? " on" : ""}`, role: "tab", "aria-selected": String(on), draggable: ws.renaming !== key ? "true" : "false",
+      dataset: { tab: t.id },
+      ondragstart: (e) => { ws.dragTab = t.id; e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", label); },
+      ondragover: (e) => { if (ws.dragTab && ws.dragTab !== t.id) { e.preventDefault(); e.currentTarget.classList.add("drop"); } },
+      ondragleave: (e) => e.currentTarget.classList.remove("drop"),
+      ondrop: (e) => { e.preventDefault(); e.currentTarget.classList.remove("drop"); moveSqlTab(ws.dragTab, t.id); },
+      ondragend: () => { ws.dragTab = null; } },
+      name,
+      ws.closeArmed === key
+        ? h("button", { class: "x armed", title: "Unsaved changes: click again to close without saving", onclick: () => closeSqlTab(key) }, "Discard ×")
+        : h("button", { class: "x", title: "Close this tab (an open .sql file stays as it was saved)", "aria-label": `Close ${label}`, onclick: () => closeSqlTab(key) }, "×"));
+  }), h("button", { class: "ws-tab-add", title: `New SQL tab (Ctrl+Alt+N)\n${SQL_TAB_KEYS}`, "aria-label": "New SQL tab", onclick: () => newSqlTab() }, "+"));
+  if (ws.renaming) tabsEl.querySelector(".rename")?.focus();
+  // Each editor keeps its tab's label (for the run history).
+  for (const t of ws.sqlTabs) {
+    const f = ws.frames[sqlKey(t.id)];
+    if (f && f.label !== sqlLabel(t)) { f.label = sqlLabel(t); deliver(sqlKey(t.id), { type: "s2-tab-label", label: f.label }); }
+  }
+}
+
+// The server's tab list replaces ours, except what open editors reported since (file, unsaved
+// changes: `live`); frames of tabs that are gone (closed in another window) go too.
+function setSqlTabs(tabs) {
+  ws.sqlTabs = tabs.map((t) => {
+    const live = ws.sqlTabs.find((x) => x.id === t.id)?.live;
+    return live ? { ...t, ...live, live } : t;
+  });
+  for (const key of Object.keys(ws.frames)) if (isSql(key) && tabIdOf(key) && !sqlTab(key) && key !== ws.current) dropFrame(key);
+}
+function dropFrame(key) {
+  const f = ws.frames[key];
+  setTimeout(() => f?.iframe?.remove(), 300);
+  mainEl.querySelector(`.ws-loading[data-view="${key}"]`)?.remove();
+  delete ws.frames[key]; delete ws.contexts[key];
+}
+async function loadSqlTabs(prefer) {
+  try {
+    const res = await S2.callTool("sql_editor_tabs", {});
+    setSqlTabs(res.tabs);
+    ws.lastSql = res.tabs.some((t) => t.id === prefer) ? prefer : res.active;
+  } catch (e) {
+    ws.sqlTabs = []; ws.lastSql = null;  // the editor then works on the active tab's draft, without a tab bar
+    S2.toast(`Couldn't load the SQL Editor's tabs: ${errText(e)}`, "err");
+  }
+  ws.startSqlKey = sqlKey(ws.lastSql);
+}
+// handoff: SQL or a file for the new tab, e.g. from Open when the current tab has text.
+async function newSqlTab(handoff) {
+  let res;
+  try { res = await S2.callTool("sql_editor_tab_new", { after: ws.lastSql }); }
+  catch (e) { S2.toast(`Couldn't open a new tab: ${errText(e)}`, "err"); return; }
+  setSqlTabs(res.tabs);
+  ws.closeArmed = null;
+  openView(sqlKey(res.tab.id), handoff);
+}
+async function closeSqlTab(key) {
+  const t = sqlTab(key);
+  if (!t) return;
+  if (t.dirty && ws.closeArmed !== key) { ws.closeArmed = key; renderTabs(); return; }
+  ws.closeArmed = null;
+  let res;
+  try { res = await S2.callTool("sql_editor_tab_close", { tab_id: t.id }); }
+  catch (e) { S2.toast(`Couldn't close the tab: ${errText(e)}`, "err"); return; }
+  send(key, { type: "s2-close" });  // the editor stops autosaving and its assistant
+  dropFrame(key);
+  const wasCurrent = ws.current === key;
+  if (ws.lastSql === t.id) ws.lastSql = res.active;
+  setSqlTabs(res.tabs);
+  if (wasCurrent) openView(sqlKey(res.active));
+  else renderTabs();
+}
+async function renameSqlTab(key, title) {
+  ws.renaming = null;
+  const t = sqlTab(key);
+  if (!t || (title.trim() || null) === (t.title ?? null)) { renderTabs(); return; }
+  try { setSqlTabs((await S2.callTool("sql_editor_tab_rename", { tab_id: t.id, title })).tabs); }
+  catch (e) { S2.toast(`Couldn't rename the tab: ${errText(e)}`, "err"); }
+  renderTabs(); pushContext();
+}
+async function moveSqlTab(id, beforeId) {
+  ws.dragTab = null;
+  const order = ws.sqlTabs.map((t) => t.id).filter((x) => x !== id);
+  if (!id || !order.includes(beforeId)) return;
+  order.splice(order.indexOf(beforeId), 0, id);
+  ws.sqlTabs = order.map((x) => ws.sqlTabs.find((t) => t.id === x));
+  renderTabs();
+  try { setSqlTabs((await S2.callTool("sql_editor_tab_reorder", { order })).tabs); renderTabs(); }
+  catch (e) { S2.toast(`Couldn't move the tab: ${errText(e)}`, "err"); }
+}
+// Open / Recent in an editor: switch to the tab that already has the file; else open it
+// in that editor when it's empty, or in a new tab.
+function openSqlFile(fromKey, msg) {
+  const norm = (p) => String(p).replace(/\//g, "\\").toLowerCase();
+  const hit = msg.path ? ws.sqlTabs.find((t) => t.path && norm(t.path) === norm(msg.path)) : null;
+  if (hit && sqlKey(hit.id) !== fromKey) { openView(sqlKey(hit.id)); return; }
+  const handoff = { type: "s2-open-file", path: msg.path ?? null, local: msg.local ?? null };
+  if (hit || msg.empty || !ws.sqlTabs.length) deliver(fromKey, handoff);
+  else newSqlTab(handoff);
+}
+// Shortcuts: Ctrl+Alt+N new tab; Ctrl+Tab / Ctrl+Shift+Tab next / previous (browsers often keep
+// those for themselves), also Ctrl+Alt+PageDown / PageUp.
+function tabKeyAction(e) {
+  if (e.ctrlKey && e.altKey && !e.shiftKey && e.key?.toLowerCase() === "n") return "new";
+  if (e.ctrlKey && !e.altKey && e.key === "Tab") return e.shiftKey ? "prev" : "next";
+  if (e.ctrlKey && e.altKey && (e.key === "PageDown" || e.key === "PageUp")) return e.key === "PageDown" ? "next" : "prev";
+  return null;
+}
+function sqlTabKey(action) {
+  if (action === "new") { newSqlTab(); return; }
+  const i = ws.sqlTabs.findIndex((t) => sqlKey(t.id) === ws.current);
+  if (i < 0 || ws.sqlTabs.length < 2) return;
+  const n = ws.sqlTabs.length;
+  openView(sqlKey(ws.sqlTabs[(i + (action === "next" ? 1 : n - 1)) % n].id));
 }
 function closeNotebook(key) {
   const t = ws.titles[key];
@@ -254,13 +424,25 @@ async function createFrame(view, handoff) {
   const loading = h("div", { class: "ws-loading", dataset: { view } }, h("span", {}, h("span", { class: "s2-spinner" }), ` Loading ${v.title}…`));
   mainEl.append(loading);
   const f = (ws.frames[view] = { iframe: null, pending: [], args: {}, result: null, ready: false });
-  if (view === "sql") {
-    f.args = { database: ws.args.database ?? null, sql: handoff?.sql ?? ws.args.sql ?? null };
-    f.result = ws.sqlResult;
-    if (handoff?.run) f.pending.push({ ...handoff, type: "s2-set-sql" });
+  if (isSql(view)) {
+    // The tab active at start gets the workspace's own result (with the SQL Claude sent);
+    // other tabs open like a plain sql_editor call. tab_id / tab_label tell the editor
+    // which tab's draft is its own (not sql_editor arguments: callArgs leaves them out).
+    const first = view === ws.startSqlKey && ws.sqlResult;
+    const t = sqlTab(view);
+    f.callArgs = { database: ws.args.database ?? null };
+    f.args = { ...f.callArgs, sql: first ? ws.args.sql ?? null : null, tab_id: t?.id ?? null, tab_label: t ? sqlLabel(t) : null };
+    f.label = f.args.tab_label;
+    if (first) { f.result = ws.sqlResult; ws.sqlResult = null; }
+    if (handoff) f.pending.push({ ...handoff, type: handoff.type === "s2-open-file" ? "s2-open-file" : "s2-set-sql" });
   } else if (isNotebook(view)) {
     f.args = { database: handoff?.database ?? ws.args.database ?? null, name: handoff?.name ?? null };
     ws.titles[view] = { title: "untitled", dirty: false };
+  } else if (view === "workload") {
+    // One statement (Query History's "Add to workload") or several (the SQL Editor's "→ Workload").
+    if (handoff?.sql || handoff?.statements) f.pending.push({ ...handoff, type: "s2-set-sql" });
+  } else if (view === "security") {
+    if (handoff?.tab) f.args = { tab: handoff.tab };
   } else if (view === "schema") {
     f.args = ws.args.table ? { database: ws.args.database, table: ws.args.table } : ws.args.database ? { database: ws.args.database } : {};
   }
@@ -312,7 +494,7 @@ async function openingResult(view) {
   const f = ws.frames[view];
   if (f.result) return f.result;
   try {
-    return await S2.app.callServerTool({ name: viewDef(view).tool, arguments: f.args });
+    return await S2.app.callServerTool({ name: viewDef(view).tool, arguments: f.callArgs ?? f.args });
   } catch (e) {
     return { isError: true, content: [{ type: "text", text: String(e?.message ?? e) }] };
   }
@@ -327,7 +509,20 @@ window.addEventListener("message", async (ev) => {
   if (msg?.type === "s2-open-view") { openView(msg.view, msg); return; }
   if (msg?.type === "s2-connection-changed") { connectionChanged(msg.name); return; }
   if (msg?.type === "s2-alerts-changed") { pollAlerts(); return; }
+  // A note for another view without switching to it (e.g. the SQL Editor's "Update in workload" tells an open
+  // Workload view); dropped when that view isn't open (it loads the saved state when it opens).
+  if (msg?.type === "s2-notify") { if (ws.frames[msg.view]) deliver(msg.view, msg.payload ?? {}); return; }
+  if (msg?.type === "s2-title" && isSql(view)) {
+    // An editor's open file and unsaved changes, for its tab.
+    const t = sqlTab(view);
+    if (t) { t.live = { file: msg.title || null, path: msg.path ?? null, dirty: Boolean(msg.dirty) }; Object.assign(t, t.live); }
+    if (ws.closeArmed === view && !t?.dirty) ws.closeArmed = null;
+    renderTabs(); pushContext();
+    return;
+  }
   if (msg?.type === "s2-title") { ws.titles[view] = { title: String(msg.title || "untitled"), dirty: Boolean(msg.dirty), path: msg.path }; renderTabs(); return; }
+  if (msg?.type === "s2-open-file" && isSql(view)) { openSqlFile(view, msg); return; }
+  if (msg?.type === "s2-tab-key" && isSql(view)) { sqlTabKey(msg.action); return; }
   if (msg?.jsonrpc !== "2.0" || !msg.method) return;
   const { id, method, params } = msg;
   try {
@@ -385,7 +580,8 @@ let ctxTimer = null;
 function pushContext() {
   clearTimeout(ctxTimer);
   ctxTimer = setTimeout(() => {
-    const label = (key) => `${viewDef(key)?.title ?? "?"}${isNotebook(key) ? ` "${ws.titles[key]?.title ?? "untitled"}"` : ""}`;
+    const label = (key) => `${viewDef(key)?.title ?? "?"}${isNotebook(key) ? ` "${ws.titles[key]?.title ?? "untitled"}"`
+      : sqlTab(key) ? ` tab "${sqlLabel(sqlTab(key))}"` : ""}`;
     const parts = [`SingleStore Workspace is open (active connection: ${ws.connection ?? "?"}); the user is on the ${label(ws.current)} view.`];
     for (const [view, text] of Object.entries(ws.contexts)) if (text) parts.push(`[${label(view)}]\n${text}`);
     S2.updateModelContext(parts.join("\n\n"));
@@ -398,7 +594,7 @@ S2.onDisplayModeChange = () => {};
 await S2.connect({
   name: "singlestore-workspace",
   onToolInput(args) { ws.args = args ?? {}; },
-  onToolResult(result) {
+  async onToolResult(result) {
     if (started) return;
     started = true;
     try {
@@ -406,6 +602,7 @@ await S2.connect({
       ws.sqlResult = result;
       ws.args = { ...ws.args, database: data.database ?? ws.args.database, sql: data.sql ?? ws.args.sql, table: data.table ?? ws.args.table };
       buildShell();
+      await loadSqlTabs(data.tab_id);  // sql_editor(new_tab=true) made that tab
       openView(viewDef(data.view) ? data.view : "sql");
       if (data.connection_error) S2.toast(`The active connection fails: ${data.connection_error.slice(0, 160)}`, "err");
     } catch (e) {

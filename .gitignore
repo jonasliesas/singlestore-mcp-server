@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 .env
 node_modules/
+tests/ui/_artifacts/
+perf/results/
+.pytest_cache/

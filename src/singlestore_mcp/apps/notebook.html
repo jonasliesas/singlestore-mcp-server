@@ -954,7 +954,7 @@ function codeBlock(code, lang) {
       state.active && type && state.active.type === type ? h("button", { class: "s2-btn ghost", title: "Replace the selected cell's code", onclick: () => {
         const c = state.active; c.view.dispatch({ changes: { from: 0, to: c.view.state.doc.length, insert: code } }); S2.toast("Cell replaced", "ok");
       } }, "Replace selected") : null,
-      h("button", { class: "s2-btn ghost", onclick: async () => { try { await navigator.clipboard.writeText(code); S2.toast("Copied", "ok"); } catch { S2.toast("Couldn't copy", "err"); } } }, "Copy")));
+      h("button", { class: "s2-btn ghost", onclick: () => S2.copy(code) }, "Copy")));
 }
 function messageBody(text) {
   const parts = [], re = /```([\w-]*)\n?([\s\S]*?)```/g;

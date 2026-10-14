@@ -99,7 +99,7 @@ async function open() {
     }
   });
 
-  frame = Object.assign(document.createElement("iframe"), { sandbox: "allow-scripts allow-downloads", srcdoc: html });
+  frame = Object.assign(document.createElement("iframe"), { sandbox: "allow-scripts allow-downloads", allow: "clipboard-write", srcdoc: html });
   // Heartbeat: a standalone workspace server shuts down once no page pings it.
   setInterval(() => fetch("ping").catch(() => {}), 30000);
   status.replaceWith(frame);

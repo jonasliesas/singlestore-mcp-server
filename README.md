@@ -137,8 +137,9 @@ left switches between its views:
 
 - Ask Claude ("open the SingleStore workspace"), or use `/singlestore-workspace`
   (optionally with a database and view, e.g. `/singlestore-workspace SASDP notebook`).
-- The tool behind it is `sql_editor(database?, sql?, view?, table?)`; `view`
-  is `sql`, `notebook`, `schema`, `pipelines` or `cluster`.
+- The tool behind it is `sql_editor(database?, sql?, view?, table?, new_tab?)`;
+  `view` is `sql`, `notebook`, `schema`, `pipelines` or `cluster`. `sql` goes
+  into the SQL Editor's active tab, or a new tab with `new_tab=true`.
 - Outside Claude: in your browser or as a desktop app, see
   [Browser and desktop window](#browser-and-desktop-window).
 
@@ -167,7 +168,13 @@ left switches between its views:
   right away; statements that change data or schema ask first.
 - Understands `CREATE PROCEDURE / FUNCTION … BEGIN … END` bodies, `DECLARE`
   sections and `DELIMITER //` scripts as one statement.
-- History of recent statements; results export to CSV.
+- **▶▶ Run all** (Ctrl+Shift+Enter) runs every statement in the editor in
+  order, split the same way as Ctrl+Enter. Statements that change data are
+  listed and confirmed once for the whole run. Each statement gets a tab with
+  its status, rows and time; the last result set is shown. Run all stops at
+  the first error unless **Continue on error** is ticked. `USE db` switches the
+  editor's database.
+- Results export to CSV.
 - **Chart** (next to *Table* above the results) charts any result: bar
   (grouped or stacked), line, area, scatter or pie. It picks X and Y for you
   (a date or text column on X, the numeric columns on Y); you can change them,
@@ -187,6 +194,69 @@ left switches between its views:
   asks first.
 - **Browse computer…** uses the browser's own file picker; **Download** saves
   through the browser (works in the browser window; Claude may block it).
+- **Recent** (next to Open) and the top of the Open panel list the last 10
+  `.sql` files you opened or saved; one click opens one. Files that no longer
+  exist are left out.
+
+**Tabs**
+
+- In the Workspace the editor has tabs, like the notebooks: **＋** (or
+  **New**, or **Ctrl+Alt+N**) opens one; each tab has its own text, database,
+  open file, cursor, results, *Continue on error* and Claude chat.
+- A tab is labelled with its file name or *untitled N*, with ● while it has
+  unsaved changes. Double-click a tab to give it your own title; drag it to
+  move it. **×** closes it; a tab with unsaved changes asks first (click
+  **Discard ×**). Closing the last tab leaves one empty tab.
+- **Ctrl+Tab** / **Ctrl+Shift+Tab** switch to the next / previous tab where the
+  browser lets the page have those keys; **Ctrl+Alt+PageDown** / **PageUp**
+  do the same. (Ctrl+T and Ctrl+W belong to the browser.)
+- **Open** and **Recent** open a file in a new tab when the current one has
+  text, and switch to the tab that already has the file open. **Save** and
+  **Save as** apply to the current tab.
+- SQL from Claude or other views goes into the active tab.
+
+**Autosave and history**
+
+- Each tab saves its text, database, cursor and open file a second after you
+  stop typing. The tabs come back in the same order, with the same active
+  tab, when the SQL Editor opens again, also after a restart or in the
+  browser window. Drafts are kept in `~/.singlestore-mcp/sql-editor/`
+  (`tabs.json` plus `drafts/<tab>.json`), never in your `.sql` file: an open
+  file shows **● modified** until you Save. If the file changed on disk
+  meanwhile, the editor says so and keeps your changes. (The single
+  `draft.json` from before tabs becomes the first tab once and is left in
+  place as a backup.)
+- SQL from Claude or other views (*Query in grid*, *Top 100*) is added below
+  the active tab's text and selected, never replacing it.
+- **History** lists the last 500 statements you ran in the editor (all tabs),
+  with time, database, the tab or file it ran from, duration, rows and
+  ok/error, also after a restart. Filter it, **Insert** a statement at the
+  cursor or **Run** it again in its database; **Clear…** empties it.
+
+**→ Workload**
+
+- **→ Workload** in the toolbar sends the selection, else the statement at the
+  cursor (or, by choice, every statement in the tab) to a test workload: pick
+  an existing workload or **New workload…** (give it a name) and the runs per
+  minute (default 60). The tab's database goes with it. A `-- name: …` or
+  `-- per_minute: N` line right above a statement names it or sets its rate.
+- In the Workspace the Workload view opens with the statements added but not
+  saved, so you review them and **Save**; outside the Workspace the Workload app
+  opens in your browser with them. Claude's answers in the chat panel have a
+  **→ Workload** button on each SQL block too.
+- A tab opened from the Workload view (**Open in SQL Editor**) has an **Update
+  in workload** button; see [Workload](#schema-explorer-pipeline-monitor-cluster-monitor-query-grid).
+
+**Building SELECTs**
+
+- In the schema tree, **SELECT columns** on a table inserts a SELECT listing
+  every column.
+- Expand a table to tick columns (Shift+click for a range, **All** / **None**)
+  and click **Insert SELECT** for just those, in table order.
+- With the cursor on the `*` of `SELECT *` (or `t.*`), **Ctrl+Space → Expand \***
+  replaces it with the column list, qualified by alias when the query joins
+  several tables.
+- Nothing runs automatically.
 
 **Chat with Claude**
 
@@ -382,16 +452,64 @@ the exact `jwks_endpoint`, `jwks_username_field` and user the cluster needs.
 
 | App (tool) | What it shows and does |
 |---|---|
-| **Schema Explorer** `schema_explorer(database?, table?)` | Databases → tables with row counts and sizes; per table the columns, DDL (shard / sort keys) and a row preview. **Ask Claude** and **Query in grid**. |
+| **Schema Explorer** `schema_explorer(database?, table?)` | Databases (with a bottomless / local icon) → tables with row counts and sizes; per table the columns, DDL (shard / sort keys) and a row preview. **Ask Claude**, **Query in grid** and **Analyze…** (refresh statistics, with confirmation). |
 | **Pipeline Monitor** `pipeline_monitor(database?)` | Every pipeline's state, source → table, progress (files loaded / Kafka lag), latest batches and errors. Start / Stop (with confirmation), Test, error details, **Ask Claude**, auto-refresh. |
-| **Cluster Monitor** `cluster_monitor()` | Per node SingleStore CPU (against its core limit), memory and disk with a 15-minute CPU chart (all / aggregators / leaves), plus the queries running now. Refreshes every 5 s. |
+| **Cluster Monitor** `cluster_monitor()` | Tabs **Overview** (per node SingleStore CPU against its core limit, memory and disk, beside a 15-minute CPU chart), **Queries** (running now, plus every statement that ran in the last 60 s), **Disk**, **Bottomless** and **IO**. Refreshes every 5 s. |
+| **Security** `security(tab?)` | Read-only: users with risk flags, effective privileges with the reason for each, "who can access …", resource pools and the workload manager queue. See [Security](#security). |
+| **Config** `cluster_config(search?, changed_only?)` | Every engine variable per node, with the documented default; filter on changed from default / differs between nodes. See [Config](#config). |
 | **Clean up** `cleanup_work_tables()` | Finds the work tables SAS jobs leave behind (`_dm…` Data Management, `_flw…` flow, `SASTMP…` / `_tmp…` temp tables) in every non-system database: rows, size, created, created by, age, last use and dependent views. Select tables, confirm, and they're dropped one at a time, with a dry-run mode and a log. The **🧹 Clean up** button in the Schema Explorer's header. |
-| **Query History** `query_history(min_seconds=1, hours?, tab?)` | Every finished query the cluster traced: when, how long, user, database, rows, success / error, and a probable **Source** (SAS CAS, SAS in-database). Filter on runtime (1 s and up), period, user, database, status, type, source and text; sort by time, duration or rows. Select a query for its full SQL and **Get tuning recommendations**. Tabs **Queries**, **Trends** and **Advisor**. Its own **History** item in the workspace rail. |
+| **Query History** `query_history(min_seconds=1, hours?, tab?)` | Every finished query the cluster traced: when, how long, user, database, rows, success / error, and a probable **Source** (SAS CAS, SAS in-database). Filter on runtime (1 s and up), period, user, database, status, type, source and text; sort by time, duration or rows. Repeated statements are grouped; statements only in the plan cache can be added. Select a query for its full SQL and **Get tuning recommendations** (plan tree, statistics, SAS EP card). Tabs **Queries**, **Trends**, **Usage** and **Advisor**. Its own **History** item in the workspace rail. |
 | **Alerts** `alerts()` | Alerts the server raises while it watches the cluster in the background: queries running too long, slow or failed queries, failed pipeline batches and pipeline errors, node memory and disk over a threshold, nodes not online. Edit the rules, acknowledge, clear. Its own **Alerts** item in the workspace rail, with a red badge counting the unacknowledged alerts. |
+| **Workload** `workload(name?)` | Saved sets of SQL statements, each with how often it runs, replayed against the cluster with N connections for a set time; live throughput and latency, then compare two runs statement by statement (e.g. before and after a new sort key or index). Its own **Workload** item in the workspace rail. |
 | **Query Grid** `query_grid(sql, database?, max_rows=1000)` | Read-only results as a sortable, filterable grid with CSV export; the SQL can be edited and re-run. Writes are refused. |
 
 `TEST PIPELINE` loads no data, but a failed test is still recorded in the
 pipeline's batch history and error log.
+
+**Schema Explorer: bottomless and Analyze**
+
+- Each database shows a cloud icon if it is bottomless (unlimited storage) or
+  a disk icon if it is local-only. Hover for where its data lives: for
+  bottomless databases the provider and remote bucket/directory
+  (`MV_BOTTOMLESS_DATABASES`, `MV_BOTTOMLESS_STATUS`), otherwise the data
+  directory on each node.
+- **Analyze…** on a table and **Analyze all tables…** on a database refresh
+  optimizer statistics with `ANALYZE TABLE`. First a read-only plan lists each
+  table's statistics from `OPTIMIZER_STATISTICS`: when they were last updated,
+  outdated or missing columns, histograms, and row-count drift. It marks stale
+  tables and shows the exact statements. After you confirm (it changes the
+  shared cluster), tables run one at a time with progress and Stop, and each
+  gets its own result. ANALYZE reads the table and invalidates cached plans
+  built on stale statistics. Backend: `schema_explorer_analyze_plan` and
+  `schema_explorer_analyze(confirm=True)`, at most 10 tables per call.
+
+**Cluster Monitor tabs**
+
+- **Overview**: the CPU chart beside the node cards (CPU, memory, disk). The
+  chart's height follows its width, so it stays readable in a wide window.
+- **Queries**: *Running now* from the process list, and *Ran in the last 60 s*
+  from the aggregators' plan caches, which also shows the many short
+  statements that finish between two refreshes (constants shown as `^` / `@`;
+  run counts are since the plan was compiled). A **Queued** badge opens the
+  resource pools in the [Security](#security) view.
+- **Disk**: per mount total, used and free with a SingleStore / other / free
+  split; nodes on one shared file system are grouped and their figures are
+  for the whole mount. Per node, SingleStore's own files by type (columnstore
+  data, transaction logs, rowstore snapshots, temporary blobs, plan cache,
+  trace and audit logs, system files), the blob cache against its limit, query
+  spilling, and the largest databases and columnstore tables. Directory sizes
+  are measured at most once a minute (**Measure again** forces it).
+- **Bottomless**: traffic to and from object storage per node and per
+  database: upload, fetch and evict MB/s (from counter deltas), totals, GET/PUT
+  rates, upload lag, pending and failed requests, rate limiting, the engine's
+  own rates and recent blob cache events. **Measure remote storage** reads
+  `MV_BOTTOMLESS_REMOTE_STATS` on demand, because it queries the object store.
+- **IO**: session charts of disk read/write MB/s per node and blob cache
+  fetched/evicted/uploaded MB/s, current throughput (IOPS where the device
+  reports them), and the cached plans that waited most on the blob cache.
+  SingleStore 9.0 has no blob cache hit counter, so no hit ratio is shown.
+
+The extra tabs only query the cluster while they are open.
 
 **Clean up** lives in the Schema Explorer (the **🧹 Clean up** button in its
 header, or ask Claude to "clean up the SAS work tables"). It scans all
@@ -439,6 +557,100 @@ combine:
   nested-loop joins, filtered scans of tables without a sort key;
 - the tables' shard and sort keys.
 
+The header shows what the history records, e.g. **Tracing queries ≥ 1 s +
+failures**. Click it for the `Query_completion` event trace settings per node
+(threshold, query text, failed queries, enhanced stats, memory, events traced
+and unconsumed), read from `MV_TRACE_EVENTS_STATUS`. It's read-only: changing
+the trace needs `ALTER EVENT TRACE`.
+
+**Group repeated statements** (on by default) merges runs of the same
+statement (same text once literal values are replaced, same database) into
+one row with count, average, p95, max, last run and users; open it to see and
+select the individual runs.
+
+**Plan cache.** The trace keeps only runs over its threshold; the plan cache
+keeps every statement's totals since its plan was compiled. Each refresh
+copies the aggregators' plans into `query_history.db` (so they survive
+eviction and restarts). Traced statements show their plan-cache totals (all
+executions, average time, memory, spilling, blob cache), and **Plan cache
+statements** (a checkbox, off by default) adds the statements the trace never
+kept, labelled as aggregates.
+
+**Plan view.** Tuning shows the plan as a tree (from `EXPLAIN JSON`, which is
+never cut short): one box per operator with estimated rows, filters and keys,
+and the expensive parts marked: broadcasts, reshuffles, large hash builds,
+nested-loop joins on large inputs, filtered full scans of tables without a
+sort key, large gathers. **Profile (runs it)**, for read-only SELECT / WITH
+only and after a confirmation, runs the query once more with `PROFILE` and
+shows actual rows, time, memory, spills and segments skipped per operator;
+it's cancelled after 5 minutes. Raw EXPLAIN / JSON / profile JSON are one
+click away.
+
+**Statistics.** In tuning, **Check statistics…** shows the statistics age and
+staleness of the tables the query reads, with the exact `ANALYZE TABLE`
+statements (via the Schema Explorer); **Analyze table(s)** runs them after a
+confirmation.
+
+**`SELECT *`** is flagged only when it costs something: not for SAS Embedded
+Process calls, metadata probes (`WHERE 0=1`, `LIMIT 0`), SAS work tables,
+`SELECT * FROM (SELECT cols…)`, or tables with one or two columns.
+
+**SAS EP calls.** For SAS Embedded Process calls (`sasepFunction(…)`), tuning
+shows a SAS EP card instead of generic advice. The call is an external
+function, so `EXPLAIN` shows nothing inside it, and the plan cache doesn't
+count the time spent in the EP. The work happens in the statement the EP
+generates (`CREATE TABLE … AS SELECT … FROM <input> JOIN <per-job EP
+function>`), which runs on the leaves partition by partition. The card shows:
+
+- the input table's **skew**: rows and size per partition, largest / average,
+  and the time lost waiting for the largest;
+- **partitions vs leaf cores**, using the container's CPU limit;
+- **how much data goes into the EP**: rows, bytes and columns, whether a filter
+  is applied before the EP, and whether the input's sort key lets that filter
+  skip segments;
+- **disk / blob-cache waits, memory, spilling and queueing** from the plan
+  cache;
+- the job's **runtime over time** as a sparkline.
+
+Each point is judged Fine / Worth a look / Problem, with a next step such as
+resharding the input, a filter before the EP call, or a sort key. EP calls are
+never profiled, since that would run the SAS job again, and the password SAS
+puts into the call is masked as `***` wherever the SQL is shown (Copy SQL
+still copies the original).
+
+**SAS VA / CAS EP queries.** SAS Visual Analytics and CAS queries that join
+with per-job EP format functions (`… FROM (SELECT * FROM db.t) AS t JOIN
+EP.h…_EP(cols) AS ep`) are labelled SAS EP and get the SAS EP card too, marked
+*VA / CAS format function*. The function's name changes every run, so the
+history matches runs by the statement with that name left out. The card shows:
+
+- for CAS parallel loads (one statement per partition, `WHERE partition_id() =
+  N`), each partition's runtime in that load, which shows skew directly;
+- the input table's skew and partitions vs leaf cores;
+- how much data reaches the EP: rows, bytes and the columns passed to the
+  function (a `SELECT *` in the derived table costs little, since only those
+  columns are read), and whether a filter applies before the EP and can skip
+  segments through the sort key;
+- plan-cache waits, memory, spilling and queueing when the plan is still known
+  (each run is a new, short-lived plan, so it often isn't);
+- the statement's runtime over time;
+- how this run compares with every other EP call. On clusters where most EP
+  calls take the same few seconds whatever they read, that's a fixed wait on
+  the EP side, and the card says so.
+
+**Usage tab.** Ranks tables and users over 24 h, 7, 30 or 90 days, or
+everything stored.
+
+- *Most used tables*: executions and time from the plan cache (every run of
+  every statement naming the table, however short, copied locally on each
+  refresh and sampled every 10 minutes), next to traced runs from the query
+  history, with distinct statements, last use, users and source. Table names
+  are read from the SQL (FROM / JOIN / INTO / UPDATE, `db.table` or resolved
+  against the statement's database). Click a table to list its statements.
+- *Most active users*: queries, total and average time, longest, failures,
+  databases, distinct statements and last activity, from the traced runs (the
+  plan cache records no user). Click a user to see their queries.
+
 **Ask Claude** answers right in the panel: like the SQL Editor's assistant,
 Claude Code runs in the background with read-only database access, gets the
 query, the findings, the plan and the table definitions, and can check things
@@ -474,10 +686,11 @@ The Queries tab guesses where a statement came from, from its SQL:
   (SAS SpeedyStore / CAS loading or pushing down through the cluster);
 - **SAS in-database**: reads or writes tables named `_dm…`, `_flw…` or
   `SASTMP…` (SAS work tables created in the database);
+- **SAS EP**: calls the SAS Embedded Process (`sasepFunction(…)`, `EP.sasep…`);
 - empty otherwise.
 
 It's a heuristic, shown as "probably" in the detail panel, and a filter
-(**Source**: All / SAS CAS / SAS in-database / Other).
+(**Source**: All / SAS CAS / SAS in-database / SAS EP / Other).
 
 **Trends**
 
@@ -580,9 +793,116 @@ alerts, after you allow notifications in the browser (it asks on your next
 click in the workspace). That works in the browser and the desktop window; in
 the Claude app the badge is the signal.
 
+**Workload**
+
+A *workload* is a name, a default database, settings and a list of SQL
+statements, each with how often it runs a minute (or, with pacing "as fast as
+possible", a relative weight). Define one by hand, take the heaviest read-only
+queries of the last 24 hours with **From history**, or send a single query
+over from the Query History panel's **Add to workload** button. Statements
+may use placeholders filled in per execution: `{{int:1:1000}}`,
+`{{float:0:1}}`, `{{pick:a|b|c}}`, `{{date:2024-01-01:2024-12-31}}` (quote
+strings yourself, e.g. `'{{pick:US|EU}}'`).
+
+Settings: **connections** (parallel workers, each its own connection, opened
+once so connecting isn't measured), **duration**, a per-statement **timeout**
+(the statement is cancelled with `KILL QUERY` after it), **arrivals** (evenly
+spaced, or random/Poisson for bursts like real users at the same average
+rate), **read all rows** (off measures just the execute time, not the cost of
+reading the result back), **allow writes** (off by default — statements other
+than `SELECT` / `WITH` run repeatedly, so point them at a test table) and
+**trace every query during the run** (needs the `ALTER EVENT TRACE`
+permission; temporarily sets the cluster's `Query_completion` trace to
+`Duration_threshold_ms = 0` so every execution lands in Query History, then
+restores the previous setting — tracing costs cluster performance, so compare
+traced runs only with traced runs).
+
+Only one workload runs at a time. While it runs, the view shows live KPIs
+(executions, per second, p50 / p95 / p99, errors, skipped releases when the
+cluster — or the connection count — can't keep up with the rate) and
+per-second throughput and latency charts; **Stop** cancels the statements
+running now. Every statement is tagged `/* workload:<name> stmt:<id> */`, so
+finished executions show up in Query History with the source "Workload:
+\<name>", and the tag is stable across runs so query plans are reused.
+
+**Saved runs** lists every past run of the selected workload; **Compare**
+picks two finished runs (e.g. a baseline and one after a new sort key, shard
+key or index) and shows, per statement, p50 / p95 before and after with the
+percent change, throughput, errors, and whether the SQL or the row counts
+changed between the runs — changes of 5% or more are coloured, smaller
+differences are usually noise. **Tune** on a statement reuses the same
+EXPLAIN and table-design recommendations as Query History's tuning panel.
+
+*Claude in Workload.* The **Claude** button opens a chat panel on the right,
+like the SQL Editor's: the [in-app assistant](#claude-in-the-apps) answers
+(or, as there, the Claude chat). Each question carries the selected workload
+(settings and every statement), the shown run's per-statement p50 / p95 /
+errors / rows, and the definitions of the tables the statements read (keys,
+row counts, distinct values per column). Ask for variants of a statement,
+realistic parameter spread with the placeholders, heavier or lighter versions
+or a realistic mix of rates; Claude may query the database read-only to find
+real values, never runs writes, and puts each statement in its own SQL block,
+optionally with `-- name:` and `-- per_minute:` lines. Every block has **Add to
+workload** (a new statement, 60 a minute unless the block says otherwise),
+**Replace statement N** (pick which; the last statement you clicked by
+default), **Test** (runs it once, read-only, and shows rows and time) and
+**Copy**. Changes are unsaved until **Save** / **Save and run**. Each workload
+has its own conversation while the page is open.
+
+*From and to the SQL Editor.* The SQL Editor's **→ Workload** adds statements
+to a workload (see [SQL Editor](#sql-editor)). The other way, **Open in SQL
+Editor** on a statement opens it in a new editor tab, in the statement's
+database. That tab remembers the workload and statement (in its autosaved
+draft, so also after a restart) and shows **Update in workload**, which writes
+the tab's SQL (the selection, else the whole tab when it holds one statement,
+else the statement at the cursor) back to the statement **and saves the
+workload**; an open Workload view shows the new SQL right away and keeps its
+own unsaved changes. If the workload or statement is gone (deleted, renamed,
+or the statement was never saved), the tab says so and offers **→ Workload
+instead**. Query History's **Add to workload** works as before.
+
+Workloads and their runs are saved in `~/.singlestore-mcp/workloads/`
+(`workloads.json`, and one JSON file per run under `runs/`). The model-visible
+tools `workload_define`, `workload_run`, `workload_status`, `workload_stop`,
+`workload_list` and `workload_compare` work the same way without opening the
+app, so Claude can define, run, watch and compare a workload from the chat.
+
+### Security
+
+A read-only view of who can do what. Nothing is changed from here: where a
+change would help, the view shows the SQL to copy and run yourself.
+
+- **Users**: every user with type, lock status, password age and expiry,
+  default resource pool, groups, connections and flags (ALL / SUPER on `*.*`,
+  grant option, host `'%'`, password never expires, locked, unused, i.e. no
+  traced query in the local Query History store for N days). Click a user for
+  their effective privileges with the reason for each (direct, or via role ←
+  group) and `SHOW GRANTS` (password hash hidden).
+- **Roles & groups**: the user → group → role → privileges chain and **Who can
+  access …** for a database or table.
+- **Resource pools**: limits, live running and queued queries per pool, the
+  workload manager queue with the limit each query waits for, and who uses
+  which pool.
+
+Without admin rights it shows only your own groups, roles and grants. Ask
+Claude "who can access database EP?", "what can user Hans do?" or "why are
+queries queued?" (tools `security`, `who_can_access`, `user_privileges`,
+`resource_pool_status`).
+
+### Config
+
+Every engine variable with its value on each node. Search, filter by "changed
+from default", "differs between nodes", category, sync / non-sync and runtime
+vs startup only, and export as CSV. Click a variable for its description, docs
+link and the `SET GLOBAL` statement to copy (never run). Defaults and
+descriptions come from the SingleStore docs for your version, downloaded once
+and kept in `~/.singlestore-mcp` for 7 days; without internet access defaults
+show as unknown. Ask Claude "which settings are changed from default?" (tool
+`cluster_config`).
+
 ### Claude in the apps
 
-The chat panels in the SQL Editor and the Notebook are answered by the
+The chat panels in the SQL Editor, the Notebook and Workload are answered by the
 server itself, by running Claude Code headless with your own Claude login:
 no API key, no Send click in the chat, and it also works in the browser and
 desktop window.
@@ -1050,3 +1370,83 @@ create_pipeline(create_pipeline_sql="""
 start_pipeline(pipeline_name="orders_pipeline")
 pipeline_status(pipeline_name="orders_pipeline")
 ```
+
+## Testing
+
+The test suite lives in `tests/` (pytest + Playwright); a performance report lives in `perf/`.
+
+**Prerequisites**
+
+- The dev dependencies in `.venv` (`uv sync --group dev` when no server is running from this checkout).
+- **VPN / cluster access** for the `cluster` tests. The test server reads the cluster credentials from the
+  `singlestore` entry in `~/.claude.json` (its `env`). If the cluster can't be reached, those tests are
+  skipped and the offline tests still run.
+- **Microsoft Edge** for the `ui` tests. Playwright drives the installed Edge (`channel="msedge"`), so no
+  `playwright install` is needed. Set `S2_TEST_BROWSER_CHANNEL=chrome` (or `chromium` for Playwright's
+  bundled browser) to use another browser.
+- `node` on PATH for the JavaScript syntax checks (they are skipped without it).
+
+**Running**
+
+```powershell
+.venv\Scripts\python.exe -m pytest -m "not cluster and not ui"   # offline subset (no VPN): lint, JS syntax, protocol, workload unit tests
+.venv\Scripts\python.exe -m pytest                               # everything except the assistants (~4-5 min)
+.venv\Scripts\python.exe -m pytest --assistants                  # also ask the in-app Claude assistants (uses Claude)
+.venv\Scripts\python.exe -m pytest tests\test_workload.py        # one file
+.venv\Scripts\python.exe -m pytest -k "sql_editor or copy"       # by name
+.venv\Scripts\python.exe -m pytest tests\ui --headed              # watch the browser tests
+```
+
+Use the venv's Python directly, or `uv run --no-sync`. A plain `uv run` tries to sync, and that fails
+while Claude has the server's .exe open.
+
+**Markers**
+
+| Marker | Meaning |
+|---|---|
+| `cluster` | Needs the SingleStore cluster. Skipped when `list_databases` fails. |
+| `notebook` | Starts a notebook kernel (slow). |
+| `sas` | Needs a signed-in SAS Viya. Skipped when `sas_viya_test` fails (see below). |
+| `assistants` | Asks the in-app Claude assistants. Runs only with `--assistants`. |
+| `ui` | Drives the apps in a browser with Playwright. Also needs the cluster. |
+
+**Files**
+
+- `test_static.py`: ruff, `node --check` of every inline app script and the apps' JS, and the browser-view
+  allowlist check. Every tool an app calls must be an app tool or listed in `_EXTRA_TOOLS`.
+- `test_protocol.py`: tools, `ui://` resources and prompts, plus the browser view's origin check and allowlist.
+- `test_tools.py`: model-visible tools, including Claude's 50,000-character result limit; app-only tools;
+  error handling and safety guards; local writes.
+- `test_workload.py`: placeholders, validation and run comparison (offline), and a real 20 s run (cluster).
+- `test_notebook.py`, `test_compare.py`, `test_assistants.py`, and `ui/test_apps.py` (Workspace views,
+  SQL Editor, Query History, Workload, every standalone app). When a UI test fails, a screenshot is saved
+  in `tests/ui/_artifacts/`.
+
+**Isolated test home**
+
+The suite starts one server (`python -m singlestore_mcp.server`, over stdio, through the restart
+supervisor) with its own `SINGLESTORE_MCP_HOME` in pytest's temp folder. It does not use
+`~/.singlestore-mcp`.
+
+- These files are copied in from `~/.singlestore-mcp` when present: `sas.json`, `query_history.db` and
+  `singlestore_bundle.pem`.
+- `notebook-env` is linked in through a directory junction. At the end, only the junction is removed,
+  never its target.
+- `connections.json` is not copied. The server uses the built-in "Environment variables" connection.
+- SQL and notebook files go to a temporary `SINGLESTORE_MCP_SQL_DIR`.
+- Background alerts are off (`SINGLESTORE_MCP_ALERTS=0`).
+
+The tests are read-only on the cluster. Write statements are sent only to check that they are refused or
+need confirmation, and are never confirmed. Scratch names start with `zz`. The SAS Viya sign-in lives in
+an encrypted secrets file that is not copied, so the `sas` tests are skipped by default. Set
+`S2_TEST_SAS_SECRETS=1` to copy it too. The test server may then refresh the token in its copy only.
+
+**Performance**
+
+```powershell
+.venv\Scripts\python.exe perf\perf.py            # ~6 min: cold start, latency p50/p95, concurrency, large results, 60 s soak, memory
+.venv\Scripts\python.exe perf\perf.py --quick    # ~2 min
+```
+
+Results are written to `perf/results/<version>-<timestamp>.json` (gitignored). Each run is compared with
+the previous results file, and p50/p95 changes over 25% are printed as warnings (never a failure).

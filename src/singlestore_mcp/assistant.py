@@ -1,4 +1,4 @@
-"""In-app Claude for the SQL Editor's chat panel, via headless Claude Code.
+"""In-app Claude for the chat panels (SQL Editor, Notebook, Workload), via headless Claude Code.
 
 The SQL Editor can answer questions without going through the Claude chat:
 this module keeps one Claude Code process per editor running in print mode
@@ -31,9 +31,10 @@ import time
 import uuid
 from collections import deque
 from pathlib import Path
+from typing import Any, Callable
+
 from . import connections as _connections
 from .paths import data_dir
-from typing import Any, Callable
 
 READONLY_SERVER = "singlestore_ro"
 SKILL_FILE = Path(__file__).parent / "skills" / "singlestore-sql" / "SKILL.md"
@@ -159,8 +160,35 @@ for DLPy) and sasctl_session() a sasctl session, all signed in with the user's \
 Viya sign-in; sas_to_df / df_to_sas exist only for small, local results."""
 
 
+_WORKLOAD_PROMPT = """\
+You are the assistant inside the Workload app of a SingleStore MCP server. A \
+workload is a set of SQL statements, each run N times a minute (per_minute) \
+by a load tester, to measure latency and throughput before and after a tuning \
+change. Each question comes with the workload (settings, every statement), the \
+last run's per-statement results and the definitions of the tables it reads. \
+You help build realistic test workloads: variants of statements, realistic \
+parameter spread, heavier and lighter variants, realistic mixes of rates.
+- Statements may use placeholders, filled in per execution: {{int:a:b}}, \
+{{float:a:b}}, {{pick:a|b|c}}, {{date:YYYY-MM-DD:YYYY-MM-DD}}. Values go in as \
+written, so quote strings yourself: WHERE Origin = '{{pick:Asia|Europe|USA}}'.
+- Use real values: check columns, value ranges (MIN/MAX) and distinct values \
+with read_query (read-only; aggregates and LIMIT, tables can be large) so \
+placeholders hit real data.
+- Put each proposed statement in its own ```sql block (fence tag exactly \
+`sql`), one statement per block, optionally starting with a line \
+`-- name: <short name>` and a line `-- per_minute: <N>`. Each block gets \
+"Add to workload", "Replace statement N", "Test" and "Copy" buttons. Write \
+SQL keywords in UPPERCASE.
+- Workloads are read-only (SELECT / WITH) unless the workload allows writes. \
+You never run writes; don't propose writes unless the user asks, and then \
+point them at a test table.
+- Keep the prose short: a few sentences or "- " bullets. The panel only \
+renders plain text, **bold**, `inline code` and ```sql blocks, so never use \
+Markdown tables or headings. Database and table names are case-sensitive."""
+
+
 def _system_prompt(kind: str = "sql_editor") -> str:
-    base = _NOTEBOOK_PROMPT if kind == "notebook" else _SYSTEM_PROMPT
+    base = {"notebook": _NOTEBOOK_PROMPT, "workload": _WORKLOAD_PROMPT}.get(kind, _SYSTEM_PROMPT)
     # The SingleStore skill (key learnings) rides along with every question.
     try:
         skill = SKILL_FILE.read_text(encoding="utf-8").split("---", 2)[-1].strip()

@@ -11,6 +11,8 @@ S2.app = null;
 function showPageError(err) {
   const msg = String(err?.stack || err?.message || err || "Unknown error");
   if (/ProtocolError|Method not found/.test(msg) && !S2.app) return;
+  // Browsers report a resize that changes layout within the same frame this way; harmless, nothing broke.
+  if (/^ResizeObserver loop/.test(msg)) return;
   let box = document.getElementById("s2-page-error");
   if (!box) {
     box = document.createElement("div");
@@ -134,20 +136,36 @@ S2.fullscreenButton = function () {
   }, full ? "⤡ Exit full screen" : "⤢ Full screen");
 };
 
+// The Clipboard API is often refused inside sandboxed app frames (the host has to delegate
+// clipboard-write to every frame level), so fall back to selecting the text and execCommand("copy").
 async function copyText(text, input) {
   try {
     await navigator.clipboard.writeText(text);
     return true;
   } catch {
+    const temp = !input;
     try {
+      if (temp) {
+        input = Object.assign(document.createElement("textarea"), { value: text, readOnly: true });
+        input.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0";
+        document.body.append(input);
+      }
       input.focus();
       input.select();
       return document.execCommand("copy");
     } catch {
       return false;
+    } finally {
+      if (temp) input?.remove();
     }
   }
 }
+
+// Copy text and say whether it worked.
+S2.copy = async function (text, what = "Copied") {
+  if (await copyText(text)) S2.toast(what, "ok");
+  else S2.toast("Couldn't copy: select the text and press Ctrl+C", "err");
+};
 
 // Shown when the host won't open links: the URL stays on screen until closed.
 function showLinkPanel(url) {
@@ -249,9 +267,13 @@ S2.download = async function (filename, text, mimeType = "text/plain") {
 // Tiny DOM builder: S2.h("button", {class: "s2-btn", onclick}, "Label")
 S2.h = function (tag, props, ...children) {
   const el = document.createElement(tag);
+  let initialValue;
   for (const [key, value] of Object.entries(props ?? {})) {
     if (value == null || value === false) continue;
-    if (key.startsWith("on") && typeof value === "function") el.addEventListener(key.slice(2), value);
+    // value is a property, set after the children: a <textarea> ignores a value attribute, and a <select>
+    // can only take a value once its options are there.
+    if (key === "value") initialValue = value;
+    else if (key.startsWith("on") && typeof value === "function") el.addEventListener(key.slice(2), value);
     else if (key === "class") el.className = value;
     else if (key === "style" && typeof value === "object") Object.assign(el.style, value);
     else if (key === "dataset") Object.assign(el.dataset, value);
@@ -262,6 +284,7 @@ S2.h = function (tag, props, ...children) {
     if (child == null || child === false) continue;
     el.append(child instanceof Node ? child : document.createTextNode(String(child)));
   }
+  if (initialValue !== undefined) el.value = initialValue;
   return el;
 };
 

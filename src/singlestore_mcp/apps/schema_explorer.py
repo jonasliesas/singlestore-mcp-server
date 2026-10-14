@@ -17,7 +17,10 @@ and drops leftover SAS work tables; its logic is in ``..housekeeping``.
 
 from __future__ import annotations
 
+import datetime
+import json
 import re
+import time
 from typing import Any
 
 from mcp.types import CallToolResult, ToolAnnotations
@@ -63,8 +66,60 @@ def _num(v: Any) -> float | int | None:
 # --------------------------------------------------------------------------
 
 
+_SECRET_KEY = re.compile(r"key|secret|token|password|credential|sas|signature", re.IGNORECASE)
+
+
+def _safe_config(raw: Any) -> Any:
+    """The database's storage config without anything that looks like a credential."""
+    if raw in (None, ""):
+        return None
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return None  # not JSON: don't show raw text that might hold a secret
+    if isinstance(value, dict):
+        return {k: v for k, v in value.items() if not _SECRET_KEY.search(str(k))}
+    return None
+
+
+def _storage_info() -> tuple[dict[str, dict[str, Any]], str | None, str | None]:
+    """Which databases are bottomless (unlimited storage), with their remote location; plus the data directory.
+
+    MV_BOTTOMLESS_DATABASES lists the attached bottomless databases (STORAGE_TYPE = S3 / Azure / GCP,
+    STORAGE_CONFIG as given at CREATE DATABASE); MV_BOTTOMLESS_STATUS has each one's BUCKET and
+    STORAGE_DIRECTORY. Every other database keeps all its data on the nodes' local disks.
+    """
+    try:
+        dbs, where, datadir = db.parallel(
+            lambda: _query("SELECT DATABASE_NAME, STORAGE_TYPE, STORAGE_CONFIG, IS_DETACHED, RETENTION_PERIOD_MINUTES,"
+                           " CREATED_TIME FROM information_schema.MV_BOTTOMLESS_DATABASES"),
+            lambda: _query("SELECT DATABASE_NAME, MIN(BUCKET) AS bucket, MIN(STORAGE_DIRECTORY) AS directory"
+                           " FROM information_schema.MV_BOTTOMLESS_STATUS GROUP BY DATABASE_NAME"),
+            lambda: _query("SELECT @@datadir AS d"),
+        )
+    except Exception as exc:  # noqa: BLE001 - optional detail (e.g. no permission on the MV_ views)
+        return {}, None, str(exc)
+    paths = {r["DATABASE_NAME"]: r for r in where}
+    out = {}
+    for r in dbs:
+        w = paths.get(r["DATABASE_NAME"], {})
+        bucket, directory = w.get("bucket"), w.get("directory")
+        out[r["DATABASE_NAME"]] = {
+            "kind": "bottomless",
+            "provider": r["STORAGE_TYPE"],
+            "bucket": bucket,
+            "directory": directory,
+            "remote_path": "/".join(x.strip("/") for x in (bucket, directory) if x) or None,
+            "config": _safe_config(r["STORAGE_CONFIG"]),
+            "detached": r["IS_DETACHED"],
+            "retention_minutes": r["RETENTION_PERIOD_MINUTES"],
+            "created": r["CREATED_TIME"],
+        }
+    return out, (datadir[0]["d"] if datadir else None), None
+
+
 def list_databases() -> list[dict[str, Any]]:
-    schemata, counts = db.parallel(
+    schemata, counts, (storage, datadir, storage_error) = db.parallel(
         lambda: _query("SELECT SCHEMA_NAME FROM information_schema.SCHEMATA"),
         lambda: _query(
             "SELECT TABLE_SCHEMA,"
@@ -72,18 +127,27 @@ def list_databases() -> list[dict[str, Any]]:
             " SUM(TABLE_TYPE <> 'BASE TABLE') AS n_views"
             " FROM information_schema.TABLES GROUP BY TABLE_SCHEMA"
         ),
+        _storage_info,
     )
     by_db = {r["TABLE_SCHEMA"]: r for r in counts}
     out = []
     for r in schemata:
         name = r["SCHEMA_NAME"]
         c = by_db.get(name, {})
+        system = name in SYSTEM_DATABASES
+        if system:
+            store = None
+        elif storage_error:
+            store = {"kind": "unknown", "error": storage_error}
+        else:
+            store = storage.get(name) or {"kind": "local", "data_directory": datadir}
         out.append(
             {
                 "name": name,
-                "system": name in SYSTEM_DATABASES,
+                "system": system,
                 "tables": int(_num(c.get("n_tables")) or 0),
                 "views": int(_num(c.get("n_views")) or 0),
+                "storage": store,
             }
         )
     out.sort(key=lambda d: (d["system"], d["name"].lower(), d["name"]))
@@ -535,3 +599,252 @@ def schema_explorer_cleanup_drop(
     """
     data = housekeeping.drop(tables, views, dry_run)
     return tool_result(housekeeping.drop_summary(data), data)
+
+
+# --------------------------------------------------------------------------
+# ANALYZE TABLE: refresh optimizer statistics. It changes a shared cluster, so
+# there is a read-only plan first and an explicit confirmation before it runs.
+#
+# Where SingleStore 9.0 shows statistics: information_schema.OPTIMIZER_STATISTICS,
+# one row per column (and JSON key), filled by autostats or ANALYZE: ROW_COUNT,
+# AUTOSTATS_ENABLED, AUTOSTATS_OUTDATED (autostats too stale to use; the optimizer
+# then falls back to the last ANALYZE), RANGE_STATS (histograms) and LAST_UPDATED
+# (documented as when autostats last updated the column; on 9.0.40 ANALYZE TABLE sets
+# it too, checked on SASDP.CLASS). Per the docs, ANALYZE TABLE also invalidates and
+# re-optimizes plans built on stale statistics.
+# --------------------------------------------------------------------------
+
+ANALYZE_BATCH = 10
+_STALE_ROW_CHANGE = 0.2  # the table's row count moved this far from the statistics' row count
+
+
+def _analyze_statement(database: str, table: str) -> str:
+    return f"ANALYZE TABLE {quote_identifier(database)}.{quote_identifier(table)}"
+
+
+def _stats_by_table(database: str) -> dict[str, dict[str, Any]]:
+    rows = _query(
+        "SELECT TABLE_NAME, COUNT(DISTINCT COLUMN_NAME) AS columns_with_stats, MIN(LAST_UPDATED) AS oldest,"
+        " MAX(LAST_UPDATED) AS newest, SUM(AUTOSTATS_OUTDATED) AS outdated, SUM(AUTOSTATS_ENABLED) AS autostats_on,"
+        " SUM(RANGE_STATS) AS histograms, MAX(ROW_COUNT) AS stats_rows, COUNT(*) AS stat_rows"
+        " FROM information_schema.OPTIMIZER_STATISTICS WHERE DATABASE_NAME = %s GROUP BY TABLE_NAME",
+        (database,),
+    )
+    return {r["TABLE_NAME"]: r for r in rows}
+
+
+def _age_days(now: Any, then: Any) -> float | None:
+    """Days between two cluster timestamps (both from the cluster's clock, no time zone)."""
+    try:
+        a = datetime.datetime.fromisoformat(str(now))
+        b = datetime.datetime.fromisoformat(str(then))
+    except (TypeError, ValueError):
+        return None
+    return round((a - b).total_seconds() / 86400, 1)
+
+
+def _table_stats(entry: dict[str, Any], n_columns: int, s: dict[str, Any] | None, now: Any) -> dict[str, Any]:
+    """Statistics facts for one table and the reasons they may be stale."""
+    s = s or {}
+    with_stats = int(_num(s.get("columns_with_stats")) or 0)
+    stat_rows = int(_num(s.get("stat_rows")) or 0)
+    outdated = int(_num(s.get("outdated")) or 0)
+    autostats_on = int(_num(s.get("autostats_on")) or 0)
+    stats_rows = _num(s.get("stats_rows"))
+    rows_now = entry.get("rows")
+    stats = {
+        "columns": n_columns,
+        "columns_with_stats": with_stats,
+        "outdated_columns": outdated,
+        "autostats_columns": autostats_on,
+        "histogram_columns": int(_num(s.get("histograms")) or 0),
+        "stats_row_count": stats_rows,
+        "current_row_count": rows_now,
+        "last_updated_oldest": s.get("oldest"),
+        "last_updated_newest": s.get("newest"),
+        "age_days": _age_days(now, s.get("newest")) if s.get("newest") else None,
+    }
+    reasons = []
+    if not with_stats:
+        reasons.append("no statistics")
+    else:
+        if outdated:
+            reasons.append(f"autostats out of date on {outdated} column(s)")
+        if with_stats < n_columns:
+            reasons.append(f"{n_columns - with_stats} of {n_columns} column(s) without statistics")
+        if autostats_on < stat_rows:
+            reasons.append("autostats off on some columns (the optimizer uses the last ANALYZE)")
+        if rows_now is not None and stats_rows is not None:
+            now_f, then_f = float(rows_now), float(stats_rows)
+            if max(now_f, then_f) >= 1000 and abs(now_f - then_f) / max(then_f, 1.0) > _STALE_ROW_CHANGE:
+                reasons.append(f"row count changed from {int(then_f):,} to {int(now_f):,}")
+    return {"stats": stats, "stale": bool(reasons), "reasons": reasons}
+
+
+def analyze_plan(database: str, tables: list[str] | None = None) -> dict[str, Any]:
+    if database in SYSTEM_DATABASES:
+        raise ValueError(f"{database} is a system database; ANALYZE is only for user tables.")
+    entries, stats, col_rows, now_rows = db.parallel(
+        lambda: _table_entries(database),
+        lambda: _stats_by_table(database),
+        lambda: _query("SELECT TABLE_NAME, COUNT(*) AS n FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = %s"
+                       " GROUP BY TABLE_NAME", (database,)),
+        lambda: _query("SELECT NOW() AS now"),
+    )
+    if not entries:
+        _require_database(database)
+    now = now_rows[0]["now"] if now_rows else None
+    n_cols = {r["TABLE_NAME"]: int(_num(r["n"]) or 0) for r in col_rows}
+    by_name = {e["name"]: e for e in entries}
+    wanted = list(dict.fromkeys(tables)) if tables else [e["name"] for e in entries]
+    out = []
+    for name in wanted:
+        e = by_name.get(name)
+        if e is None or e["type"] != "BASE TABLE":
+            continue
+        out.append({
+            "table": name,
+            "storage": e["storage"],
+            "reference": e["reference"],
+            "rows": e["rows"],
+            "size_bytes": e["size_bytes"],
+            **_table_stats(e, n_cols.get(name, 0), stats.get(name), now),
+            "statement": _analyze_statement(database, name) + ";",
+        })
+    return {
+        "database": database,
+        "cluster_now": now,
+        "tables": out,
+        "stale_tables": sum(t["stale"] for t in out),
+        "statements": [t["statement"] for t in out],
+        "missing": [t for t in wanted if t not in by_name],
+        "skipped_views": [t for t in wanted if t in by_name and by_name[t]["type"] != "BASE TABLE"],
+        "batch_size": ANALYZE_BATCH,
+        "about": (
+            "Read-only plan; nothing ran. Statistics come from information_schema.OPTIMIZER_STATISTICS (one row per "
+            "column, filled by autostats or ANALYZE). last_updated_* is its LAST_UPDATED: documented as when autostats "
+            "last updated the column; ANALYZE TABLE sets it too (seen on 9.0.40). A table counts as stale when it has no "
+            "statistics, autostats are out of date, columns lack statistics, autostats are off on some columns (the "
+            "optimizer then uses the last ANALYZE), or its row count moved more than 20% from the statistics' row count. "
+            "ANALYZE TABLE reads the table to rebuild its statistics and invalidates cached plans built on stale ones."
+        ),
+        "next_step": (
+            "After the user has seen these statements and explicitly confirmed, call schema_explorer_analyze("
+            f"database={database!r}, tables=[...], confirm=True) with at most {ANALYZE_BATCH} tables per call "
+            "(one table per call shows progress best)."
+        ),
+    }
+
+
+def _analyze_plan_summary(d: dict[str, Any], limit: int = 30) -> str:
+    lines = [f"ANALYZE plan for {d['database']} (read-only, nothing ran): {len(d['tables'])} table(s), "
+             f"{d['stale_tables']} with stale or missing statistics."]
+    for t in d["tables"][:limit]:
+        s = t["stats"]
+        age = f"statistics updated {s['age_days']} days ago" if s["age_days"] is not None else "no statistics"
+        why = "; ".join(t["reasons"])
+        lines.append(f"- {t['table']}: {age}{'; ' + why if why else ''} -> {t['statement']}")
+    if len(d["tables"]) > limit:
+        lines.append(f"... {len(d['tables']) - limit} more")
+    if d["missing"]:
+        lines.append("Not found: " + ", ".join(d["missing"]))
+    if d["skipped_views"]:
+        lines.append("Views skipped (no statistics): " + ", ".join(d["skipped_views"]))
+    lines.append(d["next_step"])
+    return "\n".join(lines)
+
+
+def analyze(database: str, tables: list[str], confirm: bool = False) -> dict[str, Any]:
+    if not tables:
+        raise ValueError("Name the tables to analyze (schema_explorer_analyze_plan lists them).")
+    tables = list(dict.fromkeys(tables))
+    if len(tables) > ANALYZE_BATCH:
+        raise ValueError(f"At most {ANALYZE_BATCH} tables per call; call again for the rest.")
+    if database in SYSTEM_DATABASES:
+        raise ValueError(f"{database} is a system database; ANALYZE is only for user tables.")
+    if not confirm:
+        raise ValueError(
+            "Refused: ANALYZE TABLE changes statistics on the shared cluster. Show the user the plan "
+            "(schema_explorer_analyze_plan) and call again with confirm=True only after they explicitly confirmed."
+        )
+    placeholders = ", ".join(["%s"] * len(tables))
+    found_rows, before = db.parallel(
+        lambda: _query("SELECT TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES WHERE TABLE_SCHEMA = %s"
+                       f" AND TABLE_NAME IN ({placeholders})", (database, *tables)),
+        lambda: _stats_by_table(database),
+    )
+    found = {r["TABLE_NAME"]: r["TABLE_TYPE"] for r in found_rows}
+    results = []
+    for name in tables:
+        sql = _analyze_statement(database, name)
+        entry: dict[str, Any] = {"table": name, "statement": sql + ";"}
+        if name not in found:
+            entry.update(status="missing", error="Table not found (names are case-sensitive).")
+        elif found[name] != "BASE TABLE":
+            entry.update(status="skipped", error=f"A {found[name].lower()} has no statistics to analyze.")
+        else:
+            started = time.monotonic()
+            try:
+                cols, rows, _ = db.execute(sql, database=database)
+                entry.update(status="analyzed", output=jsonable_rows(rows)[:20] if cols else None)
+            except Exception as exc:  # noqa: BLE001 - reported per table; the others still run
+                entry.update(status="error", error=str(exc))
+            entry["seconds"] = round(time.monotonic() - started, 2)
+        results.append(entry)
+    after, now_rows = db.parallel(lambda: _stats_by_table(database), lambda: _query("SELECT NOW() AS now"))
+    for e in results:
+        b, a = before.get(e["table"]) or {}, after.get(e["table"]) or {}
+        e["last_updated_before"] = b.get("newest")
+        e["last_updated_after"] = a.get("newest")
+        e["columns_with_stats_after"] = int(_num(a.get("columns_with_stats")) or 0)
+        e["outdated_columns_after"] = int(_num(a.get("outdated")) or 0)
+    return {
+        "database": database,
+        "cluster_now": now_rows[0]["now"] if now_rows else None,
+        "results": results,
+        "analyzed": sum(e["status"] == "analyzed" for e in results),
+        "errors": sum(e["status"] == "error" for e in results),
+        "about": ("Ran one ANALYZE TABLE per table, in order. last_updated_before / _after are "
+                  "OPTIMIZER_STATISTICS.LAST_UPDATED (newest column) before and after."),
+    }
+
+
+def _analyze_summary(d: dict[str, Any]) -> str:
+    lines = [f"ANALYZE in {d['database']}: {d['analyzed']} analyzed, {d['errors']} error(s)."]
+    for e in d["results"]:
+        took = f" in {e['seconds']} s" if "seconds" in e else ""
+        lines.append(f"- {e['table']}: {e['status']}{took}{' - ' + e['error'] if e.get('error') else ''}")
+    return "\n".join(lines)
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=_READ_ONLY)
+def schema_explorer_analyze_plan(database: str, tables: list[str] | None = None) -> CallToolResult:
+    """Read-only plan for ANALYZE TABLE: per base table its statistics (age, outdated / missing columns,
+    row-count drift), whether they look stale and why, and the exact statements. Runs nothing.
+
+    Args:
+        database: Database (case-sensitive).
+        tables: Tables to include (case-sensitive). Omit for every base table in the database.
+    """
+    data = analyze_plan(database, tables)
+    return tool_result(_analyze_plan_summary(data), data)
+
+
+@apps.tool(
+    resource_uri=URI,
+    visibility=APP_ONLY,
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
+)
+def schema_explorer_analyze(database: str, tables: list[str], confirm: bool = False) -> CallToolResult:
+    """Run ANALYZE TABLE on the given tables, one statement per table, and report each result.
+
+    Refuses unless ``confirm`` is true: call it only after the user saw the plan
+    (schema_explorer_analyze_plan) and explicitly confirmed. At most 10 tables per call.
+
+    Args:
+        database: Database (case-sensitive).
+        tables: Base tables to analyze (case-sensitive), at most 10.
+        confirm: Must be true: the user's explicit confirmation.
+    """
+    data = analyze(database, tables, confirm)
+    return tool_result(_analyze_summary(data), data)

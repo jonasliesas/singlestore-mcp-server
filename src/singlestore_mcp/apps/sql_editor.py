@@ -5,6 +5,9 @@ read-only guard and row cap). Anything else needs the user to confirm in the
 editor and then runs through ``sql_editor_execute``, which is marked
 destructive so hosts can ask for approval. Both are app-only: the model opens
 the editor with ``sql_editor`` and uses run_sql / query_grid itself.
+
+The editor's draft, run history and recent files are kept server-side (see
+``singlestore_mcp.sql_editor_state``); both run tools record into the history.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from typing import Any
 from mcp.types import CallToolResult, ToolAnnotations
 
 from .. import assistant
+from .. import sql_editor_state as editor_state
 from ..db import db
 from ._core import APP_ONLY, apps, jsonable_rows, page_html, register_app, tool_result, with_browser_link
 from .query_grid import MAX_ROWS_LIMIT, ReadOnlyViolation, check_read_only, run_query
@@ -37,7 +41,7 @@ register_app(
 # The workspace shell: SQL editor plus the Schema, Pipelines and Cluster apps
 # as views behind a left-hand rail. sql_editor opens it.
 WORKSPACE_URI = "ui://singlestore/workspace.html"
-WORKSPACE_VIEWS = ("sql", "notebook", "schema", "pipelines", "cluster", "history", "alerts", "connections")
+WORKSPACE_VIEWS = ("sql", "notebook", "schema", "pipelines", "cluster", "history", "security", "config", "alerts", "workload", "connections")
 register_app(
     WORKSPACE_URI,
     "workspace.html",
@@ -72,6 +76,7 @@ def sql_editor(
     sql: str | None = None,
     view: str = "sql",
     table: str | None = None,
+    new_tab: bool = False,
 ) -> CallToolResult:
     """Open the SingleStore workspace: an interactive SQL editor plus views.
 
@@ -84,17 +89,28 @@ def sql_editor(
     The editor has a chat panel: questions from it arrive in the conversation
     tagged "[SQL Editor <id>]"; answer those with sql_editor_reply.
 
+    The editor has tabs; `sql` goes into the active tab, below the user's
+    text (or into a new tab with new_tab=true).
+
     The result includes ``browser_url``, which opens this view full-window in
     the user's browser: post it as a clickable link right under the app.
 
     Args:
         database: Database to start in (case-sensitive).
         sql: SQL to put in the editor (not run automatically).
-        view: View to show first: "sql" (default), "notebook", "schema", "pipelines", "cluster", "history" (Query History), "alerts" or "connections".
+        view: View to show first: "sql" (default), "notebook", "schema", "pipelines", "cluster", "history" (Query History), "alerts", "workload" or "connections".
         table: For view="schema": table to pre-select in `database`.
+        new_tab: With `sql`: open it in a new editor tab instead of the active one.
     """
     if view not in WORKSPACE_VIEWS:
         raise ValueError(f"view must be one of {', '.join(WORKSPACE_VIEWS)}")
+    tab_id = None
+    if new_tab and sql:
+        try:
+            tab_id = editor_state.create_tab(editor_state.resolve_tab(None))["tab"]["id"]
+        except ValueError:  # too many tabs: the SQL goes into the active one
+            pass
+        view = "sql"
     # A failing connection must not lock the user out of the workspace: it then
     # opens on the Connections view with the error, to fix or switch connection.
     connection_error = None
@@ -106,42 +122,82 @@ def sql_editor(
     if database and databases and database not in databases:
         raise LookupError(f"Database {database!r} not found (names are case-sensitive).")
     data: dict[str, Any] = {"databases": databases, "database": database, "sql": sql, "view": view, "table": table,
-                            "connection_error": connection_error}
+                            "connection_error": connection_error, "tab_id": tab_id}
     summary = f"SingleStore Workspace opened on the {view} view{f', database {database}' if database else ''}."
     if connection_error:
         summary += f" The active connection fails ({connection_error[:200]}); the user can fix or switch it in Connections."
     if sql:
-        summary += f" Editor prefilled with: {' '.join(sql.split())[:300]}"
+        summary += f" {'New editor tab' if tab_id else 'Editor'} prefilled with: {' '.join(sql.split())[:300]}"
     summary = with_browser_link(
         summary, data, "sql_editor", {"database": database, "sql": sql, "view": view if view != "sql" else None, "table": table}
     )
     return tool_result(summary, data)
 
 
+def _record_failure(sql: str, database: str | None, kind: str, started: float, exc: Exception,
+                    source: dict[str, Any]) -> None:
+    message = str(exc).replace("\n", " ") or type(exc).__name__
+    editor_state.add_history(sql, database, ok=False, kind=kind, error=message, source=source,
+                             elapsed_ms=round((time.perf_counter() - started) * 1000, 1))
+
+
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
-def sql_editor_query(sql: str, database: str | None = None, max_rows: int = 1000) -> CallToolResult:
+def sql_editor_query(sql: str, database: str | None = None, max_rows: int = 1000, tab_id: str | None = None,
+                     tab: str | None = None, file: str | None = None) -> CallToolResult:
     """Run a read-only statement from the SQL Editor app.
 
     Statements that change data or schema are answered with
     ``needs_confirmation`` instead of running; the app then asks the user and
-    uses sql_editor_execute.
+    uses sql_editor_execute. Every run lands in the editor's history, with the
+    tab (``tab_id``, its label ``tab``) and open ``file`` it ran from.
     """
     try:
         check_read_only(sql)
     except ReadOnlyViolation as exc:
         data = {"needs_confirmation": True, "reason": str(exc), "sql": sql, "database": database}
         return tool_result("This statement changes data or schema and needs confirmation.", data)
-    data = run_query(sql, database, max_rows)
+    source = {"tab_id": tab_id, "tab": tab, "file": file}
+    started = time.perf_counter()
+    try:
+        data = run_query(sql, database, max_rows)
+    except Exception as exc:
+        _record_failure(sql, database, "read", started, exc, source)
+        raise
     data["kind"] = "read"
+    editor_state.add_history(sql, database, ok=True, kind="read", elapsed_ms=data["elapsed_ms"], source=source,
+                             rows=data["row_count"] if data["has_result_set"] else None)
     return tool_result(f"{data['row_count']} row(s) in {data['elapsed_ms']} ms", data)
 
 
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def sql_editor_classify(statements: list[str]) -> CallToolResult:
+    """Which of these statements need the user's confirmation (change data or schema), for "Run all".
+
+    Same check as sql_editor_query, without running anything.
+    """
+    if len(statements) > 2000:
+        raise ValueError("Run all handles up to 2000 statements at a time.")
+    writes = []
+    for i, sql in enumerate(statements):
+        try:
+            check_read_only(sql)
+        except ReadOnlyViolation as exc:
+            writes.append({"index": i, "reason": str(exc).split(": ", 1)[-1][:200]})
+    return tool_result(f"{len(writes)} of {len(statements)} statement(s) need confirmation", {"writes": writes})
+
+
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=WRITES)
-def sql_editor_execute(sql: str, database: str | None = None, max_rows: int = 1000) -> CallToolResult:
+def sql_editor_execute(sql: str, database: str | None = None, max_rows: int = 1000, tab_id: str | None = None,
+                       tab: str | None = None, file: str | None = None) -> CallToolResult:
     """Run any single statement the user confirmed in the SQL Editor app (writes and DDL included)."""
     max_rows = max(1, min(int(max_rows), MAX_ROWS_LIMIT))
+    source = {"tab_id": tab_id, "tab": tab, "file": file}
     started = time.perf_counter()
-    columns, rows, rowcount = db.execute(sql, database=database, max_rows=max_rows + 1)
+    try:
+        columns, rows, rowcount = db.execute(sql, database=database, max_rows=max_rows + 1)
+    except Exception as exc:
+        _record_failure(sql, database, "write", started, exc, source)
+        raise
     elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
     data = {
         "kind": "write",
@@ -157,6 +213,8 @@ def sql_editor_execute(sql: str, database: str | None = None, max_rows: int = 10
         "max_rows": max_rows,
         "warnings": [],
     }
+    editor_state.add_history(sql, database, ok=True, kind="write", elapsed_ms=elapsed_ms, source=source,
+                             rows=data["row_count"] if columns else None, affected=data["affected_rows"])
     return tool_result(f"Statement ran in {elapsed_ms} ms; {data['affected_rows']} row(s) affected", data)
 
 
@@ -307,8 +365,12 @@ def sql_editor_files() -> CallToolResult:
 
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
-def sql_editor_open_file(name: str) -> CallToolResult:
-    """Read one .sql file from the SQL Editor's folder."""
+def sql_editor_open_file(name: str, remember: bool = True) -> CallToolResult:
+    """Read one .sql file from the SQL Editor's folder.
+
+    ``remember`` puts it on the Recent list (false when the editor only
+    re-reads its open file to compare it with the restored draft).
+    """
     path = _sql_path(name)
     if not path.is_file():
         raise LookupError(f"{_relative(path)} doesn't exist in {sql_dir()}.")
@@ -319,6 +381,8 @@ def sql_editor_open_file(name: str) -> CallToolResult:
         sql = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
         sql = raw.decode("cp1252", errors="replace")
+    if remember:
+        editor_state.remember_file(path, _relative(path))
     return tool_result(f"Opened {_relative(path)}", {"name": _relative(path), "path": str(path), "sql": sql, "folder": str(sql_dir())})
 
 
@@ -338,10 +402,123 @@ def sql_editor_save_file(name: str, sql: str, overwrite: bool = False) -> CallTo
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(sql, encoding="utf-8", newline="")
     os.replace(tmp, path)
+    editor_state.remember_file(path, _relative(path))
     return tool_result(
         f"Saved {_relative(path)}",
         {"name": _relative(path), "saved": True, "exists": False, "folder": str(sql_dir()), "path": str(path)},
     )
+
+
+# ---------------------------------------------------------------- editor state
+# The editor has tabs, each autosaving its text (debounced) and restored when
+# it opens again, also after a restart; see singlestore_mcp.sql_editor_state.
+# Without a tab id (an editor outside the workspace, or a page from before
+# tabs) the draft tools use the active tab.
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def sql_editor_state(tab_id: str | None = None) -> CallToolResult:
+    """One SQL Editor tab's saved draft (the active tab's by default), recent files and history size, for restoring it."""
+    tab_id = editor_state.resolve_tab(tab_id)
+    draft = editor_state.load_draft(tab_id)
+    data = {"tab_id": tab_id, "draft": draft, "recent": editor_state.recent_files(), "history_count": editor_state.history_count()}
+    return tool_result(f"Draft of {len(draft['sql']) if draft else 0} char(s); {len(data['recent'])} recent file(s)", data)
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
+def sql_editor_save_draft(
+    sql: str,
+    database: str | None = None,
+    anchor: int = 0,
+    head: int = 0,
+    file_name: str | None = None,
+    file_path: str | None = None,
+    file_external: bool = False,
+    saved_hash: str | None = None,
+    continue_on_error: bool = False,
+    tab_id: str | None = None,
+    dirty: bool = False,
+    language: str = "singlestore",
+    origin: dict[str, Any] | None = None,
+) -> CallToolResult:
+    """Autosave one SQL Editor tab's text, database and cursor (never writes the open .sql file itself).
+
+    ``saved_hash`` is the editor's hash of the open file's last saved text, so a
+    restored draft knows whether it has unsaved changes; ``dirty`` says so for
+    the tab bar. ``origin``: the workload statement the tab was opened from
+    (``{"workload", "statement_id", "statement_name"}``), for "Update in workload".
+    ``closed`` in the result: the tab was closed (elsewhere) and the text wasn't kept.
+    """
+    file = {"name": file_name, "path": file_path, "external": file_external, "saved_hash": saved_hash} if file_name else None
+    draft = editor_state.save_draft({"sql": sql, "database": database, "cursor": {"anchor": anchor, "head": head},
+                                     "file": file, "continue_on_error": continue_on_error, "dirty": dirty,
+                                     "language": language, "origin": editor_state.clean_origin(origin)}, tab_id)
+    closed = bool(draft.get("closed"))
+    return tool_result("Tab is closed; draft not saved" if closed else "Draft saved",
+                       {"updated": draft["updated"], "tab_id": draft["tab_id"], "closed": closed})
+
+
+# Tab bar (the workspace shell calls these).
+_WRITES_STATE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
+
+
+def _tabs_result(data: dict[str, Any]) -> CallToolResult:
+    return tool_result(f"{len(data['tabs'])} SQL Editor tab(s)", data)
+
+
+@apps.tool(resource_uri=WORKSPACE_URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def sql_editor_tabs() -> CallToolResult:
+    """The SQL Editor's tabs in order, each with its open file and unsaved-changes flag, and the active tab."""
+    return _tabs_result(editor_state.list_tabs())
+
+
+@apps.tool(resource_uri=WORKSPACE_URI, visibility=APP_ONLY, annotations=_WRITES_STATE)
+def sql_editor_tab_new(after: str | None = None) -> CallToolResult:
+    """Open a new, empty SQL Editor tab right after the tab ``after`` (else at the end) and make it active."""
+    return _tabs_result(editor_state.create_tab(after))
+
+
+@apps.tool(resource_uri=WORKSPACE_URI, visibility=APP_ONLY, annotations=_WRITES_STATE)
+def sql_editor_tab_close(tab_id: str) -> CallToolResult:
+    """Close a SQL Editor tab and drop its draft (the open .sql file is untouched); the last tab is replaced by an empty one."""
+    return _tabs_result(editor_state.close_tab(tab_id))
+
+
+@apps.tool(resource_uri=WORKSPACE_URI, visibility=APP_ONLY, annotations=_WRITES_STATE)
+def sql_editor_tab_activate(tab_id: str) -> CallToolResult:
+    """Remember which SQL Editor tab is active (it's the one that opens next time)."""
+    return tool_result("Active tab set", editor_state.activate_tab(tab_id))
+
+
+@apps.tool(resource_uri=WORKSPACE_URI, visibility=APP_ONLY, annotations=_WRITES_STATE)
+def sql_editor_tab_rename(tab_id: str, title: str | None = None) -> CallToolResult:
+    """Give a SQL Editor tab its own title; an empty title goes back to the file name or "untitled N"."""
+    return _tabs_result(editor_state.rename_tab(tab_id, title))
+
+
+@apps.tool(resource_uri=WORKSPACE_URI, visibility=APP_ONLY, annotations=_WRITES_STATE)
+def sql_editor_tab_reorder(order: list[str]) -> CallToolResult:
+    """Put the SQL Editor tabs in this order (tab ids)."""
+    return _tabs_result(editor_state.reorder_tabs(order))
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def sql_editor_history(search: str = "", limit: int = 100, before_id: int | None = None) -> CallToolResult:
+    """The SQL Editor's run history, newest first (SQL cut to a preview; full text with sql_editor_history_entry)."""
+    data = editor_state.list_history(search, limit, before_id)
+    return tool_result(f"{len(data['entries'])} of {data['matches']} statement(s)", data)
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def sql_editor_history_entry(entry_id: int) -> CallToolResult:
+    """One statement from the SQL Editor's run history, with its full SQL."""
+    entry = editor_state.history_entry(entry_id)
+    return tool_result(f"History entry {entry_id}", entry)
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
+def sql_editor_history_clear() -> CallToolResult:
+    """Empty the SQL Editor's run history."""
+    removed = editor_state.clear_history()
+    return tool_result(f"Removed {removed} statement(s) from the history", {"removed": removed})
 
 
 # ---------------------------------------------------------------- chat relay

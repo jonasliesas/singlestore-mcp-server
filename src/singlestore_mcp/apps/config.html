@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Config</title>
+<!--S2:HEAD-->
+<style>
+  .cf-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+  .cf-bar .s2-input[type="search"] { width: 260px; }
+  .cf-check { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; font-size: var(--s2-fs-xs); color: var(--s2-text-2); }
+  .cf-notice { padding: 7px 10px; border-radius: var(--s2-radius-sm); background: var(--s2-info-bg); color: var(--s2-text-2);
+    font-size: var(--s2-fs-xs); margin-bottom: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .cf-notice.warn { background: var(--s2-warn-bg); color: var(--s2-warn); }
+  .cf-wrap { max-height: 560px; }
+  html[data-display-mode="fullscreen"] .cf-wrap { max-height: calc(100vh - 170px); }
+  .cf-table td.name { font-family: var(--s2-mono); }
+  .cf-table td.val { font-family: var(--s2-mono); max-width: 300px; }
+  .cf-table td.dflt { font-family: var(--s2-mono); color: var(--s2-text-2); max-width: 200px; }
+  .cf-table tbody tr.row { cursor: pointer; }
+  .cf-table tr.changed td.val { color: var(--s2-warn); font-weight: var(--font-weight-semibold, 600); }
+  .cf-table tr.changed td:first-child { box-shadow: inset 3px 0 0 var(--s2-warn); }
+  .cf-table tr.differs td:first-child { box-shadow: inset 3px 0 0 var(--s2-info); }
+  .cf-table tr.open td { background: var(--s2-bg-2); }
+  .cf-detail td { background: var(--s2-bg-2); white-space: normal !important; max-width: none !important; }
+  .cf-detail .desc { max-width: 900px; margin: 2px 0 8px; line-height: 1.5; }
+  .cf-detail .meta { display: flex; gap: 6px 14px; flex-wrap: wrap; font-size: var(--s2-fs-xs); color: var(--s2-text-2); margin-bottom: 8px; }
+  .cf-detail .sqlrow { display: flex; gap: 6px; align-items: flex-start; margin: 6px 0; }
+  .cf-detail .sqlrow pre { flex: 1; max-width: 900px; }
+  .cf-nodes { border-collapse: collapse; font-size: var(--s2-fs-xs); margin: 4px 0 8px; }
+  .cf-nodes td, .cf-nodes th { padding: 2px 10px 2px 0; text-align: left; }
+  .cf-nodes td.v { font-family: var(--s2-mono); }
+  .cf-nodes tr.odd td.v { color: var(--s2-info); font-weight: var(--font-weight-semibold, 600); }
+  .cf-legend { display: inline-flex; gap: 12px; font-size: 11px; color: var(--s2-text-3); }
+  .cf-legend span::before { content: ""; display: inline-block; width: 3px; height: 10px; margin-right: 5px; vertical-align: -1px; }
+  .cf-legend .c::before { background: var(--s2-warn); }
+  .cf-legend .d::before { background: var(--s2-info); }
+  select.s2-input { padding: 3px 6px; }
+</style>
+</head>
+<body>
+<div id="root"><div class="s2-empty"><span class="s2-spinner"></span> Reading the engine variables…</div></div>
+<script type="module">
+const { h, fmt } = S2;
+const root = document.getElementById("root");
+const MAX_ROWS = 600;
+
+const state = {
+  data: null, error: null, loading: false, docsLoading: false,
+  search: "", changed: false, differs: false, category: "", sync: "", runtime: "",
+  open: new Set(),
+};
+
+const searchInput = h("input", { class: "s2-input", type: "search", placeholder: "Search name, value, description…", "aria-label": "Search variables",
+  oninput: (e) => { state.search = e.target.value; drawTable(); } });
+const tableBox = h("div");
+const countEl = h("span", { class: "s2-faint s2-small" });
+
+const sqlLit = (x) => (/^(-?\d+(\.\d+)?|ON|OFF)$/i.test(String(x)) ? String(x) : `'${String(x).replace(/\\/g, "\\\\").replace(/'/g, "''")}'`);
+
+function valueText(v) {
+  if (v.differs) return `differs: ${v.distinct.slice(0, 3).join(" | ")}${v.distinct.length > 3 ? " …" : ""}`;
+  return v.value ?? v.distinct[0] ?? "";
+}
+
+function filtered() {
+  const q = state.search.trim().toLowerCase();
+  return state.data.variables.filter((v) =>
+    (!q || v.name.includes(q) || String(valueText(v)).toLowerCase().includes(q) || (v.description ?? "").toLowerCase().includes(q)
+      || (v.category ?? "").toLowerCase().includes(q))
+    && (!state.changed || v.status === "changed")
+    && (!state.differs || v.differs)
+    && (!state.category || v.category === state.category)
+    && (!state.sync || (state.sync === "unknown" ? !v.sync : v.sync === state.sync))
+    && (!state.runtime || (state.runtime === "runtime" ? v.settable_runtime === true : v.settable_runtime === false)));
+}
+
+async function openDocs(url) {
+  try {
+    const res = await S2.app.openLink({ url });
+    if (res?.isError) throw new Error("refused");
+  } catch {
+    S2.copy(url, "Docs link copied (this host can't open links)");
+  }
+}
+
+function syncNote(v) {
+  if (v.sync === "sync") return "Sync variable: the docs say to set it on the master aggregator only; the cluster propagates it.";
+  if (v.sync === "non-sync") return "Non-sync variable: set on each node; SET GLOBAL lasts until the node restarts, so also persist it in each node's memsql.cnf.";
+  return "Sync / non-sync: not known (not in the docs reference).";
+}
+
+function detailRow(v, cols) {
+  const d = state.data;
+  const nodeRows = Object.entries(v.values ?? {});
+  const common = v.differs ? null : (v.value ?? v.distinct[0]);
+  return h("tr", { class: "cf-detail" }, h("td", { colspan: String(cols) },
+    v.description ? h("div", { class: "desc" }, v.description) : h("div", { class: "desc s2-faint" },
+      d.docs?.count ? "This variable isn't described in the docs reference for this version." : "No description: the docs reference isn't loaded."),
+    h("div", { class: "meta" },
+      v.category ? h("span", {}, `Category: ${v.category}`) : null,
+      h("span", {}, syncNote(v)),
+      v.variable_type ? h("span", { title: "SHOW GLOBAL VARIABLES EXTENDED → Variable_type" }, `Variable type: ${v.variable_type}`) : null,
+      h("span", {}, `Settable at runtime: ${v.settable_runtime == null ? "?" : v.settable_runtime ? "yes" : "no (startup only)"}`),
+      v.per_site != null ? h("span", {}, `Per site: ${v.per_site ? "yes" : "no"}`) : null,
+      v.in_allow_list != null ? h("span", {}, `In allow list: ${v.in_allow_list ? "yes" : "no"}`) : null,
+      v.default != null ? h("span", {}, `Documented default: ${v.default}`) : h("span", {}, "Default: unknown"),
+      v.doc_extra ? Object.entries(v.doc_extra).map(([k, x]) => h("span", {}, `${k}: ${x}`)) : null),
+    nodeRows.length ? h("table", { class: "cf-nodes" },
+      h("thead", {}, h("tr", {}, h("th", {}, "Node"), h("th", {}, "Value"))),
+      h("tbody", {}, nodeRows.map(([id, val]) => {
+        const n = d.nodes.find((x) => String(x.id) === id);
+        return h("tr", { class: v.differs && String(val) !== String(nodeRows[0][1]) ? "odd" : "" },
+          h("td", {}, n ? `${n.id} · ${n.type} · ${n.host}` : id), h("td", { class: "v" }, String(val)));
+      }))) : null,
+    h("div", { class: "s2-small s2-muted" }, v.settable_runtime === false
+      ? "This variable can't be changed while the node runs: set it in the node's configuration and restart. Statement shown for reference:"
+      : "To change it, run this yourself (nothing is run from here):"),
+    h("div", { class: "sqlrow" }, h("pre", { class: "s2-pre" }, v.set_sql),
+      h("button", { class: "s2-btn", onclick: (e) => { e.stopPropagation(); S2.copy(v.set_sql, "Statement copied"); } }, "Copy")),
+    v.doc_url ? h("button", { class: "s2-btn ghost", title: v.doc_url, onclick: (e) => { e.stopPropagation(); openDocs(v.doc_url); } },
+      v.doc_url.includes("#") ? "↗ Open its docs entry" : "↗ Open the engine variable list") : null,
+    common != null && v.differs === false && v.status === "changed" ? h("span", { class: "s2-small s2-faint", style: { marginLeft: "8px" } },
+      `Back to the documented default: SET GLOBAL ${v.name} = ${sqlLit(v.default)};`) : null));
+}
+
+function drawTable() {
+  if (!state.data) return;
+  const rows = filtered();
+  countEl.textContent = `${rows.length} of ${state.data.variables.length}`;
+  if (!rows.length) { tableBox.replaceChildren(h("div", { class: "s2-empty" }, "No variables match.")); return; }
+  const cols = ["Name", "Value", "Default", "Category", "Sync", "Runtime"];
+  const body = h("tbody");
+  for (const v of rows.slice(0, MAX_ROWS)) {
+    const open = state.open.has(v.name);
+    body.append(h("tr", { class: `row${v.status === "changed" ? " changed" : ""}${v.differs ? " differs" : ""}${open ? " open" : ""}`,
+      onclick: () => { open ? state.open.delete(v.name) : state.open.add(v.name); drawTable(); reportContext(v); } },
+      h("td", { class: "name", title: v.name }, v.name),
+      h("td", { class: "val", title: v.differs ? Object.entries(v.values).map(([n, x]) => `node ${n}: ${x}`).join("\n") : String(valueText(v)) },
+        v.differs ? h("span", { class: "s2-badge info", style: { marginRight: "6px" } }, "differs by node") : null, String(valueText(v))),
+      h("td", { class: `dflt${v.default == null ? " null" : ""}`, title: v.default ?? "" }, v.default ?? "–"),
+      h("td", { title: v.category ?? "" }, v.category ?? "–"),
+      h("td", {}, v.sync ?? "–"),
+      h("td", {}, v.settable_runtime == null ? "?" : v.settable_runtime ? "yes" : "startup")));
+    if (open) body.append(detailRow(v, cols.length));
+  }
+  tableBox.replaceChildren(h("div", { class: "s2-table-wrap cf-wrap" },
+    h("table", { class: "s2-table cf-table" }, h("thead", {}, h("tr", {}, cols.map((c) => h("th", {}, c)))), body)),
+    ...(rows.length > MAX_ROWS ? [h("div", { class: "s2-small s2-faint", style: { marginTop: "4px" } }, `Showing the first ${MAX_ROWS}: narrow the search to see the rest.`)] : []));
+}
+
+function csv() {
+  const d = state.data;
+  const esc = (x) => { const s = x == null ? "" : String(x); return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const head = ["name", "value", "status", "differs_between_nodes", "default", "category", "sync", "settable_at_runtime", "variable_type",
+    ...d.nodes.map((n) => `node_${n.id}_${n.type}`)];
+  const lines = [head.join(",")];
+  for (const v of filtered()) {
+    lines.push([v.name, v.differs ? "" : valueText(v), v.status, v.differs ? "yes" : "no", v.default, v.category, v.sync,
+      v.settable_runtime == null ? "" : v.settable_runtime ? "yes" : "no", v.variable_type, ...d.nodes.map((n) => v.values?.[String(n.id)])].map(esc).join(","));
+  }
+  return "﻿" + lines.join("\r\n") + "\r\n";
+}
+
+function docsNotice() {
+  const d = state.data;
+  if (state.docsLoading) return h("div", { class: "cf-notice" }, h("span", { class: "s2-spinner" }), "Loading the engine variable reference (defaults, descriptions, categories) from docs.singlestore.com…");
+  const docs = d.docs;
+  if (!docs) return h("div", { class: "cf-notice warn" }, "The engine doesn't report default values. They come from the docs reference, which isn't loaded.",
+    h("button", { class: "s2-btn", onclick: () => loadDocs(false) }, "Load it"));
+  if (docs.error) return h("div", { class: "cf-notice warn" }, docs.error, " Defaults, descriptions and categories are unknown.",
+    h("button", { class: "s2-btn", onclick: () => loadDocs(true) }, "Try again"));
+  return h("div", { class: "cf-notice" },
+    `Defaults, descriptions and categories: SingleStore docs v${docs.version} (${docs.count} variables, downloaded ${fmt.relTime(docs.fetched_at)}). `,
+    docs.fetch_error ? h("span", {}, ` Update failed: ${docs.fetch_error}`) : null,
+    "Values marked changed differ from the documented default; ON = 1 and OFF = 0 as the docs say. Some defaults are prose and can't be compared.",
+    h("button", { class: "s2-btn ghost", onclick: () => loadDocs(true) }, "Update reference"));
+}
+
+function render() {
+  if (!state.data) {
+    root.replaceChildren(state.error ? S2.errorBox(state.error) : h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Reading the engine variables…"));
+    return;
+  }
+  const d = state.data;
+  const vs = d.variables;
+  const nChanged = vs.filter((v) => v.status === "changed").length, nDiff = vs.filter((v) => v.differs).length;
+  const cats = [...new Set(vs.map((v) => v.category).filter(Boolean))].sort();
+  const sel = (key, label, options) => h("select", { class: "s2-input", "aria-label": label, onchange: (e) => { state[key] = e.target.value; drawTable(); } },
+    options.map(([val, text]) => h("option", { value: val, selected: state[key] === val }, text)));
+  root.replaceChildren(...[
+    h("div", { class: "s2-header" },
+      h("div", {}, h("h1", { class: "s2-title" }, "Config"),
+        h("div", { class: "s2-subtitle" }, `SingleStore ${d.version} · ${d.nodes.length} nodes · ${vs.length} engine variables · read-only · updated ${fmt.relTime(d.generated_at)}`)),
+      h("span", { class: "s2-spacer" }),
+      h("button", { class: "s2-btn", disabled: state.loading, onclick: () => refresh(true) }, state.loading ? h("span", { class: "s2-spinner" }) : null, "Refresh"),
+      h("button", { class: "s2-btn", title: "The variables shown, with every node's value", onclick: () => S2.download(`singlestore-config-${d.version}.csv`, csv(), "text/csv") }, "Export CSV"),
+      S2.openInBrowserButton("cluster_config", () => ({ search: state.search || null, changed_only: state.changed || null })),
+      S2.fullscreenButton()),
+    state.error ? h("div", { class: "s2-error", style: { marginBottom: "8px" } }, `Refresh failed: ${state.error.message}`) : null,
+    docsNotice(),
+    h("div", { class: "cf-bar" }, searchInput,
+      h("label", { class: "cf-check" }, h("input", { type: "checkbox", checked: state.changed, onchange: (e) => { state.changed = e.target.checked; drawTable(); } }),
+        `Changed from default (${nChanged})`),
+      h("label", { class: "cf-check" }, h("input", { type: "checkbox", checked: state.differs, onchange: (e) => { state.differs = e.target.checked; drawTable(); } }),
+        `Differs between nodes (${nDiff})`),
+      cats.length ? sel("category", "Category", [["", "All categories"], ...cats.map((c) => [c, c])]) : null,
+      sel("sync", "Sync", [["", "Sync & non-sync"], ["sync", "Sync"], ["non-sync", "Non-sync"], ["unknown", "Not in docs"]]),
+      sel("runtime", "Settable", [["", "Any"], ["runtime", "Settable at runtime"], ["startup", "Startup only"]]),
+      h("span", { class: "s2-spacer" }),
+      h("span", { class: "cf-legend" }, h("span", { class: "c" }, "changed"), h("span", { class: "d" }, "differs by node")),
+      countEl),
+    tableBox,
+  ].filter(Boolean));
+  drawTable();
+}
+
+function reportContext(v) {
+  const d = state.data;
+  const changed = d.variables.filter((x) => x.status === "changed").slice(0, 30).map((x) => `${x.name}=${valueText(x)} (default ${x.default})`);
+  S2.updateModelContext(`User is viewing the Config view (engine variables, SingleStore ${d.version}).` +
+    (changed.length ? `\nChanged from default: ${changed.join("; ")}` : "") +
+    (v ? `\nSelected: ${v.name} = ${valueText(v)}${v.default != null ? ` (default ${v.default})` : ""}` : ""));
+}
+
+async function refresh(force) {
+  if (state.loading) return;
+  state.loading = true;
+  render();
+  try { state.data = await S2.callTool("config_data", { refresh: Boolean(force) }); state.error = null; }
+  catch (e) { state.error = e; }
+  finally { state.loading = false; render(); if (state.data) reportContext(); }
+}
+
+async function loadDocs(force) {
+  state.docsLoading = true;
+  render();
+  try { state.data = await S2.callTool("config_data", force ? { refresh_docs: true } : { fetch_docs: true }); state.error = null; }
+  catch (e) { state.error = e; }
+  finally { state.docsLoading = false; render(); }
+}
+
+window.addEventListener("s2:connection-changed", () => { state.data = null; render(); refresh(true).then(() => { if (!state.data?.docs) loadDocs(false); }); });
+
+let started = false;
+await S2.connect({
+  name: "singlestore-config",
+  onToolInput(args) {
+    if (args?.search) { state.search = String(args.search); searchInput.value = state.search; }
+    if (args?.changed_only) state.changed = true;
+  },
+  async onToolResult() {
+    if (started) return;
+    started = true;
+    await refresh(false);
+    if (state.data && !state.data.docs) loadDocs(false);
+  },
+  onToolCancelled() { if (!state.data) root.replaceChildren(h("div", { class: "s2-empty" }, "Cancelled.")); },
+});
+</script>
+</body>
+</html>

@@ -22,6 +22,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from . import history_store
 from .db import db, quote_identifier
 
 MARKER = "/* s2-query-history */"
@@ -59,6 +60,66 @@ def explain_target(sql: str) -> tuple[str | None, str | None]:
     if m:
         return m.group(2), None
     return None, "EXPLAIN only applies to SELECT, INSERT, REPLACE, UPDATE, DELETE and CREATE TABLE … AS SELECT."
+
+
+# SELECT * (or SELECT t.*) reading straight from a FROM list.
+_STAR = re.compile(r"\bSELECT\s+(?:ALL\s+|DISTINCT\s+)?(?:`?[\w$]+`?\s*\.\s*)?\*\s+FROM\s+", re.I)
+# Metadata probes (SAS and other tools read a table's columns this way): they return no rows.
+_NO_ROWS = re.compile(r"\bWHERE\s+(?:0\s*=\s*1|1\s*=\s*0|FALSE)\b|\bLIMIT\s+0\b", re.I)
+NARROW_COLUMNS = 2
+
+
+def select_star(sql: str, default_db: str | None) -> dict[str, Any] | None:
+    """Whether a statement's SELECT * may cost something. None: no SELECT * that reads a table directly.
+
+    Otherwise {"tables": ["db.table", …], "exempt": reason or None}. Exempt: SAS Embedded Process calls, metadata
+    probes that return no rows (WHERE 0=1 / LIMIT 0), and SAS in-database work tables (_dm…, _flw…, SASTMP…, built
+    for the job with just the columns it needs). ``SELECT * FROM (SELECT a, b …)`` reads only the columns the
+    inner query names, so it isn't counted. Narrow tables are decided by the caller (``star_finding``), which
+    knows the column counts."""
+    body = history_store.strip_comments(sql or "")
+    tables: list[str] = []
+    for m in _STAR.finditer(body):
+        rest = body[m.end():]
+        if rest.lstrip().startswith("("):
+            continue  # over a derived table: its columns are already listed
+        for name in history_store.table_names("SELECT * FROM " + rest[:2000], default_db):
+            if name not in tables:
+                tables.append(name)
+    if not tables:
+        return None
+    if history_store.origin(body) == "SAS EP":
+        return {"tables": tables, "exempt": "a SAS Embedded Process call (SAS reads the rows it was asked for)"}
+    if _NO_ROWS.search(body):
+        return {"tables": tables, "exempt": "a metadata probe that returns no rows (WHERE 0=1 / LIMIT 0)"}
+    if all(history_store.SAS_WORK_TABLE.match(t.rsplit(".", 1)[-1]) for t in tables):
+        return {"tables": tables, "exempt": "SAS in-database work tables, built for the job with the columns it needs"}
+    return {"tables": tables, "exempt": None}
+
+
+def column_counts(names: list[str]) -> dict[str, int]:
+    """Number of columns per "db.table" (information_schema.COLUMNS, one round trip). Missing tables are left out."""
+    pairs = {tuple(n.rsplit(".", 1)) for n in names if "." in n}
+    if not pairs:
+        return {}
+    dbs, tbls = sorted({p[0] for p in pairs}), sorted({p[1] for p in pairs})
+    rows = db.execute(
+        f"{MARKER} SELECT TABLE_SCHEMA AS d, TABLE_NAME AS t, COUNT(*) AS n FROM information_schema.COLUMNS"
+        f" WHERE TABLE_SCHEMA IN ({', '.join(['%s'] * len(dbs))}) AND TABLE_NAME IN ({', '.join(['%s'] * len(tbls))})"
+        " GROUP BY 1, 2", (*dbs, *tbls))[1]
+    return {f"{r['d']}.{r['t']}": int(r["n"]) for r in rows if (r["d"], r["t"]) in pairs}
+
+
+def star_finding(star: dict[str, Any] | None, counts: dict[str, int]) -> tuple[bool, str | None]:
+    """(flag it?, why not): SELECT * is worth flagging unless exempt or every table has at most two columns."""
+    if not star:
+        return False, None
+    if star["exempt"]:
+        return False, star["exempt"]
+    known = [counts.get(t) for t in star["tables"]]
+    if known and all(c is not None and c <= NARROW_COLUMNS for c in known):
+        return False, f"the table{'s have' if len(known) > 1 else ' has'} only {max(known)} column{'s' if max(known) != 1 else ''}"
+    return True, None
 
 
 def _normalize(sql: str) -> str:
@@ -255,8 +316,11 @@ def advise(max_queries: int = _MAX_QUERIES, refresh: bool = False) -> dict[str, 
         rows = int(e["row_count"] or 0)
         if rows >= 1_000_000 and re.match(r"^(SELECT|WITH)\b", sql, re.I):
             workload["big_results"].append({"rows": rows, "ms": ms, "sql": " ".join(sql.split())[:200], "db": e["db"]})
-        if re.search(r"\bSELECT\s+\*\s+FROM\b", sql, re.I) and (rows >= 100_000 or ms >= 10_000):
-            workload["select_star"].append({"rows": rows, "ms": ms, "sql": " ".join(sql.split())[:200], "db": e["db"]})
+        if rows >= 100_000 or ms >= 10_000:
+            star = select_star(sql, e["db"] or None)
+            if star and not star["exempt"]:
+                workload["select_star"].append({"rows": rows, "ms": ms, "sql": " ".join(sql.split())[:200], "db": e["db"],
+                                                "tables": star["tables"]})
         target, _ = explain_target(sql)
         if not target:
             continue
@@ -335,6 +399,14 @@ def advise(max_queries: int = _MAX_QUERIES, refresh: bool = False) -> dict[str, 
     order = {"high": 0, "medium": 1, "low": 2, "ok": 3}
     tables.sort(key=lambda t: (order[t["priority"]], -t["ms"]))
 
+    # SELECT * on narrow tables (one or two columns) costs nothing: keep only the wide ones.
+    stars = workload["select_star"]
+    if stars:
+        try:
+            counts = column_counts(sorted({t for s in stars for t in s["tables"]}))
+        except Exception:  # noqa: BLE001 - widths unknown: keep them all
+            counts = {}
+        workload["select_star"] = [s for s in stars if star_finding({"tables": s["tables"], "exempt": None}, counts)[0]]
     failures = sorted(({"error_code": k, **v} for k, v in workload["failures"].items()), key=lambda f: -f["count"])
     result = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
