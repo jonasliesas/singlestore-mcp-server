@@ -1,9 +1,9 @@
 # Roadmap
 
 Agreed with the owner; confirm the order before starting a new release.
-Last updated 2026-10-14 (0.9.0 in release).
+Last updated 2026-10-14 (0.9.0 released).
 
-## 0.9.0 (in release)
+## 0.9.0 (released 2026-10-14)
 SQL Editor tabs, autosave, history and SELECT builder; Schema Explorer bottomless info and Analyze;
 Cluster Monitor Queries/Disk/Bottomless/IO tabs; Query History usage, grouping, plan tree, SAS EP card
 (jobs and VA/CAS); Security and Config views (read-only); Workload Claude chat and SQL Editor ↔ Workload
