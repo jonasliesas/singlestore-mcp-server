@@ -419,6 +419,37 @@ function closeNotebook(key) {
   else renderTabs();
 }
 
+// ---------------------------------------------------------------- view pages
+// A view's page comes without the shared head (~0.45 MB; this page has the same one, so it is
+// put back from here), and a page this workspace already has (a second SQL tab or notebook) is
+// only revalidated by its build. The start view's page is fetched while the host still runs
+// sql_editor (on tool input).
+const HEAD_MARKER = "<" + "!--S2:SHARED-HEAD-->";
+const headHash = document.querySelector('meta[name="s2-head"]')?.content ?? null;
+const pages = new Map();       // uri -> { build, html }
+const prefetched = new Map();  // uri -> Promise<html | null>
+function sharedHead() {
+  return ["s2-shared-css", "s2-ext-apps", "s2-shared-js"].map((id) => document.getElementById(id)?.outerHTML ?? "").join("\n");
+}
+async function fetchPage(uri) {
+  const known = pages.get(uri);
+  const res = await S2.callTool("app_page", { uri, ...(headHash ? { head: headHash } : {}), ...(known?.build ? { build: known.build } : {}) });
+  if (!(res.unchanged && known)) {
+    let html = res.html;
+    if (res.head_omitted) { const head = sharedHead(); html = html.replace(HEAD_MARKER, () => head); }
+    pages.set(uri, { build: res.build, html });
+  }
+  return pages.get(uri).html;
+}
+function prefetchPage(uri) {
+  if (uri && !prefetched.has(uri) && !pages.has(uri)) prefetched.set(uri, fetchPage(uri).catch(() => null));
+}
+async function pageHtml(uri) {
+  const early = prefetched.get(uri);
+  prefetched.delete(uri);
+  return (early && (await early)) || fetchPage(uri);
+}
+
 async function createFrame(view, handoff) {
   const v = viewDef(view);
   const loading = h("div", { class: "ws-loading", dataset: { view } }, h("span", {}, h("span", { class: "s2-spinner" }), ` Loading ${v.title}…`));
@@ -443,6 +474,9 @@ async function createFrame(view, handoff) {
     if (handoff?.sql || handoff?.statements) f.pending.push({ ...handoff, type: "s2-set-sql" });
   } else if (view === "security") {
     if (handoff?.tab) f.args = { tab: handoff.tab };
+  } else if (view === "history") {
+    // The SQL Editor's "Find in Query History" (SAS pushdown): open with the search filled in.
+    if (handoff?.search) f.pending.push({ ...handoff, type: "s2-set-sql" });
   } else if (view === "schema") {
     f.args = ws.args.table ? { database: ws.args.database, table: ws.args.table } : ws.args.database ? { database: ws.args.database } : {};
   }
@@ -450,7 +484,7 @@ async function createFrame(view, handoff) {
     // Fetched with a tool call rather than resources/read: hosts may cache
     // resources for the session, which would keep an old view after a restart.
     let html = null;
-    try { html = (await S2.callTool("app_page", { uri: v.uri })).html; }
+    try { html = await pageHtml(v.uri); }
     catch { html = (await S2.app.readServerResource({ uri: v.uri }))?.contents?.[0]?.text; }
     if (!html) throw new Error("empty page");
     const debugSameOrigin = Boolean(S2.app.getHostContext()?.s2DebugSameOrigin);
@@ -508,6 +542,8 @@ window.addEventListener("message", async (ev) => {
   const msg = ev.data;
   if (msg?.type === "s2-open-view") { openView(msg.view, msg); return; }
   if (msg?.type === "s2-connection-changed") { connectionChanged(msg.name); return; }
+  // Another active SAS Viya connection (Connections, or a quick switch in the Schema Explorer / SQL Editor): tell the other views.
+  if (msg?.type === "s2-sas-connection-changed") { for (const key of Object.keys(ws.frames)) if (key !== view) deliver(key, { type: "s2-sas-connection-changed", name: msg.name }); return; }
   if (msg?.type === "s2-alerts-changed") { pollAlerts(); return; }
   // A note for another view without switching to it (e.g. the SQL Editor's "Update in workload" tells an open
   // Workload view); dropped when that view isn't open (it loads the saved state when it opens).
@@ -593,7 +629,7 @@ let started = false;
 S2.onDisplayModeChange = () => {};
 await S2.connect({
   name: "singlestore-workspace",
-  onToolInput(args) { ws.args = args ?? {}; },
+  onToolInput(args) { ws.args = args ?? {}; prefetchPage(viewDef(ws.args.view ?? "sql")?.uri); },
   async onToolResult(result) {
     if (started) return;
     started = true;

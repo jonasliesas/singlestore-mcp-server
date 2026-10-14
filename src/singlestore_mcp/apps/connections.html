@@ -42,6 +42,8 @@
   .cx-browse .item .n { flex: 1; font-family: var(--s2-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cx-browse .item .m { color: var(--s2-text-3); white-space: nowrap; }
   .cx-browse .warn { color: var(--s2-warn); }
+  .cx-startup { width: 100%; font-family: var(--s2-mono); font-size: 12px; resize: vertical; min-height: 70px; }
+  .cx-sas { margin-top: 26px; padding-top: 14px; border-top: 1px solid var(--s2-border-2); max-width: 900px; }
   .cx-foot { margin-top: 14px; font-size: 11px; color: var(--s2-text-3); max-width: 900px; }
 </style>
 </head>
@@ -57,75 +59,190 @@ const headEl = h("div", { class: "cx-head" });
 const formEl = h("div", { class: "cx-form", hidden: true });
 const listEl = h("div", { class: "cx-list" });
 const footEl = h("div", { class: "cx-foot" });
-const sasEl = h("section", { class: "cx-form", style: { marginTop: "18px" }, "aria-label": "SAS Viya" });
+const sasEl = h("section", { class: "cx-sas", "aria-label": "SAS Viya" });
 root.replaceChildren(headEl, h("div", { class: "cx-sub" }, "One connection is active at a time: every view, Claude's tools and new notebook kernels use it."), formEl, listEl, footEl, sasEl);
 
-// ---------------------------------------------------------------- SAS Viya (SAS cells in notebooks)
-const sas = { info: null, busy: null, result: null, awaitingCode: false, authUrl: null };
+// ---------------------------------------------------------------- SAS Viya connections
+// Like the SingleStore connections: saved connections, one active (SAS cells in notebooks, SAS in the
+// Workspace). The form's fields are created once per edit (never rebuilt by a re-render), it only opens
+// after the list has loaded, and nothing is saved except by its own Save buttons: Sign in only signs in.
+const sas = { data: null, error: null, busy: null, results: {}, contexts: {}, signing: null };
+const sasHeadEl = h("div", { class: "cx-head" });
+const sasFormEl = h("div", { class: "cx-form", hidden: true });
+const sasListEl = h("div", { class: "cx-list" });
+const sasFootEl = h("div", { class: "cx-foot" });
+sasEl.replaceChildren(sasHeadEl,
+  h("div", { class: "cx-sub" }, "For SAS cells in notebooks and SAS in the Workspace (SAS libraries and caslibs in the Schema Explorer, Run as PROC SQL / FedSQL / CAS in the SQL Editor). " +
+    "The code runs in a SAS Compute session on your Viya, signed in with your own Viya account; each session gets a library pointing at the active SingleStore connection. One SAS Viya connection is active at a time."),
+  sasFormEl, sasListEl, sasFootEl);
+
 async function loadSas() {
-  try { sas.info = await S2.callTool("sas_viya_state", {}); } catch (err) { sas.result = { ok: false, error: cleanError(err) }; }
+  try { sas.data = await S2.callTool("sas_connections_state", {}); sas.error = null; }
+  catch (err) { sas.error = cleanError(err); }
   renderSas();
 }
-async function sasCall(name, args, busy) {
-  sas.busy = busy; renderSas();
-  try { return await S2.callTool(name, args); }
-  catch (err) { sas.result = { ok: false, error: cleanError(err) }; return null; }
+// One action on a saved connection: busy spinner on its card, errors shown on the card.
+async function sasDo(key, name, tool, args) {
+  sas.busy = `${key}:${name}`; renderSas();
+  try { return await S2.callTool(tool, args); }
+  catch (err) { sas.results[name] = { ok: false, error: cleanError(err) }; return null; }
   finally { sas.busy = null; renderSas(); }
 }
+function sasTokenText(c) {
+  if (!c.signed_in) return "not signed in";
+  if (!c.token_valid) return c.renewable ? "renews automatically" : "sign-in expired";
+  const min = Math.round((c.token_expires * 1000 - Date.now()) / 60000);
+  return `token valid ${min > 90 ? `${Math.round(min / 60)} h` : `${min} min`}${c.renewable ? " · renews automatically" : ""}`;
+}
 function renderSas() {
-  const i = sas.info ?? {};
+  const d = sas.data;
+  sasHeadEl.replaceChildren(
+    h("h2", { class: "s2-title", style: { fontSize: "16px" } }, "SAS Viya connections"),
+    h("button", { class: "s2-btn primary", disabled: !d, title: d ? "" : "Loading…", onclick: () => editSas(null) }, "+ New Viya connection"));
+  if (!d) {
+    sasListEl.replaceChildren(sas.error
+      ? h("div", {}, S2.errorBox(new Error(sas.error)), h("button", { class: "s2-btn", onclick: () => { sas.error = null; renderSas(); loadSas(); } }, "Retry"))
+      : h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Loading SAS Viya connections…"));
+    return;
+  }
+  const spin = (k, name) => (sas.busy === `${k}:${name}` ? h("span", { class: "s2-spinner" }) : null);
+  sasListEl.replaceChildren(...(d.connections.length ? d.connections.map((c) => {
+    const res = sas.results[c.name];
+    const signing = sas.signing?.name === c.name ? sas.signing : null;
+    const who = c.signed_in ? `signed in${c.user ? ` as ${c.user}` : ""}${c.source && c.source !== "sign-in" ? ` (reusing the ${c.source})` : ""}` : null;
+    return h("div", { class: `cx-card${c.active ? " active" : ""}`, "data-sas-connection": c.name },
+      h("span", { class: "cx-dot", title: c.active ? "Active" : "" }),
+      h("div", {},
+        h("div", { class: "cx-name" }, c.name,
+          c.active ? h("span", { class: "cx-tag on" }, "ACTIVE") : null,
+          h("span", { class: `cx-tag${c.signed_in ? " on" : ""}`, style: c.signed_in ? {} : { color: "var(--s2-warn)" },
+            title: !c.signed_in && c.foreign_available ? "Test reuses a SAS Viya MCP server / SAS Viya CLI sign-in to this Viya, if there is one" : "" }, who ?? "not signed in"),
+          c.signed_in ? h("span", { class: "cx-tag" }, sasTokenText(c)) : null),
+        h("div", { class: "cx-where", title: c.url }, `${c.url} · ${c.compute_context} · CAS ${c.cas_server} · libref ${c.libref}${c.startup_code?.trim() ? " · startup code" : ""}`),
+        signing ? h("div", { class: "cx-row", style: { marginTop: "6px" } }, signing.input,
+          h("button", { class: "s2-btn primary", disabled: !!sas.busy, onclick: () => finishSas(c.name) }, spin("code", c.name), "Finish sign-in"),
+          h("button", { class: "s2-btn ghost", onclick: () => { sas.signing = null; renderSas(); } }, "Cancel"),
+          h("div", { style: { flexBasis: "100%", fontSize: "11px", color: "var(--s2-text-3)" } }, "Sign in in the browser window that opened; SAS Logon then shows a code to paste here. ",
+            h("a", { href: signing.url, target: "_blank", rel: "noopener" }, "Open the sign-in page again"))) : null,
+        res ? h("div", { class: `cx-result ${res.ok ? "ok" : "err"}` },
+          res.ok ? `✓ SAS Viya answers · compute context found · ${res.ms} ms` : `✕ ${res.error}`) : null),
+      h("div", { class: "cx-actions" }, ...[
+        c.active ? null : h("button", { class: "s2-btn primary", disabled: !!sas.busy, title: "Make this the active SAS Viya connection (the Workspace's SAS sessions restart on it; new notebook kernels use it)",
+          onclick: () => useSas(c.name) }, spin("use", c.name), "Use"),
+        h("button", { class: `s2-btn${c.signed_in ? "" : " primary"}`, disabled: !!sas.busy, onclick: () => signInSas(c.name) }, spin("signin", c.name), c.signed_in ? "Sign in again" : "Sign in"),
+        h("button", { class: "s2-btn", disabled: !!sas.busy, title: "Check the sign-in and the compute context (starts no SAS session)", onclick: () => testSas(c.name) }, spin("test", c.name), "Test"),
+        c.signed_in ? h("button", { class: "s2-btn ghost", disabled: !!sas.busy, onclick: () => signOutSas(c.name) }, "Sign out") : null,
+        h("button", { class: "s2-btn ghost", disabled: !!sas.busy, onclick: () => editSas(c) }, "Edit"),
+        h("button", { class: "s2-btn ghost", disabled: !!sas.busy, title: "Delete this connection and its sign-in", onclick: (e) => removeSas(c, e.currentTarget) }, "Delete"),
+      ].filter(Boolean)));
+  }) : [h("div", { class: "s2-empty" }, "No SAS Viya connections yet. Add one with + New Viya connection.")]));
+  sasFootEl.textContent = `SAS Viya sign-ins (tokens) are stored per connection in: ${d.password_store}. The list itself (no tokens) is in ~/.singlestore-mcp/sas.json.`;
+}
+
+function editSas(c) {
+  const e = c ?? { name: "", url: "", compute_context: "SAS Studio compute context", client_id: "vscode", ssl_verify: true, libref: "S2", cas_server: "cas-shared-default", startup_code: "" };
   const f = {
-    url: h("input", { class: "s2-input", value: i.url ?? "", placeholder: "https://viya.example.com", spellcheck: false }),
-    ctx: h("input", { class: "s2-input", value: i.compute_context ?? "SAS Studio compute context", spellcheck: false, list: "sas-contexts" }),
-    lib: h("input", { class: "s2-input", value: i.libref ?? "S2", maxlength: 8, spellcheck: false, style: { width: "90px" } }),
-    verify: h("input", { type: "checkbox", checked: i.ssl_verify !== false }),
-    code: h("input", { class: "s2-input", placeholder: "paste the code SAS Logon shows", spellcheck: false, autocomplete: "off" }),
+    name: h("input", { class: "s2-input", value: e.name, placeholder: "e.g. Viya prod", spellcheck: false, "aria-label": "Viya connection name" }),
+    url: h("input", { class: "s2-input", value: e.url, placeholder: "https://viya.example.com", spellcheck: false, "aria-label": "Viya address" }),
+    ctx: h("input", { class: "s2-input", value: e.compute_context, spellcheck: false, list: "sas-contexts", "aria-label": "Compute context" }),
+    client: h("input", { class: "s2-input", value: e.client_id, spellcheck: false, style: { width: "160px" }, "aria-label": "Client ID" }),
+    lib: h("input", { class: "s2-input", value: e.libref, maxlength: 8, spellcheck: false, style: { width: "90px" }, "aria-label": "SingleStore libref" }),
+    verify: h("input", { type: "checkbox", checked: e.ssl_verify !== false }),
+    cas: h("input", { class: "s2-input", value: e.cas_server, spellcheck: false, style: { width: "220px" }, "aria-label": "CAS server" }),
+    startup: h("textarea", { class: "s2-input cx-startup", rows: 4, spellcheck: false, "aria-label": "Startup code",
+      placeholder: "e.g.\nfilename inc filesrvc folderpath='/Users/me/My Folder/mcp' filename='s2_libname.sas';\n%include inc / nosource2;\nfilename inc clear;",
+      value: e.startup_code ?? "" }),
   };
-  const values = () => ({ url: f.url.value.trim(), compute_context: f.ctx.value.trim(), libref: f.lib.value.trim(), ssl_verify: f.verify.checked });
-  const save = async () => { const r = await sasCall("sas_viya_save", { settings: values() }, "save"); if (r) { sas.info = r; S2.toast("SAS Viya settings saved", "ok"); } };
-  const signIn = async () => {
-    await sasCall("sas_viya_save", { settings: values() }, "signin");
-    const r = await sasCall("sas_viya_sign_in", {}, "signin");
-    if (r) { sas.awaitingCode = true; sas.authUrl = r.authorize_url; renderSas(); }
-  };
-  const finish = async () => {
-    const r = await sasCall("sas_viya_sign_in", { code: f.code.value.trim() }, "code");
-    if (r) { sas.info = r; sas.awaitingCode = false; S2.toast(`Signed in to SAS Viya${r.user ? ` as ${r.user}` : ""}`, "ok"); }
-  };
-  const test = async () => { const r = await sasCall("sas_viya_test", {}, "test"); if (r) { sas.result = r; sas.contexts = r.contexts; renderSas(); } };
-  const signOut = async () => { const r = await sasCall("sas_viya_sign_out", {}, "out"); if (r) sas.info = r; };
-  const spin = (k) => (sas.busy === k ? h("span", { class: "s2-spinner" }) : null);
-  const status = !i.url ? h("span", { class: "s2-faint" }, "Not set up")
-    : i.signed_in ? h("span", { class: "cx-result ok" }, `✓ Signed in${i.user ? ` as ${i.user}` : ""}${i.source && i.source !== "sign-in" ? ` (reusing the ${i.source})` : ""}${i.renewable ? " · renews automatically" : ""}`)
-    : h("span", { class: "cx-result err" }, i.problem ?? "Not signed in");
-  const r = sas.result;
-  sasEl.replaceChildren(...[
-    h("strong", {}, "SAS Viya"),
-    h("div", { class: "s2-small s2-muted", style: { margin: "4px 0 10px" } },
-      "For SAS cells in notebooks (DATA steps, PROCs). The code runs in a SAS Compute session on your Viya, signed in with your own Viya account. " +
-      "Each session gets a library pointing at the active SingleStore connection."),
+  const status = h("div", { class: "cx-result" });
+  const values = () => ({ name: f.name.value.trim(), url: f.url.value.trim(), compute_context: f.ctx.value.trim(), client_id: f.client.value.trim(),
+    libref: f.lib.value.trim(), ssl_verify: f.verify.checked, cas_server: f.cas.value.trim(), startup_code: f.startup.value });
+  const close = () => { sasFormEl.hidden = true; sasFormEl.replaceChildren(); };
+  async function save(activate) {
+    const v = values();
+    if (!v.name || !v.url) { status.className = "cx-result err"; status.textContent = !v.name ? "Give the connection a name." : "Enter the SAS Viya address."; return; }
+    status.className = "cx-result"; status.replaceChildren(h("span", { class: "s2-spinner" }), " Saving…");
+    try {
+      const wasActive = sas.data.active;
+      sas.data = await S2.callTool("sas_connection_save", { connection: v, original_name: c?.name ?? null, activate });
+      if (c && c.name !== v.name) { sas.results[v.name] = sas.results[c.name]; delete sas.results[c.name]; }
+      close(); renderSas();
+      S2.toast(activate ? `Saved ${v.name}; it's the active SAS Viya connection` : `Saved ${v.name}`, "ok");
+      if (sas.data.active !== wasActive || sas.data.active === v.name) announceSas(sas.data.active);
+    } catch (err) { status.className = "cx-result err"; status.textContent = cleanError(err); }
+  }
+  sasFormEl.replaceChildren(
+    h("strong", {}, c ? `Edit ${c.name}` : "New SAS Viya connection"),
+    h("div", { style: { height: "10px" } }),
     h("div", { class: "cx-grid" },
+      h("label", {}, "Name"), f.name,
       h("label", {}, "Viya address"), f.url,
       h("label", {}, "Compute context"), f.ctx,
-      h("datalist", { id: "sas-contexts" }, (sas.contexts ?? []).map((n) => h("option", { value: n }))),
+      h("datalist", { id: "sas-contexts" }, (sas.contexts[c?.name] ?? []).map((n) => h("option", { value: n }))),
+      h("div", { class: "hint" }, "Test on a saved connection lists its compute contexts to pick from here."),
       h("label", {}, "SingleStore libref"), f.lib,
       h("div", { class: "hint" }, "SAS cells can read and write the notebook's SingleStore database through this library (SAS/ACCESS to SingleStore, engine SSTORE)."),
+      h("label", {}, "Client ID"), f.client,
+      h("div", { class: "hint" }, "Viya's OAuth client for the sign-in (vscode is built into Viya and used by SAS's own tools)."),
       h("label", {}, ""), h("label", {}, f.verify, " Verify Viya's certificate (turn off for self-signed test systems)"),
-      h("label", {}, "Status"), status),
-    sas.awaitingCode ? h("div", { class: "cx-grid", style: { marginTop: "10px" } },
-      h("label", {}, "Code"), f.code,
-      h("div", { class: "hint" }, "Sign in in the browser window that opened; SAS Logon then shows a code. ",
-        sas.authUrl ? h("a", { href: sas.authUrl, target: "_blank", rel: "noopener" }, "Open the sign-in page again") : null)) : null,
+      h("div", { class: "cx-sec" }, "Workspace: SAS libraries, caslibs and Run as PROC SQL / FedSQL / CAS"),
+      h("label", {}, "CAS server"), f.cas,
+      h("label", {}, "Startup code"), f.startup,
+      h("div", { class: "hint" }, "SAS code run once when the Workspace's SAS session starts (the Schema Explorer's SAS libraries and the SQL Editor's PROC SQL / FedSQL), " +
+        "e.g. %include of your libname files. It runs with NOSOURCE, and its log is never shown, so the libname files' contents stay hidden. " +
+        "Don't put passwords here: keep them in the included files. Saving the active connection restarts the Workspace's SAS session.")),
     h("div", { class: "cx-row" },
-      sas.awaitingCode
-        ? h("button", { class: "s2-btn primary", disabled: !!sas.busy, onclick: finish }, spin("code"), "Finish sign-in")
-        : h("button", { class: `s2-btn${i.signed_in ? "" : " primary"}`, disabled: !!sas.busy, onclick: signIn }, spin("signin"), i.signed_in ? "Sign in again" : "Sign in"),
-      h("button", { class: "s2-btn", disabled: !!sas.busy || !i.url, onclick: test }, spin("test"), "Test"),
-      h("button", { class: "s2-btn", disabled: !!sas.busy, onclick: save }, spin("save"), "Save"),
-      i.signed_in ? h("button", { class: "s2-btn ghost", disabled: !!sas.busy, onclick: signOut }, "Sign out") : null),
-    r ? h("div", { class: `cx-result ${r.ok ? "ok" : "err"}` }, r.ok ? `✓ SAS Viya answers · compute context found · ${r.ms} ms` : `✕ ${r.error}`) : null,
-  ].filter(Boolean));
+      h("button", { class: "s2-btn", onclick: () => save(false) }, "Save"),
+      c?.active ? null : h("button", { class: "s2-btn primary", onclick: () => save(true) }, "Save and use"),
+      h("span", { class: "s2-spacer" }),
+      h("button", { class: "s2-btn ghost", onclick: close }, "Cancel")),
+    status);
+  sasFormEl.hidden = false;
+  f.name.focus();
 }
+
+async function useSas(name) {
+  const r = await sasDo("use", name, "sas_connection_activate", { name });
+  if (r) { sas.data = r; renderSas(); S2.toast(`${name} is the active SAS Viya connection`, "ok"); announceSas(name); }
+}
+async function signInSas(name) {
+  const r = await sasDo("signin", name, "sas_viya_sign_in", { name });
+  if (r) {
+    sas.signing = { name, url: r.authorize_url, input: h("input", { class: "s2-input", placeholder: "paste the code SAS Logon shows", spellcheck: false,
+      autocomplete: "off", "aria-label": "Sign-in code", style: { flex: "1", minWidth: "220px" } }) };
+    renderSas();
+    sas.signing.input.focus();
+  }
+}
+async function finishSas(name) {
+  const code = sas.signing?.input.value.trim() ?? "";
+  const r = await sasDo("code", name, "sas_viya_sign_in", { name, code });
+  if (r) {
+    sas.data = r.state; sas.signing = null; delete sas.results[name];
+    renderSas();
+    S2.toast(`Signed in to ${name}${r.user ? ` as ${r.user}` : ""}`, "ok");
+    if (r.active) announceSas(name);
+  }
+}
+async function testSas(name) {
+  const r = await sasDo("test", name, "sas_viya_test", { name });
+  if (r) { sas.results[name] = r; if (r.contexts) sas.contexts[name] = r.contexts; }
+  await loadSas();  // Test may have renewed the token or reused another SAS tool's sign-in
+}
+async function signOutSas(name) {
+  const r = await sasDo("out", name, "sas_viya_sign_out", { name });
+  if (r) { sas.data = r; delete sas.results[name]; renderSas(); }
+}
+async function removeSas(c, button) {
+  if (!(await S2.confirmInline(button, `Delete ${c.name} and its sign-in?`, "Delete"))) return;
+  const r = await sasDo("delete", c.name, "sas_connection_delete", { name: c.name });
+  if (r) { sas.data = r; delete sas.results[c.name]; renderSas(); S2.toast(`Deleted ${c.name}`, "ok"); if (c.active) announceSas(r.active); }
+}
+// Tell the other Workspace views (Schema Explorer, SQL Editor) that the active SAS Viya connection changed.
+function announceSas(name) {
+  if (S2.embedded()) window.parent.postMessage({ type: "s2-sas-connection-changed", name }, "*");
+  S2.updateModelContext(`The active SAS Viya connection is now "${name ?? "(none)"}".`);
+}
+window.addEventListener("s2:sas-connection-changed", () => loadSas());
 
 function where(c) {
   if (c.url) return c.url;

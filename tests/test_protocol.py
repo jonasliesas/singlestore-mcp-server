@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 import pytest
-from support import APPS_DIR, McpSession
+from support import APPS_DIR, McpSession, server_env
 from test_static import tools_called
 
 # Model-visible tools the regression run relies on (a rename or removal should be deliberate).
@@ -161,3 +163,43 @@ def test_browser_view_forwards_allowed_tools(view_base: tuple[str, str], name: s
     status, body = _post(base, name, args, origin)
     assert status == 200, body
     assert "not available in the browser view" not in json.dumps(body), body
+
+
+# ----------------------------------------------------------------------------- start-up speed
+
+_HEAD_MARKER = "<!--S2:SHARED-HEAD-->"
+
+
+def test_app_page_leaves_out_the_shared_head_the_workspace_has(mcp: McpSession) -> None:
+    """The Workspace puts its own copy of the shared head (~0.45 MB) into a view's page, and revalidates a
+    page it already has by its build."""
+    uri = "ui://singlestore/schema-explorer.html"
+    full = mcp.ok("app_page", {"uri": uri})
+    assert not full.get("head_omitted") and _HEAD_MARKER not in full["html"]
+    head = re.search(r'<meta name="s2-head" content="([0-9a-f]+)">', full["html"]).group(1)
+    lite = mcp.ok("app_page", {"uri": uri, "head": head})
+    assert lite["head_omitted"] and lite["build"] == full["build"]
+    before, _, after = lite["html"].partition(_HEAD_MARKER)
+    assert full["html"].startswith(before) and full["html"].endswith(after)
+    shared = full["html"][len(before):len(full["html"]) - len(after)]
+    assert shared.startswith('<style id="s2-shared-css">') and shared.endswith("</script>")
+    assert 'id="s2-ext-apps"' in shared and 'id="s2-shared-js"' in shared and len(shared) > 300_000
+    assert mcp.ok("app_page", {"uri": uri, "head": "0000"})["html"] == full["html"]  # other head: whole page
+    same = mcp.ok("app_page", {"uri": uri, "head": head, "build": full["build"]})
+    assert same["unchanged"] and "html" not in same
+
+
+def test_restart_uses_the_standby_and_keeps_working(test_home, sql_dir) -> None:
+    """restart_server hands over to the pre-loaded standby process; the server answers right after."""
+    env = server_env(test_home, sql_dir, {"SINGLESTORE_MCP_STANDBY_DELAY": "0.2"})
+    with McpSession(env, read_timeout=120) as s:
+        assert not s.call("alerts_badge").is_error
+        messages = []
+        for _ in range(2):
+            time.sleep(4)  # the standby is started 0.2 s after a start and may still be loading: fine either way
+            r = s.call("restart_server", timeout=90)
+            assert not r.is_error and r.data["restarted"], r.text
+            messages.append(r.data["message"])
+            after = s.call("alerts_badge", timeout=60)
+            assert not after.is_error, after.text
+        assert any("from the standby" in m for m in messages), messages

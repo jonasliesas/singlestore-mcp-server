@@ -193,3 +193,80 @@ def test_history_records_tab_and_file(home: Path) -> None:
     assert "tab" not in newest
     assert [e["sql"] for e in st.list_history("report.sql")["entries"]] == ["SELECT 2"]
     assert [e["sql"] for e in st.list_history("untitled")["entries"]] == ["SELECT 1"]
+
+
+# ----------------------------------------------------------------------------- files in use (Windows)
+# On Windows os.replace / open fail with PermissionError while another reader, the second server process or
+# antivirus has the file open (see singlestore_mcp.fileio). These were the cause of the flaky UI tests: a failed
+# draft save, and a failed read taken for "no tabs yet", which started the tab list over.
+
+def _flaky(monkeypatch: pytest.MonkeyPatch, target: object, name: str, fails: int, match: str) -> list[int]:
+    real = getattr(target, name)
+    calls = [0]
+
+    def wrapper(*args: object, **kw: object) -> object:
+        if match in str(args[-1] if name == "replace" else args[0]):
+            calls[0] += 1
+            if calls[0] <= fails:
+                raise PermissionError(13, "The process cannot access the file because it is being used by another process")
+        return real(*args, **kw)
+
+    monkeypatch.setattr(target, name, wrapper)
+    return calls
+
+
+def test_save_retries_while_the_file_is_in_use(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from singlestore_mcp import fileio
+
+    tab = st.list_tabs()["active"]
+    calls = _flaky(monkeypatch, fileio.os, "replace", 3, f"{tab}.json")
+    st.save_draft({"sql": "SELECT 1"}, tab)
+    assert calls[0] == 4 and st.load_draft(tab)["sql"] == "SELECT 1"
+    assert not list(home.glob("drafts/*.tmp")), "temp files left behind"
+
+
+def test_unreadable_tab_list_is_not_taken_for_missing(home: Path) -> None:
+    from singlestore_mcp import fileio
+
+    created = st.create_tab()["tab"]["id"]
+    before = _ids(st.list_tabs())
+    # Briefly in use: the read is retried and the tabs are all there.
+    with pytest.MonkeyPatch.context() as mp:
+        _flaky(mp, Path, "read_text", 2, "tabs.json")
+        assert _ids(st.list_tabs()) == before
+    # Still in use after the retries: an error, never a fresh tab list (that lost every tab).
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(fileio, "RETRIES", 2)
+        _flaky(mp, Path, "read_text", 99, "tabs.json")
+        with pytest.raises(OSError):
+            st.list_tabs()
+    assert _ids(st.list_tabs()) == before and created in before
+
+
+def test_concurrent_reads_and_saves(home: Path) -> None:
+    """A reader polling a draft while it's autosaved (what the UI test and a second process do): no save fails
+    and no read comes back empty."""
+    import threading
+
+    tab = st.list_tabs()["active"]
+    st.save_draft({"sql": "SELECT 0"}, tab)
+    stop, bad = threading.Event(), []
+
+    def reader() -> None:
+        while not stop.is_set():
+            d = st.load_draft(tab)
+            if not d or not d["sql"].startswith("SELECT"):
+                bad.append(d)
+
+    threads = [threading.Thread(target=reader) for _ in range(2)]
+    for t in threads:
+        t.start()
+    try:
+        for i in range(150):
+            st.save_draft({"sql": f"SELECT {i}"}, tab)
+    finally:
+        stop.set()
+        for t in threads:
+            t.join()
+    assert not bad
+    assert st.load_draft(tab)["sql"] == "SELECT 149"

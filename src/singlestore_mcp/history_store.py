@@ -410,8 +410,8 @@ def connect() -> sqlite3.Connection:
 def sync(force: bool = False, min_ms: int = 1000) -> dict[str, Any]:
     """Copy new events from the cluster's query history. Cheap: only events after the newest stored one.
 
-    Keeps every run of at least ``min_ms`` and every failed run (the trace keeps those whatever their duration
-    when ``Trace_all_failed_executions`` is on)."""
+    Keeps every run of at least ``min_ms``, every failed run (the trace keeps those whatever their duration
+    when ``Trace_all_failed_executions`` is on) and every SAS EP call the trace kept."""
     src = source_id()
     now = time.time()
     with _lock:
@@ -421,7 +421,9 @@ def sync(force: bool = False, min_ms: int = 1000) -> dict[str, Any]:
     conn = connect()
     try:
         newest = conn.execute("SELECT MAX(finished) FROM runs WHERE source = ?", (src,)).fetchone()[0]
-        where = ["EVENT_TYPE = 'Query_completion'", "(DETAILS::%%duration_ms >= %s OR DETAILS::%%success = 0)",
+        # SAS EP calls are kept whatever their duration (a lower trace threshold then shows the fast ones too).
+        where = ["EVENT_TYPE = 'Query_completion'", "(DETAILS::%%duration_ms >= %s OR DETAILS::%%success = 0"
+                 " OR DETAILS::$query_text LIKE '%%sasepFunction%%' OR DETAILS::$query_text REGEXP 'EP[.]h[0-9A-Fa-f]{32}_EP')",
                  "(DETAILS::$query_text IS NULL OR DETAILS::$query_text NOT LIKE %s)"]
         params: list[Any] = [int(min_ms), f"%{MARKER_PREFIX}%"]
         if newest:

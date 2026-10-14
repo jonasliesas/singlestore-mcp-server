@@ -10,7 +10,6 @@ database icon (scripts/singlestore-workspace.ico) for it. Windows only.
 from __future__ import annotations
 
 import argparse
-import math
 import struct
 import subprocess
 import zlib

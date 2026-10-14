@@ -98,13 +98,24 @@ def _ext_apps_script() -> str:
 
 @cache
 def _head() -> str:
+    # The ids let the Workspace rebuild this head from its own copy (see app_page), so a
+    # view's page needn't carry the ~0.45 MB ext-apps bundle through the host again.
     css = (_HERE / "shared.css").read_text(encoding="utf-8")
     js = (_HERE / "shared.js").read_text(encoding="utf-8")
     return (
-        f"<style>\n{css}\n</style>\n"
-        f'<script type="module">\n{_ext_apps_script()}\n</script>\n'
-        f'<script type="module">\n{js}\n</script>'
+        f'<style id="s2-shared-css">\n{css}\n</style>\n'
+        f'<script type="module" id="s2-ext-apps">\n{_ext_apps_script()}\n</script>\n'
+        f'<script type="module" id="s2-shared-js">\n{js}\n</script>'
     )
+
+
+@cache
+def head_hash() -> str:
+    return hashlib.sha1(_head().encode("utf-8")).hexdigest()[:12]
+
+
+# Stands for the shared head in a page sent without it (app_page with a matching ``head``).
+SHARED_HEAD_MARKER = "<!--S2:SHARED-HEAD-->"
 
 
 _VENDOR_MARKER = re.compile(r"<!--S2:VENDOR:([\w.-]+)-->")
@@ -134,7 +145,8 @@ def build_page(template: str) -> str:
     html = _VENDOR_MARKER.sub(_vendor_inline, html)
     html = html.replace(_HEAD_MARKER, _head(), 1)
     build = hashlib.sha1(html.encode("utf-8")).hexdigest()[:8]
-    return html.replace("<head>", f'<head>\n<meta name="s2-build" content="{build}">', 1)
+    meta = f'<meta name="s2-build" content="{build}">\n<meta name="s2-head" content="{head_hash()}">'
+    return html.replace("<head>", f"<head>\n{meta}", 1)
 
 
 _browser_url_factory: Callable[[str, dict[str, Any]], str] | None = None
@@ -191,6 +203,22 @@ def register_app(uri: str, template: str, *, name: str, description: str, extern
 
 def page_html(uri: str) -> str | None:
     return _PAGES.get(uri)
+
+
+_BUILD_RE = re.compile(r'<meta name="s2-build" content="([0-9a-f]+)">')
+_LITE: dict[str, tuple[str, str]] = {}
+
+
+def page_parts(uri: str) -> tuple[str, str, str] | None:
+    """(build, full page, page with the shared head replaced by SHARED_HEAD_MARKER), or None."""
+    html = _PAGES.get(uri)
+    if html is None:
+        return None
+    if uri not in _LITE:
+        match = _BUILD_RE.search(html)
+        _LITE[uri] = (match.group(1) if match else "", html.replace(_head(), SHARED_HEAD_MARKER, 1))
+    build, lite = _LITE[uri]
+    return build, html, lite
 
 
 def tool_result(summary: str, data: dict[str, Any]) -> CallToolResult:

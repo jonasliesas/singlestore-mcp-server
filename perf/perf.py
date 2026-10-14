@@ -249,7 +249,7 @@ def main() -> None:
                       "seconds": round(time.time() - t0), "args": vars(args), "python": sys.version.split()[0]}
 
     RESULTS.mkdir(exist_ok=True)
-    previous = sorted(RESULTS.glob("*.json"), key=lambda p: p.stat().st_mtime)
+    previous = sorted((p for p in RESULTS.glob("*.json") if not p.name.startswith("startup-")), key=lambda p: p.stat().st_mtime)
     out = RESULTS / f"{version}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
     out.write_text(json.dumps(report, indent=1), encoding="utf-8")
     print(f"\nwrote {out.relative_to(ROOT)}")

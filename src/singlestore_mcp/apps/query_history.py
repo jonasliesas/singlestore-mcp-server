@@ -672,7 +672,7 @@ def _ep_card(event: dict[str, Any], plan: dict[str, Any] | None) -> dict[str, An
             plan = {"runs": p["runs"], "AVERAGE_EXEC_TIME": p["avg_ms"], "BLOB_CACHE_WAIT_TIME_MS": p["blob_wait_ms"],
                     "AVERAGE_BLOB_CACHE_MISS_BYTES": p["avg_blob_miss"], "AVERAGE_MAX_MEMORY_USE": p["avg_max_mem"],
                     "AVERAGE_MEMORY_USE": p["avg_mem"], "AVERAGE_DISK_SPILLING_USE": p["avg_spill"],
-                    "QUEUED_TIME": p["queued_ms"]}
+                    "QUEUED_TIME": p["queued_ms"], "CPU_TIME": p["cpu_ms"]}
     try:
         return sas_ep.analyze(event, plan)
     except Exception as exc:  # noqa: BLE001 - the rest of the analysis still stands
@@ -1053,6 +1053,8 @@ def _ep_lines(ep: dict[str, Any] | None) -> list[str]:
         v = p.get("verdict") or {}
         out.append(f"- {p['title']}: {p.get('value') or ''} [{v.get('level')}] {v.get('text', '')}"
                    + (f" Next step: {v['step']}" if v.get("step") else ""))
+    for t in ep.get("tips") or []:
+        out.append(f"- Tip ({t['kind']}): {t['text']}" + (f" Sources: {', '.join(x['url'] for x in t['sources'])}" if t["sources"] else ""))
     return out
 
 
@@ -1141,10 +1143,11 @@ def query_history_profile(key: str, timeout_s: float = 300) -> CallToolResult:
 def query_history_usage(days: float = 7) -> CallToolResult:
     """Most used tables and most active users over the last ``days`` (0: everything stored), from the local
     copy of the query history (traced runs) and of the plan cache (every execution, no user)."""
-    synced, now, _plans = db.parallel(
+    synced, now, _plans, ep_live = db.parallel(
         lambda: history_store.safe_sync(force=True),
         lambda: _query("SELECT NOW() AS t")[0]["t"],
         lambda: history_store.snapshot_plans(force=True),
+        sas_ep._safe(sas_ep.live_calls),
     )
     since = None
     if days and float(days) > 0:
@@ -1152,10 +1155,15 @@ def query_history_usage(days: float = 7) -> CallToolResult:
 
         since = (now - _dt.timedelta(days=float(days))).isoformat(sep=" ")
     data = history_store.usage(since)
+    try:
+        data["sas_ep"] = sas_ep.overview(since, ep_live if isinstance(ep_live, list) else None)
+    except Exception as exc:  # noqa: BLE001 - the rest of the Usage tab still stands
+        data["sas_ep"] = {"error": f"The SAS EP overview failed: {str(exc)[:200]}"}
     data.update(days=days, now=jsonable(now), sync=synced)
     lines = [f"Usage over {'everything stored' if not since else f'the last {float(days):g} days'}: "
              f"{data['table_count']} tables, {data['user_count']} users."]
     lines += [f"- {t['database']}.{t['table']}: {t['execs'] or t['runs']} runs" for t in data["tables"][:5]]
+    lines += sas_ep.overview_lines(data.get("sas_ep") or {})
     return tool_result("\n".join(lines), data)
 
 

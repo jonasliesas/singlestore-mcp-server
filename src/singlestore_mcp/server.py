@@ -19,6 +19,14 @@ from typing import Any
 
 def main() -> None:
     if os.environ.get("SINGLESTORE_MCP_SUPERVISED") or os.environ.get("SINGLESTORE_MCP_NO_SUPERVISOR"):
+        # Open the database connections (1-2 s each over a WAN) while the MCP SDK
+        # and the apps load (~2-3 s), so the first tool call finds them ready.
+        # db is imported here, before the warm-up threads start; they then load only
+        # the driver's connection code and the credential store (none of which the
+        # server's own imports touch).
+        from .db import db
+
+        db.warm()
         from .server_impl import run_stdio
 
         run_stdio()

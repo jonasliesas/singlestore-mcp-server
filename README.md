@@ -23,7 +23,8 @@ identity providers, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
     become pandas DataFrames; charts; `%sql` / `%%sql` magics; `.ipynb` files
     compatible with SingleStore Notebooks; several notebooks as tabs.
   - **Schema Explorer**, **Pipeline Monitor**, **Cluster Monitor** (CPU,
-    memory, disk per node and running queries) and a **Query Grid**.
+    memory, disk per node, running queries, cluster health, 7-day metrics
+    history and backups) and a **Query Grid**.
 - **Claude inside the apps**: a chat panel in the SQL Editor and the Notebook
   that checks the database (read-only) and answers with SQL / Python you can
   insert with one click.
@@ -117,6 +118,27 @@ changes load in a few seconds without touching `/mcp`. Browser links made
 before a restart stop working. Set `SINGLESTORE_MCP_NO_SUPERVISOR=1` to run
 the server without the relay.
 
+Restarts are fast because most of a fresh server's start is loading the MCP
+SDK and the database driver, which don't change when this project's code does.
+5 s after each start the relay prepares a *standby* process that has loaded only
+those packages; `restart_server` hands over to it, and it then loads this
+project's code fresh from disk and opens its database connections while the old
+server stops (about 1.5 s until the first answer instead of about 6 s). The
+standby is an idle Python process (~90 MB); if packages were installed or
+removed since it loaded them, it steps aside and a fresh server starts.
+`SINGLESTORE_MCP_NO_STANDBY=1` turns it off. Any server start also opens its
+database connections while the code loads, so the first tool call doesn't wait
+for them.
+
+If the server exits on its own — typically a syntax or import error in code
+you just changed — the relay starts it again after a back-off (1, 2, 5, 10,
+20, then every 30 s; the count starts over once a server has run for a
+minute) instead of in a tight loop. It logs the error (the end of the
+traceback) to the MCP server log, and answers tool calls at once with that
+error instead of letting them wait. Fix the code and call `restart_server`
+(the relay answers it itself, so it works while the server is down): it starts
+the server right away, or reports the new error.
+
 ## SingleStore Workspace
 
 In hosts that support [MCP Apps](https://modelcontextprotocol.io/seps/1865-mcp-apps-interactive-user-interfaces-for-mcp)
@@ -132,7 +154,7 @@ left switches between its views:
 | **Notebook** | [Notebook](#notebook): SQL and Python cells on a Jupyter kernel |
 | **Schema** | [Schema Explorer](#schema-explorer-pipeline-monitor-cluster-monitor-query-grid): databases, tables, columns, keys |
 | **Pipelines** | [Pipeline Monitor](#schema-explorer-pipeline-monitor-cluster-monitor-query-grid): state, progress and errors of pipelines |
-| **Cluster** | [Cluster Monitor](#schema-explorer-pipeline-monitor-cluster-monitor-query-grid): CPU, memory, disk per node and running queries |
+| **Cluster** | [Cluster Monitor](#schema-explorer-pipeline-monitor-cluster-monitor-query-grid): CPU, memory, disk per node, running queries, health, metrics history, backups |
 | **Connect** (bottom of the rail) | [Connections](#connections): saved SingleStore connections and the active one |
 
 **Opening it**
@@ -176,7 +198,19 @@ left switches between its views:
   its status, rows and time; the last result set is shown. Run all stops at
   the first error unless **Continue on error** is ticked. `USE db` switches the
   editor's database.
-- Results export to CSV.
+- **Big results stream.** A SingleStore read shows its first 1,000 rows as soon
+  as they arrive (a `LIMIT 100000` no longer waits for all 100,000); the rest
+  keeps loading on the server while the status line shows `1,000+ rows ·
+  loading…`, and the total when it's done. Scrolling to the end of the grid
+  loads the next 5,000 rows. **Stop** (while running or loading) cancels the
+  query on the cluster (`KILL QUERY` on its own connection, after checking on
+  `PROCESSLIST` that it still runs this statement); the rows so far stay.
+  The editor keeps at most 100,000 rows (about 128 MB) of one result
+  (`SINGLESTORE_MCP_EDITOR_MAX_ROWS`); a bigger one is marked *cut off at …*
+  and the statement is ended. Writes and SAS runs still return up to 1,000 rows.
+- Results export to CSV: **Export CSV** first loads every row of the result
+  (up to that limit) and writes all of them; sorting a column also loads the
+  rest first, so it sorts the whole result. The chart uses the rows loaded.
 - **Chart** (next to *Table* above the results) charts any result: bar
   (grouped or stacked), line, area, scatter or pie. It picks X and Y for you
   (a date or text column on X, the numeric columns on Y); you can change them,
@@ -271,6 +305,75 @@ left switches between its views:
   [in-app assistant](#claude-in-the-apps); **in the Claude chat** sends the
   question to the chat box instead (you click Send there).
 
+**SAS: Run as PROC SQL, FedSQL or FedSQL in CAS**
+
+The editor also runs SQL in SAS on your SAS Viya (the active SAS Viya
+connection in [Connections](#connections)), so the same SQL can be tried
+SingleStore-native and through SAS side by side.
+
+- **Run as** (next to the database picker) picks what the tab's SQL runs as:
+  **SingleStore SQL**, **PROC SQL** or **FedSQL** (SAS libraries, in the
+  Workspace's SAS Compute session) or **FedSQL in CAS** (caslibs). The picker
+  next to it then lists databases, SAS libraries or caslibs; **Ctrl+Shift+L**
+  cycles the languages. Each tab keeps its language (with its library and
+  options) in its draft; `.sas` files open as PROC SQL, `.sql` files as
+  SingleStore SQL. The language is never guessed from the SQL.
+- You write only the SQL: the editor wraps it (`proc sql; … quit;`,
+  `proc fedsql; … quit;`, CAS `fedSql.execDirect`). A SELECT becomes
+  `CREATE TABLE WORK._S2RES AS …` (CASUSER for CAS), whose rows fill the result
+  grid with their SAS formats applied (dates as dates). Statement splitting,
+  **Ctrl+Enter** and **Run all** work as for SingleStore SQL (SAS rules: no
+  `#` comments or backticks).
+- Text that starts with `proc`, `data`, `%`, `libname`, `options` … runs as
+  **plain SAS code**, unwrapped: the statement at the cursor takes the whole
+  step through its `run;` / `quit;`. Its printed output shows in the result
+  pane.
+- PROC SQL: the library you pick is used for one-level names
+  (`options user=`); without one they're WORK tables, as in SAS. FedSQL
+  one-level names are WORK tables; in CAS they're in the picked caslib
+  (default CASUSER).
+- **⚙** (SAS options, per tab): PROC SQL **OUTOBS** (default: the 1000-row
+  cap), **NOEXEC** and **FEEDBACK**, **Show pushdown** (on by default) and
+  **Restart SAS session**.
+- The result pane has **Result**, **Log** (the generated SAS code with
+  **Copy code**, then the SAS log with errors, warnings and notes in colour)
+  and **Pushdown** tabs. Colour badges show the language everywhere: S2 blue,
+  PROC SQL / FedSQL orange, CAS purple, SAS (plain code) teal; also in the
+  editor's corner and in the run history.
+- **Writes**: reads run straight away. Statements that write anywhere but
+  WORK (Compute) or CASUSER (CAS) ask first, as do plain SAS steps that write
+  outside WORK or run system commands, `proc datasets`, `caslib` statements
+  and the like. Writes to a shared caslib get an extra warning.
+- **Looks wrong?** The editor asks before running SQL that looks like another
+  language, e.g. a SAS library (`s2.cars`) or a `proc` step while the tab
+  runs SingleStore SQL, backticks in a SAS tab, or `LIMIT` in PROC SQL:
+  **Run as …** instead, or **Run anyway**.
+- **Autocomplete** in SAS tabs suggests libraries / caslibs, their tables and
+  the columns of tables you've expanded in the tree (typing `lib.` loads its
+  tables).
+- The history keeps the language with each statement; **Run** runs it again
+  as that language.
+
+**Show pushdown**
+
+With **Show pushdown** on, a PROC SQL run adds
+`options sastrace=',,,d' sastraceloc=saslog nostsuffix sql_ip_trace=(note, source);`
+(and turns it off again after), FedSQL adds `_method`, and CAS FedSQL runs with
+`method=true`. The **Pushdown** tab then shows the SQL SingleStore received
+(metadata probes such as `WHERE 0=1` left out; parallel read-back streams
+counted) and a verdict:
+
+- **Pushed down fully**: SingleStore did the work, SAS received the result;
+- **Partly pushed down**: e.g. the WHERE clause or column list went to
+  SingleStore, SAS did the rest;
+- **Pulled into SAS**: the rows were read into SAS / CAS and processed there;
+- **No SingleStore**: nothing was sent to SingleStore.
+
+**Find in Query History** checks whether a statement SingleStore received is in
+the cluster's plan cache or the local query history (with its runs and average
+time) and opens the History view searching for it. FedSQL's plan names what it
+pushed down but not the SQL text, so FedSQL shows the verdict only.
+
 ### Notebook
 
 **Cells**
@@ -329,12 +432,16 @@ left switches between its views:
 
 **SAS cells (SAS Viya)**
 
-- Set up once in **Connect → SAS Viya**: the Viya address, the compute
-  context (e.g. *SAS Studio compute context*; **Test** lists them) and
-  **Sign in**. Sign-in uses your own Viya account (OAuth with Viya's built-in
-  `vscode` client): SAS Logon opens in the browser and shows a code to paste
-  once; after that the sign-in renews itself. If you already signed in with
-  the SAS Viya MCP server or the SAS Viya CLI, that sign-in is reused.
+- Set up once in **Connect → SAS Viya connections**: **+ New Viya connection**
+  (a name, the Viya address and the compute context, e.g. *SAS Studio compute
+  context*; **Test** lists them), then **Sign in** on its card. Sign-in uses
+  your own Viya account (OAuth with Viya's built-in `vscode` client): SAS Logon
+  opens in the browser and shows a code to paste once; after that the sign-in
+  renews itself. If you already signed in with the SAS Viya MCP server or the
+  SAS Viya CLI, **Test** reuses that sign-in for a connection to the same Viya.
+- SAS cells use the **active** SAS Viya connection. A new kernel picks up the
+  connection that is active when it starts; restart the kernel after **Use**
+  on another one.
 - **+ SAS** adds a SAS cell. The code runs in a SAS Compute session on Viya
   (one per notebook, started on the first SAS cell, which takes about half a
   minute; restart the kernel for a fresh one).
@@ -364,6 +471,52 @@ left switches between its views:
   you insert as a new cell, or use to replace the selected one.
 
 ### Connections
+
+**SAS Viya connections** (bottom of the Connect view) work like the SingleStore
+ones: several saved connections, **one active**. SAS cells in notebooks, the
+Schema Explorer's SAS libraries / CAS sources and the SQL Editor's Run as
+PROC SQL / FedSQL / CAS use the active one.
+
+- **+ New Viya connection** / **Edit**: name, Viya address, compute context,
+  client ID (default `vscode`), certificate check, SingleStore libref and, for
+  SAS in the Workspace, CAS server and startup code (below). **Save and use**
+  also makes it the active one.
+- Each card shows whether it's signed in (as whom, how long the token is
+  valid, whether it renews itself) with **Use** (make it active), **Sign in** /
+  **Sign in again**, **Test**, **Sign out**, **Edit** and **Delete**.
+- **Sign in** only signs in: it opens SAS Logon for that saved connection and
+  asks for the code; it never saves the form. Each connection keeps its own
+  sign-in (tokens in the OS credential store, never shown to the app or
+  Claude). Renaming a connection keeps its sign-in, changing its address to
+  another Viya drops it, **Delete** removes it.
+- **Use** on another connection ends the Workspace's SAS Compute / CAS sessions
+  (the next run starts them on the new Viya); new notebook kernels use it.
+  The Schema Explorer's SAS sources and the SQL Editor's SAS options (⚙, and
+  next to the library picker when there are several) show the active Viya
+  connection and switch it.
+- The list (no tokens) is in `~/.singlestore-mcp/sas.json`. An older
+  single-settings `sas.json` becomes one connection, named after the Viya host,
+  that keeps its sign-in; one without an address becomes an empty list.
+
+Per connection, for SAS in the Workspace:
+
+- **CAS server** (default `cas-shared-default`).
+- **Startup code**: SAS code run once when the Workspace's SAS session starts,
+  typically `%include` of the files that assign your libnames, e.g.
+
+  ```sas
+  filename inc filesrvc folderpath='/Users/me/My Folder/mcp' filename='s2_libname.sas';
+  %include inc / nosource2;
+  filename inc clear;
+  ```
+
+  It runs with `options nosource nosource2` and its log is never shown or kept
+  (only the number of errors and the first error line, passwords masked), so
+  the libname files' contents stay hidden. Don't put passwords in the startup
+  code itself. Saving the active connection restarts the Workspace's SAS
+  session; **⚙ → Restart SAS session** in the SQL Editor does too.
+- The Workspace keeps one SAS Compute session and one CAS session and reuses
+  them (the first use starts the session, which can take half a minute).
 
 The **Connect** view (also the `connections_window` tool) manages saved
 SingleStore connections. **One connection is active at a time**: every view,
@@ -454,19 +607,61 @@ the exact `jwks_endpoint`, `jwks_username_field` and user the cluster needs.
 
 | App (tool) | What it shows and does |
 |---|---|
-| **Schema Explorer** `schema_explorer(database?, table?)` | Databases (with a bottomless / local icon) → tables with row counts and sizes; per table the columns, DDL (shard / sort keys) and a row preview. **Ask Claude**, **Query in grid** and **Analyze…** (refresh statistics, with confirmation). |
+| **Schema Explorer** `schema_explorer(database?, table?)` | Databases (with a bottomless / local icon) → tables with row counts and sizes; per table the columns, DDL (shard / sort keys), a row preview and its **Distribution** (data skew over partitions and leaves); **Check skew** for a whole database. **Ask Claude**, **Query in grid** and **Analyze…** (refresh statistics, with confirmation). |
 | **Pipeline Monitor** `pipeline_monitor(database?)` | Every pipeline's state, source → table, progress (files loaded / Kafka lag), latest batches and errors. Start / Stop (with confirmation), Test, error details, **Ask Claude**, auto-refresh. |
-| **Cluster Monitor** `cluster_monitor()` | Tabs **Overview** (per node SingleStore CPU against its core limit, memory and disk, beside a 15-minute CPU chart), **Queries** (running now, plus every statement that ran in the last 60 s), **Disk**, **Bottomless** and **IO**. Refreshes every 5 s. |
-| **Security** `security(tab?)` | Read-only: users with risk flags, effective privileges with the reason for each, "who can access …", resource pools and the workload manager queue. See [Security](#security). |
+| **Cluster Monitor** `cluster_monitor()` | Tabs **Overview** (per node SingleStore CPU against its core limit, memory and disk, beside a 15-minute CPU chart), **Health** (node and partition state, cluster events, license, problems explained), **Queries** (running now, plus every statement that ran in the last 60 s), **Disk**, **Bottomless**, **IO**, **History** (CPU, memory, disk, queue and connections over 1 h / 24 h / 7 d) and **Backups**. Refreshes every 5 s. |
+| **Security** `security(tab?)` | Users with risk flags, effective privileges with the reason for each, "who can access …", resource pools and the workload manager queue, audit log settings. Changes (users, grants, roles, groups, pools) only in the view, each previewed and confirmed. See [Security](#security). |
 | **Config** `cluster_config(search?, changed_only?)` | Every engine variable per node, with the documented default; filter on changed from default / differs between nodes. See [Config](#config). |
 | **Clean up** `cleanup_work_tables()` | Finds the work tables SAS jobs leave behind (`_dm…` Data Management, `_flw…` flow, `SASTMP…` / `_tmp…` temp tables) in every non-system database: rows, size, created, created by, age, last use and dependent views. Select tables, confirm, and they're dropped one at a time, with a dry-run mode and a log. The **🧹 Clean up** button in the Schema Explorer's header. |
 | **Query History** `query_history(min_seconds=1, hours?, tab?)` | Every finished query the cluster traced: when, how long, user, database, rows, success / error, and a probable **Source** (SAS CAS, SAS in-database). Filter on runtime (1 s and up), period, user, database, status, type, source and text; sort by time, duration or rows. Repeated statements are grouped; statements only in the plan cache can be added. Select a query for its full SQL and **Get tuning recommendations** (plan tree, statistics, SAS EP card). Tabs **Queries**, **Trends**, **Usage** and **Advisor**. Its own **History** item in the workspace rail. |
 | **Alerts** `alerts()` | Alerts the server raises while it watches the cluster in the background: queries running too long, slow or failed queries, failed pipeline batches and pipeline errors, node memory and disk over a threshold, nodes not online. Edit the rules, acknowledge, clear. Its own **Alerts** item in the workspace rail, with a red badge counting the unacknowledged alerts. |
 | **Workload** `workload(name?)` | Saved sets of SQL statements, each with how often it runs, replayed against the cluster with N connections for a set time; live throughput and latency, then compare two runs statement by statement (e.g. before and after a new sort key or index). Its own **Workload** item in the workspace rail. |
-| **Query Grid** `query_grid(sql, database?, max_rows=1000)` | Read-only results as a sortable, filterable grid with CSV export; the SQL can be edited and re-run. Writes are refused. |
+| **Query Grid** `query_grid(sql, database?, max_rows=1000)` | Read-only results as a sortable, filterable grid with CSV export; the SQL can be edited and re-run. Writes are refused. Reading stops after `max_rows` (+1 to flag the cut), also when the SQL has a bigger `LIMIT`. |
 
 `TEST PIPELINE` loads no data, but a failed test is still recorded in the
 pipeline's batch history and error log.
+
+**Schema Explorer: SAS libraries and caslibs**
+
+- The switch above the tree picks the source: **SingleStore**, **SAS
+  libraries** (the Workspace's SAS Compute session on Viya: what the compute
+  context assigns plus the [startup code](#connections)) or **CAS** (caslibs on
+  the CAS server).
+- Libraries → tables → columns with type, length, format and label, and a
+  **Preview** of the first 50 rows. For caslibs the tree shows tables loaded in
+  memory and the source tables behind them (for a SingleStore caslib, the
+  tables of its database).
+- SAS/ACCESS libraries on SingleStore (engine S2 / SSTORE) and SingleStore
+  caslibs are marked **S2** and show their SingleStore database, with
+  **Open … in SingleStore** to jump to it in the SingleStore source.
+- **Query in SQL Editor** opens the first 100 rows in the SQL Editor, running as
+  PROC SQL (libraries) or FedSQL in CAS (caslibs) in that library.
+- Backend (app-only tools): `sas_sources`, `sas_libraries`, `sas_tables`,
+  `sas_columns`, `cas_caslibs`, `cas_tables`, `cas_columns`.
+
+**Schema Explorer: data skew (Distribution)**
+
+- A table's **Distribution** tab, and **Check skew** on a database, show how
+  evenly rows and data are spread over the partitions and leaves. Read only
+  when you open the tab or press the button (two parallel queries on
+  `information_schema.TABLE_STATISTICS`, master partitions, and
+  `COLUMNAR_SEGMENTS` for disk size), never on a tree click.
+- Per table: skew (even / some / high / too small to matter), *row variation*
+  (relative standard deviation of rows per partition, the docs' skew score;
+  under 10 % is fine), *largest vs even* ((max − avg) / avg), data variation,
+  the largest partitions, rows per partition and per leaf with bars, and the
+  shard key. Tables under 10,000 rows count as too small to matter.
+- With skew it explains the likely cause in plain words: a shard key on a
+  low-cardinality column or a few very common values (with buttons that put
+  read-only checks of the key's values in the SQL Editor), a keyless table
+  filled by `INSERT … SELECT` (fix: copy with
+  `WITH(force_random_reshuffle=1)`), or partitions placed unevenly over the
+  leaves. A shard key can't be changed with `ALTER TABLE`; the note says how
+  to rebuild, with links to the SingleStore docs (*Detecting and resolving
+  data skew*, *Shard keys*).
+- **Check skew** on a database lists every distributed table, worst first,
+  plus rows per leaf; click a table for its details. Backend:
+  `schema_explorer_skew(database, table?)` (app-only, read-only).
 
 **Schema Explorer: bottomless and Analyze**
 
@@ -510,8 +705,49 @@ pipeline's batch history and error log.
   fetched/evicted/uploaded MB/s, current throughput (IOPS where the device
   reports them), and the cached plans that waited most on the blob cache.
   SingleStore 9.0 has no blob cache hit counter, so no hit ratio is shown.
+- **Health**: one banner (healthy / things to check / action needed) and the
+  problems found, worst first, each with a plain explanation, a **Docs** link
+  to docs.singlestore.com and **Ask Claude**. Below: nodes (state, role,
+  availability group, leaf pair, ping latency, version, uptime), databases and
+  their partitions (healthy / degraded / offline; masters, replicas, online,
+  replicating, recovering, offline, unrecoverable, orphan partitions),
+  replication to another cluster (lag, catch-up time) when there is any, the
+  cluster's own events (`MV_EVENTS`: node failures, rebalances, memory and disk
+  limits, stopped pipelines …) and license / version. Critical: a node or
+  partitions offline, unrecoverable partitions, license capacity exceeded.
+  Check: a degraded database, orphan partitions, failure events in the last
+  24 h, replication lag, an expired or expiring license. Info: no high
+  availability (`redundancy_level` 1), a rebalance running. Only documented
+  9.0 views are read (`MV_NODES`, `LEAVES`, `AGGREGATORS`,
+  `MV_DISTRIBUTED_DATABASES_STATUS`, `DISTRIBUTED_PARTITIONS`,
+  `MV_REPLICATION_MANAGEMENT_ORPHANS_STATE`, `MV_AGGREGATED_REPLICATION_STATUS`,
+  `MV_EVENTS`, license status variables on the master aggregator; never the
+  license key), in one parallel round trip, every 30 s while the tab is open.
+- **History**: per node SingleStore CPU, memory (% of max_memory), disk
+  (% of the data mount), queued queries (peak), running queries and
+  connections for the last **1 hour**, **24 hours** or **7 days** (one point per
+  1, 5 or 30 minutes), with the same node colors and filters as the other
+  charts. The server samples the cluster once a minute in the background (one
+  round trip, starting about 20 s after the server so it never slows the
+  start) and keeps the samples in `~/.singlestore-mcp/metrics.db`, per
+  cluster. Raw samples are kept for 24 h, older ones as 10-minute averages
+  (with the CPU and queue peaks), for 7 days. Gaps are times no server ran.
+  The Claude server and the desktop Workspace share the file and take one
+  sample a minute between them. **Sample now** adds one at once. Settings:
+  `SINGLESTORE_MCP_METRICS=0` (off), `SINGLESTORE_MCP_METRICS_INTERVAL`
+  (seconds, 15–300, default 60), `SINGLESTORE_MCP_METRICS_RETENTION_DAYS`
+  (1–90, default 7).
+- **Backups**: per database the last successful backup, its age, type, size
+  and how long it took, the number of backups and failures and the last error;
+  the backup history (newest first) and backups running now with their
+  progress (`MV_BACKUP_HISTORY`, `MV_BACKUP_STATUS`). Flags databases whose
+  last backup failed or whose last good backup is older than 1 / 7 / 30 days,
+  and databases with no backup in the history. The history only holds backups
+  made with `BACKUP DATABASE` on this cluster; volume snapshots and the like
+  don't show. Read-only: the app never starts a backup.
 
-The extra tabs only query the cluster while they are open.
+The extra tabs only query the cluster while they are open (History reads only
+the local store).
 
 **Clean up** lives in the Schema Explorer (the **🧹 Clean up** button in its
 header, or ask Claude to "clean up the SAS work tables"). It scans all
@@ -599,8 +835,8 @@ Process calls, metadata probes (`WHERE 0=1`, `LIMIT 0`), SAS work tables,
 
 **SAS EP calls.** For SAS Embedded Process calls (`sasepFunction(…)`), tuning
 shows a SAS EP card instead of generic advice. The call is an external
-function, so `EXPLAIN` shows nothing inside it, and the plan cache doesn't
-count the time spent in the EP. The work happens in the statement the EP
+function, so `EXPLAIN` shows nothing inside it; the plan cache counts the
+call's wall time but almost no CPU (SingleStore waits for the EP). The work happens in the statement the EP
 generates (`CREATE TABLE … AS SELECT … FROM <input> JOIN <per-job EP
 function>`), which runs on the leaves partition by partition. The card shows:
 
@@ -639,6 +875,112 @@ history matches runs by the statement with that name left out. The card shows:
 - how this run compares with every other EP call. On clusters where most EP
   calls take the same few seconds whatever they read, that's a fixed wait on
   the EP side, and the card says so.
+
+Both kinds of EP card also show:
+
+- **Where the time went**: a bar split into measured and estimated parts. For
+  a sasepFunction job whose generated statement is in the trace: time before
+  the EP sent its SQL, the generated statement itself, and the rest. Otherwise
+  queueing (plan cache), the estimated fixed wait (this call minus the median
+  of EP calls that ran on their own off the plateau) and the rest; plus the
+  plan cache's CPU time, which shows whether SingleStore was working or waiting.
+- **The fixed-wait plateau**: the runtime band most traced EP calls share
+  (found from the data, ±4 %), a histogram of all EP runtimes, and a
+  straight-line fit of time against rows returned (per call vs per row cost).
+- **EP calls running at the same time**: overlapping calls, whether they
+  finished together although they started seconds apart (one shared wait),
+  and many small calls (≤ 10 rows each) that would be cheaper as fewer queries.
+- **The EP's own statement failed**: the generated `CREATE TABLE … AS SELECT`
+  failed (e.g. the output table already exists) although the sasepFunction
+  call itself completed normally.
+- `SELECT *` through the EP for jobs: every input column goes into the EP
+  (KEEP= / DROP= on the input).
+- **Tuning tips**, each marked *Measured* (seen in this cluster's data),
+  *Documented* (with the source) or *Hypothesis* (to verify), with links.
+
+**EP overview (Usage tab).** EP calls over the chosen period by source (SAS
+job / SAS VA / CAS), database and user: calls, total and median time, how many
+sat on the plateau and how much time that was, failures, overlapping groups
+that shared one wait, and how many VA / CAS EP functions the plan cache saw
+registered (`INSERT INTO EP.sasepv5`, every call however fast) against how
+many were traced. Click a row for the EP calls. EP calls are kept in the local
+history whatever their duration, so a lower trace threshold shows the fast ones.
+
+**What explains the ~5.2 s, as far as the data shows (Oct 2026, read-only).**
+Measured on this cluster (trace, plan cache, local history):
+
+1. *It's a step, not a cost per row.* The daily `_hello_world` sasepFunction
+   job took 0.24 s on 2026-10-13 (plan cache) and 5.24–5.30 s on the days it
+   was traced: a +5.0 s step. Across all traced EP calls (1 to 7,599 rows
+   returned) time doesn't follow rows (r² ≈ 0).
+2. *It's before the EP touches the data.* In the slow job runs the EP's
+   generated `CREATE TABLE … AS SELECT … sasepin …` started 5.20–5.23 s after
+   the sasepFunction call started; it and everything after took < 50 ms.
+3. *SingleStore isn't working or queueing.* The plan cache shows 5,255 ms
+   execution time but 3 ms CPU and 0 ms queued for that call; all EP calls run
+   in `default_pool` (no concurrency limit); workload management has queued 0
+   queries since start-up on both aggregators.
+4. *Concurrent calls share one wait.* VA calls that started 3.6–4.1 s after
+   others finished within 0.2 s of them (2026-10-12 06:46, 2026-10-14 12:13).
+5. *An EXPLAIN waited too.* A SAS-issued `EXPLAIN EXTENDED CREATE RESULT
+   TABLE … JOIN EP.h…_EP(…)` (compiles, doesn't run) took 5.06 s in such a
+   burst, so the wait can happen before execution.
+6. *Most EP calls are fast and not traced.* The plan cache saw 68 VA / CAS EP
+   functions registered against 26 traced; with a 1 s trace threshold, the
+   "77 % at 5.2 s" is a share of the *slow* calls only. Sub-second warm calls
+   (0.24 s job, ~1.1 s VA calls running on their own) are the normal case.
+7. *Side findings:* the `_hello_world` job's generated statement fails every
+   day with `ER_TABLE_EXISTS_ERROR` (`MyDB._hello_world_1` exists) while the
+   call reports success; `EP.sasepv5` holds 147 orphan registrations from
+   March–May 2026 and `EP` keeps a few old per-job functions.
+
+Documented: SAS EP functions are SingleStore external functions `AS COLLOCATED
+SERVICE '/opt/sas/sasep.sock'` (SHOW CREATE FUNCTION); SingleStore talks to a
+collocated service over a Unix socket with shared-memory buffers and doesn't
+start or manage the service ([CREATE EXTERNAL FUNCTION](https://docs.singlestore.com/db/v9.0/reference/sql-reference/procedural-sql-reference/create-or-replace-external-function/));
+the EP is deployed on each leaf pod ([SAS SpeedyStore admin
+guide](https://documentation.sas.com/api/collections/sasadmincdc/v_042/docsets/calsinglestore/content/calsinglestore.pdf?locale=en));
+the trace keeps only queries over `Duration_threshold_ms` and traces DDL only
+from 9.1 ([Query History](https://docs.singlestore.com/db/v9.1/query-data/query-tuning/query-history/)).
+Nothing documented explains a fixed 5 s.
+
+Hypotheses (to verify, not shown by the data): a constant +5.0 s matches the
+Linux resolver's default timeout (`timeout:5` in
+[resolv.conf](https://man7.org/linux/man-pages/man5/resolv.conf.5.html)); in
+Kubernetes a lost A/AAAA lookup (the [conntrack race](https://cloud.tencent.com/developer/article/1583706))
+costs exactly that. If the EP resolves a host name or opens a connection to
+the aggregator when it's cold (the job definition is in `EP.sasepv5`, which the
+EP may read back), every cold call pays 5 s and concurrent calls queue behind
+the same step. Alternatively a 5 s poll / retry inside the EP, or the child
+aggregator waiting for the new per-job function's DDL from the master
+aggregator (not traced on 9.0).
+
+**What to raise with the SAS EP owners:**
+- What does the EP do in the first ~5 s of a cold call? Their EP log on the
+  leaf pods at e.g. 2026-10-14 12:35:16–12:35:21 (cluster time) shows it.
+- Does the EP connect back to SingleStore per call (host name, DNS, TLS,
+  authentication), and is there a pool / keep-alive / idle timeout for its
+  process or connections? Time `getent hosts <aggregator host>` in a leaf pod
+  and check `/etc/resolv.conf` (`ndots`, `single-request-reopen`).
+- Why do concurrent calls finish together: is a step in the EP serialized
+  (e.g. reading or registering jobs in `EP.sasepv5`)?
+- Cleanup of orphan rows in `EP.sasepv5` and old functions in `EP`; and the
+  failing `_hello_world` health check (drop its output table or let it replace it).
+
+To see the fast EP calls too, an admin can recreate the trace with a lower
+threshold for a while (it's a cluster setting, not done by the Workspace):
+`DROP EVENT TRACE Query_completion; CREATE EVENT TRACE Query_completion WITH
+(Query_text = on, Duration_threshold_ms = 100, Trace_all_failed_executions =
+on);` and back to 1000 afterwards (not 0: it costs performance).
+
+SAS-side options worth knowing (they change the transfer, not the fixed
+wait): `aggregatePushdown=true`, `epDatabase` / `udfDatabase` on the
+SingleStore caslib ([SAS Communities](https://communities.sas.com/t5/SAS-Communities-Library/Using-SAS-with-SingleStore-Enhancing-Performance-with-Aggregate/ta-p/961443)),
+`NUMREADNODES` for parallel CAS reads ([SAS blog](https://blogs.sas.com/content/sgf/2018/03/29/multi-node-data-transfer-to-cas/)),
+and WHERE= / KEEP= on the input of in-database DATA steps. Fewer, larger EP
+calls pay the wait fewer times: combine small DATA steps; in VA, fewer objects
+or precomputed formatted / calculated columns (to verify with SAS which VA
+items need EP).
 
 **Usage tab.** Ranks tables and users over 24 h, 7, 30 or 90 days, or
 everything stored.
@@ -786,7 +1128,8 @@ once.
 Rules, settings and alerts are stored in `~/.singlestore-mcp/alerts.json`
 (shared by the server Claude starts and the desktop workspace; a change in one
 is picked up by the other). `SINGLESTORE_MCP_ALERTS=0` turns the background
-checks off.
+checks off. The Cluster Monitor's metrics history has its own switch,
+`SINGLESTORE_MCP_METRICS=0`.
 
 The workspace rail shows the number of unacknowledged alerts as a red badge
 (it reads the server's in-memory state every 30 seconds; no cluster queries).
@@ -823,7 +1166,10 @@ Only one workload runs at a time. While it runs, the view shows live KPIs
 (executions, per second, p50 / p95 / p99, errors, skipped releases when the
 cluster — or the connection count — can't keep up with the rate) and
 per-second throughput and latency charts; **Stop** cancels the statements
-running now. Every statement is tagged `/* workload:<name> stmt:<id> */`, so
+running now. A run lasts its full duration (statements are released until
+the end, and the per-second rates are over the whole duration, or the time
+until Stop); statements still running at the end finish ("finishing…") and
+count. Every statement is tagged `/* workload:<name> stmt:<id> */`, so
 finished executions show up in Query History with the source "Workload:
 \<name>", and the tag is stable across runs so query plans are reused.
 
@@ -871,8 +1217,9 @@ app, so Claude can define, run, watch and compare a workload from the chat.
 
 ### Security
 
-A read-only view of who can do what. Nothing is changed from here: where a
-change would help, the view shows the SQL to copy and run yourself.
+Who can do what, and (for users with the right privileges) a GUI to change it.
+Claude's tools only read; every change is made in the view, shows the exact
+SQL first and runs only after you confirm it.
 
 - **Users**: every user with type, lock status, password age and expiry,
   default resource pool, groups, connections and flags (ALL / SUPER on `*.*`,
@@ -885,6 +1232,81 @@ change would help, the view shows the SQL to copy and run yourself.
 - **Resource pools**: limits, live running and queued queries per pool, the
   workload manager queue with the limit each query waits for, and who uses
   which pool.
+- **Audit log**: the audit settings (`SHOW VARIABLES LIKE 'audit%'`) and, when
+  audit logging is off, the steps an admin takes to turn it on (see
+  [Audit log](#audit-log)).
+
+**Changes (v2).** Create / drop users (the password is typed in a masked field),
+GRANT / REVOKE privileges on `*.*`, a database or a table (picker), revoke all,
+create / drop roles and groups, grant a role to a group and a group to a user,
+create / change / drop resource pools, set a user's default pool and grant pool
+usage. Each change:
+
+1. **Preview SQL** shows the exact statements (a password always as
+   `'********'`) with warnings and blockers.
+2. You confirm with a tick, or by **typing the name** for a DROP, "revoke all",
+   your own account, an admin account or anything that takes admin rights away.
+3. The server builds the statements again from the cluster as it is now, runs
+   them one by one (stopping at the first error), shows the result and
+   refreshes the view.
+
+Blocked outright: dropping the user you're connected as, and any change that
+would leave no admin (a user with `CREATE USER` or `SUPER` and the grant option
+on `*.*`). Warned: removing your own or another admin's rights, open
+connections of a dropped user (`DROP USER` doesn't close them), privileges
+that aren't granted directly, pools that are a user's default (SingleStore
+refuses to drop those), CPU limits summing over 100 %. Buttons are hidden when
+you can't change anything and disabled (with the reason) when you lack the
+privilege for one kind of change (`CREATE USER`, the grant option, `ALTER USER`,
+`CREATE POOL` / `DROP POOL`, per the SingleStore permissions matrix).
+
+The password is sent once, as a bound parameter of `CREATE USER`, and is never
+shown, logged, returned or stored (not in the plan, the model context or the
+local Query History store, which skips the app's own `/* s2-… */` statements).
+Found on 9.0.40 and handled: `REVOKE ALL PRIVILEGES, GRANT OPTION` needs every
+privilege the revoker could revoke (an admin without `SUPER` gets "Access
+denied"), so "revoke all" revokes what the grantee holds, one statement per
+object; a pool limit can't be set back to "none" (except `MAX_CONCURRENCY = 0`);
+a user's default pool can't be cleared, only set to another pool (e.g.
+`default_pool`).
+
+#### Audit log
+
+SingleStore's audit log (Enterprise edition) is **files on each node**, not a
+table: there is no `information_schema` view of it. On this cluster it is off
+(`auditlog_level = OFF`, files would go to `/var/lib/memsql/instance/auditlogs`).
+
+- **Turn it on** (an admin, outside this app; the variables only take effect
+  when a node starts): with SingleStore Tools
+  `sdb-admin update-config --all --key "auditlog_level" --value "ADMIN-ONLY"`
+  (plus `auditlog_retention_period`, days), then `sdb-admin restart-node --all`;
+  with the Kubernetes Operator (this cluster's node names suggest it), set
+  `auditlog_level: "ADMIN-ONLY"` under `spec.globalVariables` of the
+  `MemsqlCluster` resource and `kubectl apply`. Check with
+  `SHOW GLOBAL VARIABLES LIKE 'audit%';`.
+- **Levels**: `LOGINS-ONLY`, `ADMIN-ONLY` (+ DDL, GRANT/REVOKE, CREATE USER),
+  `WRITES-ONLY` (+ DML), `ALL-QUERIES` (+ SELECT), `*-PLAINTEXT` (literal
+  query text), `ALL-RESULTS`, each with an `-INCLUDING-PARSE-FAILS` variant
+  (which can log passwords typed in invalid statements). Passwords in valid
+  statements are left out.
+- **Files**: CSV, `auditlog_<host>-<port>_<date>_<time>.log` in `auditlogsdir`,
+  rotated by `auditlog_rotation_size` (128 MB) and `auditlog_rotation_time`
+  (1 h), removed by `auditlog_retention_period` (days) or
+  `auditlog_retention_size` (MB); 0 = keep forever. Query lines: id, time,
+  time zone, host:port, node type, aggregator id, thread id, user, database,
+  correlation id, query hash, query; login lines carry user, remote host, auth
+  type, status, TLS cipher and app name.
+- **Reading it**: through SQL only by loading the files (a pipeline or
+  `LOAD DATA`), which needs `FILE READ` and file-system access on the nodes;
+  `FS` pipelines aren't supported with the Kubernetes Operator. The practical
+  route is a log collector (Fluent Bit / Filebeat on each pod's `auditlogsdir`)
+  into a SIEM or a SingleStore table, which the Security view could then show
+  (filter by user, time, statement type).
+
+Sources: [Configure Audit Logging](https://docs.singlestore.com/db/v9.0/security/audit-logging/configuring-audit-logging/),
+[Audit Logging Levels](https://docs.singlestore.com/db/v9.0/security/audit-logging/audit-logging-levels/),
+[Audit Log File Format](https://docs.singlestore.com/db/v9.0/security/audit-logging/audit-log-file-format/),
+[Operator: Configure Audit Logging](https://docs.singlestore.com/db/v9.1/reference/singlestore-operator-reference/configure-audit-logging/).
 
 Without admin rights it shows only your own groups, roles and grants. Ask
 Claude "who can access database EP?", "what can user Hans do?" or "why are
@@ -968,6 +1390,12 @@ All optional, as environment variables of the MCP server:
 | `SINGLESTORE_MCP_ASSISTANT_TIMEOUT` | `300` | Seconds before an answer is abandoned |
 | `SINGLESTORE_MCP_POOL_SIZE` | `8` | Database connections in the server's pool |
 | `SINGLESTORE_MCP_NO_SUPERVISOR` | off | Run without the restart relay |
+| `SINGLESTORE_MCP_NO_STANDBY` | off | Don't keep a pre-loaded standby process for fast restarts |
+| `SINGLESTORE_MCP_STANDBY_DELAY` | `5` | Seconds after a start before the standby is prepared |
+| `SINGLESTORE_MCP_METRICS` | on | `0` turns off the Cluster Monitor's background metrics sampler (History tab) |
+| `SINGLESTORE_MCP_METRICS_INTERVAL` | `60` | Seconds between metrics samples (15–300) |
+| `SINGLESTORE_MCP_METRICS_RETENTION_DAYS` | `7` | Days of metrics history kept (1–90) |
+| `SINGLESTORE_MCP_METRICS_DELAY` | `20` | Seconds after a server start before the first metrics sample |
 
 `~/.singlestore-mcp` is used rather than `%LOCALAPPDATA%` because Windows gives
 the Claude desktop app a private copy of that folder, so Claude and the desktop
@@ -987,7 +1415,11 @@ window would otherwise use different notebook environments.
 - The workspace is a small MCP Apps host for its views: each view runs in its
   own sandboxed iframe (loaded through a tool call, so hosts can't serve a
   stale page after a restart), and the workspace relays its tool calls,
-  messages and model context to the real host.
+  messages and model context to the real host. Only the visible view loads
+  on open; its page is fetched while the host still runs `sql_editor`, comes
+  without the shared head (the ~0.45 MB ext-apps bundle, `shared.js`,
+  `shared.css`; the workspace puts its own copy back), and a page the
+  workspace already has (another SQL tab or notebook) is only revalidated.
 - Notebook kernels run in the notebook environment through
   [`notebook_bridge.py`](src/singlestore_mcp/notebook_bridge.py), driven by
   [`notebook_kernel.py`](src/singlestore_mcp/notebook_kernel.py).
@@ -1178,7 +1610,9 @@ environment in `~/.singlestore-mcp`.
   link; other machines and other web sites can't use it.
 - It uses your SingleStore user's permissions. Statements that change data
   ask for confirmation in the SQL Editor and in SQL cells; Python cells and
-  `%sql` run as written, as in Jupyter.
+  `%sql` run as written, as in Jupyter. Changes to users, grants, roles,
+  groups and resource pools are made only in the Security view, after a
+  preview and your confirmation (see [Security](#security)).
 - Notebook code runs with your Windows user rights, like any local Jupyter.
 
 ## Setup
@@ -1429,7 +1863,7 @@ while Claude has the server's .exe open.
 | `notebook` | Starts a notebook kernel (slow). |
 | `sas` | Needs a signed-in SAS Viya. Skipped when `sas_viya_test` fails (see below). |
 | `assistants` | Asks the in-app Claude assistants. Runs only with `--assistants`. |
-| `ui` | Drives the apps in a browser with Playwright. Also needs the cluster. |
+| `ui` | Drives the apps in a browser with Playwright. Most also carry `cluster`; `ui/test_connections_ui.py` needs neither the cluster nor Viya. |
 
 **Files**
 
@@ -1455,12 +1889,21 @@ supervisor) with its own `SINGLESTORE_MCP_HOME` in pytest's temp folder. It does
 - `notebook-env` is linked in through a directory junction. At the end, only the junction is removed,
   never its target.
 - SQL and notebook files go to a temporary `SINGLESTORE_MCP_SQL_DIR`.
-- Background alerts are off (`SINGLESTORE_MCP_ALERTS=0`).
+- Background alerts and the metrics sampler are off (`SINGLESTORE_MCP_ALERTS=0`, `SINGLESTORE_MCP_METRICS=0`);
+  the History tests take their samples with `sample_now`.
 
 The tests are read-only on the cluster. Write statements are sent only to check that they are refused or
 need confirmation, and are never confirmed. Scratch names start with `zz`. The SAS Viya sign-in lives in
-an encrypted secrets file that is not copied, so the `sas` tests are skipped by default. Set
-`S2_TEST_SAS_SECRETS=1` to copy it too. The test server may then refresh the token in its copy only.
+an encrypted secrets file that is not copied, so the `sas` tests use the SAS Viya MCP server's / CLI's
+cached sign-in to the same Viya if there is one, and are skipped otherwise. Set `S2_TEST_SAS_SECRETS=1`
+to copy the secrets file too. The test server may then refresh the token in its copy only.
+
+The test home's `sas.json` is written in the current format (an old single-settings file is converted
+there, so the test server never moves the real sign-in). To pick the Viya the `sas` tests use:
+`S2_TEST_SAS_CONNECTION` (a saved SAS Viya connection's name), or `S2_TEST_SAS_URL` (adds a connection
+with that address, named `S2_TEST_SAS_CONNECTION` or "Test Viya", optionally with `S2_TEST_SAS_CONTEXT`
+as compute context). `S2_TEST_SAS_STARTUP` sets the Workspace startup code the SAS tests use.
+`test_sas_viya.py` (offline) covers the connection list, migration and sign-in rules.
 
 **Performance**
 
@@ -1471,3 +1914,13 @@ an encrypted secrets file that is not copied, so the `sas` tests are skipped by 
 
 Results are written to `perf/results/<version>-<timestamp>.json` (gitignored). Each run is compared with
 the previous results file, and p50/p95 changes over 25% are printed as warnings (never a failure).
+
+```powershell
+.venv\Scripts\python.exe perf\startup.py         # ~3 min: how fast the Workspace opens, cold and after restart_server
+```
+
+`perf/startup.py` measures the imports, server start → first tool answer → the calls the Workspace and
+its SQL view make on open (time and size of each), `restart_server` → Workspace usable, the Workspace in
+Edge (browser view: page → SQL Editor → schema tree, with every request), and the cluster round trips
+(connects + statements) of the open sequence. Results go to `perf/results/startup-<timestamp>.json`
+and are compared with the previous startup run.

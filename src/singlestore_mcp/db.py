@@ -13,6 +13,7 @@ import json
 import os
 import re
 import threading
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -105,6 +106,40 @@ def _is_connection_error(exc: BaseException) -> bool:
         code = getattr(exc, "errno", None) or (exc.args[0] if exc.args else None)
         return code in _CONNECTION_LOST_CODES
     return False
+
+
+def _unbuffered_cursor(raw: Any) -> Any:
+    """An unbuffered (streaming) dict cursor on a pooled connection, which is otherwise buffered."""
+    from singlestoredb.mysql import cursors
+
+    cls = {cursors.DictCursorSV: cursors.SSDictCursorSV, cursors.DictCursor: cursors.SSDictCursor}.get(raw.cursorclass)
+    if cls is None:
+        raise RuntimeError(f"No streaming cursor for {raw.cursorclass.__name__}")
+    return cls(raw)
+
+
+DRAIN_SECONDS = 3.0  # a stream closed early: read the rest this long to keep the connection, else close it
+
+
+def _drain_later(pool: "Database", pc: Any, sscur: Any) -> None:
+    """Read and drop the rest of an abandoned unbuffered result in the background; give the connection
+    back to the pool if that's quick, else close it (the cluster then ends the statement)."""
+    import time
+
+    def run() -> None:
+        deadline = time.monotonic() + DRAIN_SECONDS
+        try:
+            while sscur.fetchmany(5000):
+                if time.monotonic() > deadline:
+                    raise TimeoutError
+            sscur.close()
+        except BaseException:  # noqa: BLE001 - too long or broken: close it
+            pool._discard(pc)
+            pool._release(None)
+            return
+        pool._release(pc)
+
+    threading.Thread(target=run, name="db-drain", daemon=True).start()
 
 
 # Statements that change session state behind our back (USE, SET ...).
@@ -230,8 +265,9 @@ class Database:
                     self._warming -= 1
                     self._cond.notify_all()
 
-        n = min(connections, self._max)
         with self._cond:
+            # Idempotent: a second warm (e.g. server start, then the workspace) only tops the pool up.
+            n = max(0, min(connections, self._max) - self._open - self._warming)
             self._warming += n
         for _ in range(n):
             threading.Thread(target=run, name="db-warm", daemon=True).start()
@@ -311,6 +347,96 @@ class Database:
             self._release(pc)
             return columns, rows, rowcount
         raise AssertionError("unreachable")
+
+    def stream(
+        self,
+        sql: str,
+        database: str | None = None,
+        max_rows: int | None = None,
+        chunk: int = 1000,
+        on_connection: Any = None,
+    ) -> Iterator[tuple[list[str], list[dict[str, Any]]]]:
+        """Run one statement and yield its result in chunks as it arrives: first ``(columns, [])``, then
+        ``(columns, rows)`` per chunk of up to ``chunk`` rows. Nothing is buffered beyond one chunk, so the
+        first rows show long before a big result has been read, and memory stays flat.
+
+        ``max_rows`` sets sql_select_limit as in ``execute`` (an explicit LIMIT in the SQL overrides it).
+        ``on_connection(connection_id)`` is called before the statement is sent (for a KILL QUERY).
+
+        Stop early by closing the generator (``close()`` / leaving a ``for`` loop): the rest of the result
+        is read and dropped in the background for a few seconds so the connection can go back to the
+        pool, else the connection is closed (which ends the statement on the cluster). A connection that
+        has gone stale is retried once, but only before any row was yielded.
+        """
+        limit = None if max_rows is None else max(0, int(max_rows))
+        for attempt in range(2):
+            pc = self._acquire()
+            sscur = None
+            state = "start"  # start -> sent -> done (fully read) | closed (consumer stopped early) | failed
+            try:
+                cur = pc.conn.cursor()
+                try:
+                    target_db = database or self._default_db
+                    if target_db and pc.database != target_db:
+                        pc.database = _UNKNOWN
+                        cur.execute(f"USE {quote_identifier(target_db)}")
+                        pc.database = target_db
+                    if pc.select_limit != limit:
+                        pc.select_limit = _UNKNOWN
+                        cur.execute(f"SET SESSION sql_select_limit = {'DEFAULT' if limit is None else limit}")
+                        pc.select_limit = limit
+                finally:
+                    cur.close()
+                raw = getattr(pc.conn, "_conn", pc.conn)
+                if on_connection is not None:
+                    on_connection(raw.thread_id())
+                sscur = _unbuffered_cursor(raw)
+                state = "sent"
+                try:
+                    sscur.execute(sql)
+                finally:
+                    if _SESSION_CHANGE.match(sql):
+                        pc.database = pc.select_limit = _UNKNOWN
+                columns = [d[0] for d in sscur.description] if sscur.description is not None else []
+                state = "yielding"
+                yield columns, []
+                while columns:
+                    rows = sscur.fetchmany(chunk)
+                    if not rows:
+                        break
+                    yield columns, rows
+                sscur.close()
+                state = "done"
+            except GeneratorExit:
+                state = "closed"
+                raise
+            except (s2.Error, OSError) as exc:
+                if _is_connection_error(exc):
+                    self._drop_idle()
+                    if attempt == 0 and state in ("start", "sent"):
+                        state = "retry"
+                        continue
+                # A plain SQL error (syntax, unknown table) before any row leaves the connection usable.
+                state = "error_ok" if state in ("start", "sent") and not _is_connection_error(exc) else "failed"
+                raise
+            except BaseException:
+                state = "failed"
+                raise
+            finally:
+                if state in ("done", "error_ok"):
+                    if sscur is not None and state == "error_ok":
+                        try:
+                            sscur.close()
+                        except Exception:  # noqa: BLE001 - then it isn't reusable after all
+                            self._discard(pc)
+                            pc = None
+                    self._release(pc)
+                elif state == "closed" and sscur is not None:
+                    _drain_later(self, pc, sscur)
+                else:
+                    self._discard(pc)
+                    self._release(None)
+            return
 
     def _execute_json_as_text(self, sql: str, params: tuple[Any, ...] | None, database: str | None, fetch: bool,
                               limit: int | None) -> tuple[list[str], list[dict[str, Any]], int]:

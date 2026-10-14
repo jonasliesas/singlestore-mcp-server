@@ -158,6 +158,24 @@
   .qh-ep-part { display: grid; grid-template-columns: 32px 120px auto; align-items: center; gap: 8px; }
   .qh-ep-part .qh-bar { width: 120px; }
   .qh-ep-part .lbl { color: var(--s2-text-3); font-family: var(--s2-mono); }
+  .qh-ep-split { display: flex; height: 14px; border-radius: 3px; overflow: hidden; margin-top: 6px; background: var(--s2-bg-3); }
+  .qh-ep-split > span { display: block; height: 100%; min-width: 2px; }
+  .qh-ep-split .wait { background: var(--s2-warn); }
+  .qh-ep-split .queue { background: var(--s2-err); }
+  .qh-ep-split .work { background: var(--s2-info); }
+  .qh-ep-split .other { background: var(--s2-text-3); }
+  .qh-ep-legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 11px; color: var(--s2-text-2); margin-top: 3px; }
+  .qh-ep-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+  .qh-ep-legend i.wait { background: var(--s2-warn); }
+  .qh-ep-legend i.queue { background: var(--s2-err); }
+  .qh-ep-legend i.work { background: var(--s2-info); }
+  .qh-ep-legend i.other { background: var(--s2-text-3); }
+  .qh-ep-part.on .lbl { color: var(--s2-text); font-weight: 600; }
+  .qh-ep-hist .qh-ep-part { grid-template-columns: 56px 120px auto; }
+  .qh-ep-tips { margin: 8px 0 0; padding-left: 18px; font-size: var(--s2-fs-xs); line-height: 1.5; }
+  .qh-ep-tips li { margin: 4px 0; }
+  .qh-ep-tips .src { color: var(--s2-text-3); }
+  .qh-ep-tips .src a { color: var(--s2-text-2); }
   .qh-usage-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
   .qh-usage-table tbody tr { cursor: pointer; }
   .qh-usage-table td.nm { font-family: var(--s2-mono); word-break: break-all; }
@@ -716,7 +734,35 @@ function sparkline(runs) {
   return svg;
 }
 
+const EP_SEG = { wait: "wait", queue: "queue", work: "work", other: "other" };
+function epSplit(segments, total) {
+  const sum = Math.max(total || 0, segments.reduce((a, x) => a + x.ms, 0), 1);
+  return h("div", {},
+    h("div", { class: "qh-ep-split", role: "img", "aria-label": segments.map((x) => `${x.label} ${secs(x.ms)}`).join(", ") },
+      segments.map((x) => h("span", { class: EP_SEG[x.kind] ?? "other", style: { width: `${(x.ms / sum) * 100}%` }, title: `${x.label}: ${secs(x.ms)} (${x.how})` }))),
+    h("div", { class: "qh-ep-legend" }, segments.map((x) => h("span", {}, h("i", { class: EP_SEG[x.kind] ?? "other" }),
+      `${x.label} ${secs(x.ms)}${x.how === "estimate" ? " (est.)" : ""}`))));
+}
+
 function epExtra(p) {
+  if (p.key === "breakdown" && p.segments?.length) return epSplit(p.segments, p.total_ms);
+  if (p.key === "peers" && p.histogram?.length) {
+    const max = Math.max(...p.histogram.map((b) => b.n), 1);
+    const inBucket = (b) => p.this_ms >= b.lo_ms && p.this_ms < b.lo_ms + 250;
+    const onPlateau = (b) => p.plateau && b.lo_ms + 250 > p.plateau.low_ms && b.lo_ms <= p.plateau.high_ms;
+    return h("details", { class: "qh-more" }, h("summary", {}, "Runtime of the traced EP calls"),
+      h("div", { class: "qh-ep-parts qh-ep-hist" }, p.histogram.map((b) => h("div", { class: `qh-ep-part${inBucket(b) ? " on" : ""}` },
+        h("span", { class: "lbl" }, `${(b.lo_ms / 1000).toFixed(2)}${b.more ? "+" : ""} s`),
+        h("span", { class: `qh-bar${onPlateau(b) ? " warn" : ""}` }, h("span", { style: { width: `${Math.max(2, (b.n / max) * 100)}%` } })),
+        h("span", { class: "num" }, `${b.n} call${b.n === 1 ? "" : "s"}${inBucket(b) ? " (this one)" : ""}`)))));
+  }
+  if (p.key === "burst" && p.members?.length) {
+    const end = Math.max(...p.members.map((m) => m.end_offset_s), 0.001);
+    return h("div", { class: "qh-ep-parts" }, p.members.map((m) => h("div", { class: `qh-ep-part${m.this ? " on" : ""}`, title: `starts +${m.start_offset_s} s, ends +${m.end_offset_s} s` },
+      h("span", { class: "lbl" }, m.this ? "this" : ""),
+      h("span", { class: "qh-bar" }, h("span", { style: { marginLeft: `${(m.start_offset_s / end) * 100}%`, width: `${Math.max(2, ((m.end_offset_s - m.start_offset_s) / end) * 100)}%` } })),
+      h("span", { class: "num" }, `+${m.start_offset_s} s → +${m.end_offset_s} s · ${secs(m.ms)}${m.rows != null ? ` · ${fmt.number(m.rows)} rows` : ""}`))));
+  }
   if (p.key === "skew" && p.partitions?.length) {
     const max = Math.max(...p.partitions.map((x) => x.rows), 1);
     return h("div", { class: "qh-ep-parts" }, p.partitions.map((x) => h("div", { class: "qh-ep-part", title: `${x.host ?? ""}${x.bytes ? ` · ${fmt.bytes(x.bytes)}` : ""}` },
@@ -766,7 +812,7 @@ function epCard(ep) {
           "); the function name changes every run, so runs are matched by the statement with the name left out. "]
         : [ep.input ? `Reads ${ep.input}${ep.output ? ` → writes ${ep.output}` : ""}. ` : "",
           "SAS runs the step inside SingleStore: the EP generates CREATE TABLE … AS SELECT … FROM the input JOIN a per-job EP function, which runs on the leaves, one task per partition. "],
-      "What sets its time: the largest partition, partitions per core, how much data goes in, and waits."),
+      "What sets its time: a fixed wait on the EP side (compared with every other EP call), the largest partition, partitions per core, how much data goes in, and queueing."),
     ep.note ? h("div", { class: "s2-small" }, ep.note) : null,
     (ep.points ?? []).map((p) => {
       const v = p.verdict ?? {};
@@ -777,7 +823,32 @@ function epCard(ep) {
         v.text ? h("p", {}, v.text) : null,
         v.step ? h("p", { class: "step" }, h("strong", {}, "Next step: "), v.step) : null,
         epExtra(p));
-    }));
+    }),
+    epTips(ep.tips));
+}
+
+const TIP_KIND = { measured: ["info", "Measured"], documented: ["ok", "Documented"], hypothesis: ["warn", "Hypothesis"] };
+function epTips(tips) {
+  if (!tips?.length) return null;
+  return h("div", { class: "qh-ep-point" },
+    h("div", { class: "t" }, h("strong", {}, "Tuning tips"), h("span", { class: "s2-small s2-faint" }, " · measured here, documented, or a hypothesis to verify")),
+    h("ul", { class: "qh-ep-tips" }, tips.map((t) => {
+      const [cls, label] = TIP_KIND[t.kind] ?? TIP_KIND.hypothesis;
+      return h("li", {}, h("span", { class: `s2-badge ${cls}` }, label), " ", t.text,
+        t.sources?.length ? h("span", { class: "src" }, " Sources: ", t.sources.map((x, i) => [i ? ", " : "",
+          h("a", { href: x.url, target: "_blank", rel: "noopener", title: x.title, onclick: (ev) => { ev.preventDefault(); openDoc(x.url); } },
+            x.short ?? x.title)])) : null);
+    })));
+}
+
+// Links go through the host (MCP Apps can't navigate themselves); copied when the host can't open them.
+async function openDoc(url) {
+  try {
+    const res = await S2.app.openLink({ url });
+    if (res?.isError) throw new Error("refused");
+  } catch {
+    S2.copy(url, "Link copied (this host can't open links)");
+  }
 }
 
 function tuningBlock(key, r, database, ctx) {
@@ -1130,6 +1201,44 @@ function sortable(rows, sortKey, columns, onSort) {
     : h("th", { class: isNum ? "num" : "", title }, label))));
 }
 
+function showEp() {
+  state.minSeconds = 1; state.hours = "";
+  state.user = state.database = state.status = state.category = state.search = "";
+  state.origin = "SAS EP";
+  state.shape = null; state.table = null;
+  state.tab = "queries";
+  refresh();
+}
+
+// SAS Embedded Process calls by source (sas_ep.overview): count, time, the fixed-wait plateau, shared waits.
+function epOverview(o, period) {
+  if (!o) return null;
+  if (o.error) return h("section", { class: "s2-card qh-adv-work" }, h("h2", {}, "SAS Embedded Process"), S2.errorBox(o.error));
+  if (!o.calls) return null;
+  const pl = o.plateau;
+  const share = (x) => `${Math.round(x * 100)}%`;
+  return h("section", { class: "s2-card qh-adv-work", "aria-label": "SAS Embedded Process overview" },
+    h("h2", {}, "SAS Embedded Process"),
+    h("div", { class: "s2-small s2-faint", style: { marginBottom: "6px" } },
+      `Over ${period}: ${fmt.number(o.calls)} traced EP calls (sasepFunction jobs and SAS VA / CAS format functions), ${secs(o.ms)} in all`,
+      pl ? `; ${fmt.number(o.plateau_calls)} sat on the ${secs(pl.low_ms)}–${secs(pl.high_ms)} plateau, ${share(o.plateau_time_share)} of the EP time` +
+        (pl.warm_ms != null ? ` (calls off it: median ${secs(pl.warm_ms)}, so about ${secs(pl.fixed_ms)} of each plateau call is waiting)` : "") : "",
+      o.shared_bursts ? `. ${o.shared_bursts} of ${o.bursts} groups of overlapping calls finished together (one shared wait)` : "",
+      ". ",
+      o.all_format_functions ? `The plan cache saw ${fmt.number(o.all_format_functions)} VA / CAS EP functions registered (every call, however fast); ${fmt.number(o.traced_format_functions)} were traced, the others ran under the trace threshold, so the shares above are of the slow calls only. ` : "",
+      "Click a row for the EP calls; open one for its EP card and tuning tips."),
+    h("div", { class: "s2-table-wrap", style: { maxHeight: "260px" } }, h("table", { class: "s2-table qh-usage-table" },
+      h("thead", {}, h("tr", {}, ["Source", "Database", "User", "Calls", "Total time", "Median", "On plateau", "Plateau time", "Failed", "Last"].map((c, i) =>
+        h("th", { class: i >= 3 && i <= 8 ? "num" : "" }, c)))),
+      h("tbody", {}, o.rows.map((r) => h("tr", { tabindex: "0", title: "Show the SAS EP calls", onclick: () => showEp(), onkeydown: (ev) => { if (ev.key === "Enter") showEp(); } },
+        h("td", {}, r.source), h("td", {}, r.database ?? "–"), h("td", {}, r.user ?? "–"),
+        h("td", { class: "num" }, fmt.number(r.calls)), h("td", { class: "num" }, secs(r.ms)), h("td", { class: "num" }, secs(r.median_ms)),
+        h("td", { class: "num" }, r.calls ? `${fmt.number(r.plateau)} (${share(r.plateau / r.calls)})` : "–"),
+        h("td", { class: "num" }, secs(r.plateau_ms)),
+        h("td", { class: "num" }, r.failed ? h("span", { class: "s2-badge err plain" }, fmt.number(r.failed)) : "0"),
+        h("td", {}, when(r.last))))))));
+}
+
 function renderUsage() {
   if (state.tab !== "usage") return;
   const u = state.usage;
@@ -1192,6 +1301,7 @@ function renderUsage() {
         h("td", {}, Object.entries(x.origins).map(([k, v]) => `${k} ×${v}`).join(", ")))))))
       : h("div", { class: "s2-small s2-muted" }, "No traced queries in this period."));
   fill(usageEl, controls,
+    epOverview(d.sas_ep, period),
     h("div", { class: "qh-adv-meta" },
       `${fmt.number(d.traced_runs)} traced runs and ${fmt.number(d.plan_execs)} plan cache executions (${fmt.number(d.plans)} statements) in ${period}, for ${d.source}.`,
       d.oldest ? ` The local history starts ${when(d.oldest)}.` : ""),
@@ -1635,6 +1745,12 @@ function setAuto(on) {
 }
 
 S2.onDisplayModeChange = () => { if (state.data) render(); };
+// From the SQL Editor ("Find in Query History" on SQL that SAS sent to SingleStore): search for it.
+window.addEventListener("s2:set-sql", (e) => {
+  if (typeof e.detail?.search !== "string") return;
+  state.search = e.detail.search;
+  if (state.data) render();
+});
 await S2.connect({
   name: "singlestore-query-history",
   onToolInput(args) {

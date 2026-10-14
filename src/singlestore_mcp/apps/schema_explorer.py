@@ -517,6 +517,268 @@ def schema_explorer_preview(database: str, table: str, limit: int = PREVIEW_ROWS
 
 
 # --------------------------------------------------------------------------
+# Skew: how evenly a table's rows and data are spread over the partitions and
+# leaves. Computed on demand (a button / tab in the app), never on a tree click.
+#
+# Sources (read-only, as in the docs' "Detecting and Resolving Data Skew", 9.0):
+# information_schema.TABLE_STATISTICS has one row per table per partition
+# (ORDINAL = partition id, HOST/PORT = the leaf, PARTITION_TYPE Master /
+# Slave / Reference, ROWS, MEMORY_USE); only the master copies are counted.
+# On-disk columnstore size per partition comes from COLUMNAR_SEGMENTS
+# (PARTITION, NODE_ID, COMPRESSED_SIZE); a partition's replica on another node
+# has the same segments, so per partition the largest node's sum is taken.
+# The docs' skew score is the relative standard deviation STDDEV/AVG (in %; under
+# 10 % is no cause for worry); we show it next to (max - avg) / avg, which is how
+# much bigger the largest partition is than an even share.
+# --------------------------------------------------------------------------
+
+SKEW_DOCS = "https://docs.singlestore.com/db/v9.0/create-a-database/detecting-and-resolving-data-skew/"
+SHARD_KEY_DOCS = "https://docs.singlestore.com/db/v9.0/create-a-database/optimizing-table-data-structures/shard-keys/"
+SKEW_MIN_ROWS = 10_000      # the docs only look at tables above this; skew in smaller ones doesn't matter
+SKEW_OK_PCT = 10.0          # docs: under 10 % variation is no cause for worry
+SKEW_HIGH_PCT = 25.0        # relative standard deviation from which we call it high
+SKEW_HIGH_MAX_PCT = 100.0   # ... or the largest partition holds twice an even share
+_TOP_PARTITIONS = 5
+
+
+def _spread(values: list[float]) -> dict[str, Any]:
+    """avg / min / max, the relative standard deviation (docs' skew score) and (max - avg) / avg, in %."""
+    n = len(values)
+    if not n:
+        return {"avg": None, "min": None, "max": None, "rsd_pct": None, "max_over_avg_pct": None}
+    avg = sum(values) / n
+    var = sum((v - avg) ** 2 for v in values) / n  # population, like SingleStore's STDDEV
+    if avg <= 0:
+        return {"avg": 0, "min": min(values), "max": max(values), "rsd_pct": 0.0, "max_over_avg_pct": 0.0}
+    return {
+        "avg": round(avg, 1), "min": min(values), "max": max(values),
+        "rsd_pct": round(var ** 0.5 / avg * 100, 1),
+        "max_over_avg_pct": round((max(values) - avg) / avg * 100, 1),
+    }
+
+
+def skew_level(rows_total: float, rsd: float | None, max_over_avg: float | None) -> str:
+    """"small" (too few rows to matter), "ok", "moderate" or "high"."""
+    if rows_total < SKEW_MIN_ROWS or rsd is None:
+        return "small"
+    if rsd < SKEW_OK_PCT and (max_over_avg or 0) < 2 * SKEW_OK_PCT:
+        return "ok"
+    if rsd >= SKEW_HIGH_PCT or (max_over_avg or 0) >= SKEW_HIGH_MAX_PCT:
+        return "high"
+    return "moderate"
+
+
+def skew_stats(partitions: list[dict[str, Any]]) -> dict[str, Any]:
+    """Skew of one table from its master partitions [{partition, host, rows, memory_bytes, disk_bytes}]."""
+    parts = sorted(partitions, key=lambda p: p["partition"])
+    for p in parts:
+        p["data_bytes"] = (p.get("memory_bytes") or 0) + (p.get("disk_bytes") or 0)
+    rows = [float(p["rows"] or 0) for p in parts]
+    data = [float(p["data_bytes"]) for p in parts]
+    total_rows, total_bytes = sum(rows), sum(data)
+    for p in parts:
+        p["rows_share_pct"] = round(float(p["rows"] or 0) / total_rows * 100, 1) if total_rows else 0.0
+    leaves: dict[str, dict[str, Any]] = {}
+    for p in parts:
+        leaf = leaves.setdefault(p["host"] or "?", {"host": p["host"] or "?", "partitions": 0, "rows": 0, "data_bytes": 0})
+        leaf["partitions"] += 1
+        leaf["rows"] += int(p["rows"] or 0)
+        leaf["data_bytes"] += int(p["data_bytes"])
+    leaf_list = sorted(leaves.values(), key=lambda x: x["host"])
+    by_rows = _spread(rows)
+    return {
+        "partitions": parts,
+        "partition_count": len(parts),
+        "rows_total": int(total_rows),
+        "data_bytes_total": int(total_bytes),
+        "rows": by_rows,
+        "data": _spread(data),
+        "leaves": leaf_list,
+        "leaf_rows": _spread([float(x["rows"]) for x in leaf_list]),
+        "largest": sorted(parts, key=lambda p: (-(p["rows"] or 0), p["partition"]))[:_TOP_PARTITIONS],
+        "level": skew_level(total_rows, by_rows["rsd_pct"], by_rows["max_over_avg_pct"]),
+    }
+
+
+def _shard_sql(database: str, table: str, cols: list[str]) -> dict[str, str] | None:
+    """Read-only checks of the shard key's values, for the user to run in the SQL Editor (not run here)."""
+    if not cols:
+        return None
+    fq = f"{quote_identifier(database)}.{quote_identifier(table)}"
+    names = ", ".join(quote_identifier(c.removesuffix(" DESC")) for c in cols)
+    return {
+        "top_values": f"SELECT {names}, COUNT(*) AS n FROM {fq} GROUP BY {names} ORDER BY n DESC LIMIT 20;",
+        "cardinality": f"SELECT COUNT(*) AS n_rows, COUNT(DISTINCT {names}) AS n_distinct FROM {fq};",
+    }
+
+
+def skew_advice(stats: dict[str, Any], keys: dict[str, Any] | None, database: str, table: str) -> dict[str, Any]:
+    """Plain-language reading of the numbers: what the skew means, the likely cause and what to do."""
+    level = stats["level"]
+    shard = (keys or {}).get("shard")
+    cols = shard["columns"] if shard else []
+    keyless = not cols
+    notes: list[str] = []
+    rsd, mx = stats["rows"]["rsd_pct"], stats["rows"]["max_over_avg_pct"]
+    if level == "small":
+        notes.append(f"Only {stats['rows_total']:,} rows: skew in a table this small doesn't affect performance "
+                     f"(the docs look at tables over {SKEW_MIN_ROWS:,} rows).")
+    elif level == "ok":
+        notes.append(f"Rows are spread evenly: {rsd} % variation between partitions (under {SKEW_OK_PCT:g} % is no cause for worry).")
+    else:
+        notes.append(f"{'High' if level == 'high' else 'Some'} skew: {rsd} % variation between partitions; the largest "
+                     f"partition holds {mx} % more rows than an even share. A query on this table is as slow as its "
+                     "largest partition, and the leaf holding it fills up first.")
+        if keyless:
+            notes.append("The table is keyless (no shard key), so skew usually comes from INSERT … SELECT, which inserts "
+                         "into the same partition the rows were read from, or is temporary after a big load or delete. "
+                         "Redistribute by copying into a new table with INSERT INTO <new table> SELECT "
+                         "WITH(force_random_reshuffle=1) * FROM <this table> and swapping the names.")
+        else:
+            key_txt = ", ".join(cols) + (" (from the PRIMARY KEY)" if shard.get("implicit") else "")
+            notes.append(f"Rows are placed by the shard key ({key_txt}): every row with the same key value lands in the "
+                         "same partition. Skew like this usually means a low-cardinality column (e.g. a status, country "
+                         "or date) or a few very common values (NULL, 0, a default). Check the key's values with the "
+                         "queries below.")
+            notes.append("A shard key can't be changed with ALTER TABLE: create a new table with a more selective SHARD "
+                         "KEY (as unique as possible, still the columns you join / filter on), INSERT … SELECT the data "
+                         "into it and swap the names. To test a candidate key first, see the docs (\"reshard simulation\").")
+    leaf = stats["leaf_rows"]
+    if len(stats["leaves"]) > 1 and level not in ("small",) and (leaf["max_over_avg_pct"] or 0) >= SKEW_HIGH_MAX_PCT / 2 \
+            and (stats["rows"]["rsd_pct"] or 0) < SKEW_OK_PCT:
+        notes.append("Partitions are even but the leaves are not: partitions are placed unevenly over the leaves. "
+                     f"An admin can check with EXPLAIN REBALANCE PARTITIONS ON {quote_identifier(database)} (read-only).")
+    return {"level": level, "notes": notes, "keyless": keyless, "shard_columns": cols,
+            "check_sql": _shard_sql(database, table, cols) if level in ("moderate", "high") else None,
+            "docs": SKEW_DOCS, "shard_key_docs": SHARD_KEY_DOCS}
+
+
+_SKEW_PART_SQL = (
+    "SELECT TABLE_NAME, ORDINAL, HOST, PORT, PARTITION_TYPE, ROWS, MEMORY_USE FROM information_schema.TABLE_STATISTICS"
+    " WHERE DATABASE_NAME = %s{extra} AND PARTITION_TYPE IN ('Master', 'Reference')"
+)
+_SKEW_DISK_SQL = (
+    "SELECT TABLE_NAME, `PARTITION` AS part, NODE_ID, SUM(COMPRESSED_SIZE) AS disk"
+    " FROM information_schema.COLUMNAR_SEGMENTS WHERE DATABASE_NAME = %s{extra} GROUP BY TABLE_NAME, `PARTITION`, NODE_ID"
+)
+
+
+def _skew_partitions(part_rows: list[dict[str, Any]], disk_rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Per table: {"reference": bool, "partitions": [...]} from TABLE_STATISTICS and COLUMNAR_SEGMENTS rows."""
+    disk: dict[tuple[str, int], float] = {}
+    for r in disk_rows:
+        k = (r["TABLE_NAME"], int(r["part"]))
+        disk[k] = max(disk.get(k, 0.0), float(_num(r["disk"]) or 0))  # the replica holds the same segments
+    out: dict[str, dict[str, Any]] = {}
+    for r in part_rows:
+        t = out.setdefault(r["TABLE_NAME"], {"reference": False, "partitions": []})
+        if r["PARTITION_TYPE"] == "Reference":
+            t["reference"] = True
+            continue
+        ordinal = int(r["ORDINAL"])
+        t["partitions"].append({
+            "partition": ordinal,
+            "host": f"{r['HOST']}:{r['PORT']}" if r.get("PORT") else r["HOST"],
+            "rows": int(_num(r["ROWS"]) or 0),
+            "memory_bytes": int(_num(r["MEMORY_USE"]) or 0),
+            "disk_bytes": int(disk.get((r["TABLE_NAME"], ordinal), 0)),
+        })
+    return out
+
+
+def table_skew(database: str, table: str) -> dict[str, Any]:
+    params = (database, table)
+    extra = " AND TABLE_NAME = %s"
+    part_rows, disk_rows, (ddl, _err) = db.parallel(
+        lambda: _query(_SKEW_PART_SQL.format(extra=extra), params),
+        lambda: _query(_SKEW_DISK_SQL.format(extra=extra), params),
+        lambda: _show_create(database, table),
+    )
+    keys = parse_keys(ddl) if ddl else None
+    per = _skew_partitions(part_rows, disk_rows).get(table)
+    base = {"database": database, "table": table, "keys": keys, "docs": SKEW_DOCS}
+    if per is None:
+        if ddl is None:
+            _require_database(database)
+            raise NotFoundError(f"Table {table!r} not found in database {database!r} (names are case-sensitive).")
+        return {**base, "kind": "none", "message": "No partition statistics for this table (a view, or a table on no partitions)."}
+    if per["reference"] or (keys or {}).get("reference"):
+        return {**base, "kind": "reference",
+                "message": "Reference table: every node holds a full copy, so it can't be skewed."}
+    stats = skew_stats(per["partitions"])
+    return {**base, "kind": "distributed", **stats, "advice": skew_advice(stats, keys, database, table)}
+
+
+def database_skew(database: str) -> dict[str, Any]:
+    """Skew of every distributed table in a database (2 queries), worst first, plus the rows per leaf."""
+    part_rows, disk_rows = db.parallel(
+        lambda: _query(_SKEW_PART_SQL.format(extra=""), (database,)),
+        lambda: _query(_SKEW_DISK_SQL.format(extra=""), (database,)),
+    )
+    if not part_rows:
+        _require_database(database)
+    per = _skew_partitions(part_rows, disk_rows)
+    tables, leaves = [], {}
+    order = {"high": 0, "moderate": 1, "ok": 2, "small": 3}
+    for name, t in per.items():
+        if t["reference"] or not t["partitions"]:
+            continue
+        s = skew_stats(t["partitions"])
+        tables.append({
+            "table": name, "level": s["level"], "partitions": s["partition_count"], "rows_total": s["rows_total"],
+            "data_bytes_total": s["data_bytes_total"], "rows_rsd_pct": s["rows"]["rsd_pct"],
+            "rows_max_over_avg_pct": s["rows"]["max_over_avg_pct"], "data_rsd_pct": s["data"]["rsd_pct"],
+            "largest_partition": s["largest"][0]["partition"] if s["largest"] else None,
+            "largest_rows": s["largest"][0]["rows"] if s["largest"] else None,
+        })
+        for leaf in s["leaves"]:
+            agg = leaves.setdefault(leaf["host"], {"host": leaf["host"], "rows": 0, "data_bytes": 0})
+            agg["rows"] += leaf["rows"]
+            agg["data_bytes"] += leaf["data_bytes"]
+    tables.sort(key=lambda x: (order[x["level"]], -(x["rows_rsd_pct"] or 0), x["table"]))
+    leaf_list = sorted(leaves.values(), key=lambda x: x["host"])
+    return {
+        "database": database, "tables": tables, "leaves": leaf_list,
+        "leaf_rows": _spread([float(x["rows"]) for x in leaf_list]),
+        "leaf_data": _spread([float(x["data_bytes"]) for x in leaf_list]),
+        "reference_tables": sorted(n for n, t in per.items() if t["reference"]),
+        "counts": {lvl: sum(t["level"] == lvl for t in tables) for lvl in order},
+        "docs": SKEW_DOCS, "min_rows": SKEW_MIN_ROWS,
+    }
+
+
+def _skew_summary(d: dict[str, Any]) -> str:
+    if "tables" in d:
+        c = d["counts"]
+        lines = [f"Skew in {d['database']}: {len(d['tables'])} distributed table(s); {c['high']} high, {c['moderate']} moderate, "
+                 f"{c['ok']} even, {c['small']} too small to matter."]
+        for t in d["tables"][:15]:
+            if t["level"] in ("high", "moderate"):
+                lines.append(f"- {t['table']}: {t['level']}, {t['rows_rsd_pct']} % variation, largest partition "
+                             f"+{t['rows_max_over_avg_pct']} % over an even share ({t['rows_total']:,} rows)")
+        return "\n".join(lines)
+    if d["kind"] != "distributed":
+        return f"{d['database']}.{d['table']}: {d['message']}"
+    return (f"{d['database']}.{d['table']}: skew {d['level']} - {d['rows']['rsd_pct']} % variation over "
+            f"{d['partition_count']} partitions, largest +{d['rows']['max_over_avg_pct']} % over an even share. "
+            + " ".join(d["advice"]["notes"][:2]))
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=_READ_ONLY)
+def schema_explorer_skew(database: str, table: str | None = None) -> CallToolResult:
+    """Data skew, for the Schema Explorer's Distribution tab / database "Check skew": rows and data per
+    partition and per leaf, skew % (relative standard deviation and (max - avg) / avg), the largest
+    partitions, the shard key and a plain explanation. Read-only (TABLE_STATISTICS, COLUMNAR_SEGMENTS).
+
+    Args:
+        database: Database (case-sensitive).
+        table: One table (case-sensitive); omit for every table of the database.
+    """
+    data = table_skew(database, table) if table else database_skew(database)
+    return tool_result(_skew_summary(data), data)
+
+
+# --------------------------------------------------------------------------
 # Clean up: leftover SAS work tables (logic in ..housekeeping)
 # --------------------------------------------------------------------------
 

@@ -107,6 +107,21 @@
   .cm-top-r { display: flex; justify-content: space-between; gap: 10px; }
   .cm-top-r span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .cm-top-r strong { font-weight: var(--font-weight-medium, 500); font-variant-numeric: tabular-nums; flex: none; }
+  /* Health / History / Backups tabs */
+  .cm-hbanner { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: var(--s2-radius, 6px); margin-bottom: 10px;
+    border: 1px solid var(--s2-border); font-weight: var(--font-weight-semibold, 600); }
+  .cm-hbanner.critical { background: var(--s2-err-bg); color: var(--s2-err); border-color: var(--s2-err); }
+  .cm-hbanner.warning { background: var(--s2-warn-bg); color: var(--s2-warn); border-color: var(--s2-warn); }
+  .cm-hbanner.healthy { background: var(--s2-ok-bg); color: var(--s2-ok); border-color: var(--s2-ok); }
+  .cm-issues { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
+  .cm-issue { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 4px 10px; align-items: start; padding: 8px 12px; }
+  .cm-issue.critical { border-left: 3px solid var(--s2-err); }
+  .cm-issue.warning { border-left: 3px solid var(--s2-warn); }
+  .cm-issue.info { border-left: 3px solid var(--s2-info); }
+  .cm-issue .t { font-weight: var(--font-weight-semibold, 600); font-size: var(--s2-fs-sm, 13px); }
+  .cm-issue .x { color: var(--s2-text-2); font-size: var(--s2-fs-xs); margin-top: 2px; }
+  .cm-issue .acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+  .cm-ev td.det { font-family: var(--s2-mono); font-size: 11px; max-width: 520px; }
   .cm-io-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 12px; }
   @media (max-width: 900px) { .cm-io-charts { grid-template-columns: minmax(0, 1fr); } }
 </style>
@@ -122,13 +137,17 @@ const state = {
   data: null, error: null, loading: false,
   auto: true, timer: null,
   includeInternal: false,
-  tab: "overview",      // "overview" | "queries" | "disk" | "bottomless" | "io"
+  tab: "overview",      // "overview" | "health" | "queries" | "disk" | "bottomless" | "io" | "history" | "backups"
   history: [],          // [{t, cpu: {nodeId: pct}}] from the server
   chart: { group: "all", hidden: new Set(), hoverT: null },
   open: new Set(),      // expanded query keys
   // Data of the Disk / Bottomless / IO tabs (their own tools, only called while the tab is open).
   extra: { disk: { data: null, error: null, loading: false, at: 0 }, bottomless: { data: null, error: null, loading: false, at: 0 },
-    io: { data: null, error: null, loading: false, at: 0 } },
+    io: { data: null, error: null, loading: false, at: 0 }, health: { data: null, error: null, loading: false, at: 0 },
+    history: { data: null, error: null, loading: false, at: 0 }, backups: { data: null, error: null, loading: false, at: 0 } },
+  hist: { range: "1h", group: "all", hidden: new Set() },
+  healthEvents: "problems",
+  backupWarnDays: 7,
   remote: { status: null },
   ioChart: { group: "all", hidden: new Set(), disk: "rd", cache: "down" },
 };
@@ -186,13 +205,17 @@ function niceCeil(value) {
   return { max: Math.ceil(value / step) * step, step };
 }
 
-function timeLabel(t, withSeconds) {
-  return new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", ...(withSeconds ? { second: "2-digit" } : {}) });
+function timeLabel(t, withSeconds, withDay, dayOnly) {
+  const d = new Date(t * 1000);
+  if (dayOnly) return d.toLocaleDateString([], { weekday: "short", day: "numeric" });
+  if (withDay) return d.toLocaleString([], { weekday: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", ...(withSeconds ? { second: "2-digit" } : {}) });
 }
 
 // A line chart over time, one line per series, with direct labels, crosshair and tooltip.
 // plot.spec = { hist: [{t, ...}], series: [{id, name, color, get(point) -> number|null}], tick(v), value(v),
-//               cap (max of the y axis, e.g. 100 for %), floor (smallest y range), what (aria text), empty, none }
+//               cap (max of the y axis, e.g. 100 for %), floor (smallest y range), what (aria text), empty, none,
+//               t0 / t1 (time axis; default: the data), gapS (break a line where readings are further apart) }
 function createPlot(label) {
   const plot = { el: h("div", { class: "cm-plot", tabindex: "0", "aria-label": label }), spec: null, hoverT: null, geo: null };
   let frame = 0;
@@ -249,7 +272,7 @@ function drawSeriesPlot(plot) {
   const H = Math.max(spec.minH ?? 200, Math.min(maxH, Math.round(W / 2.4)));
   const m = { l: spec.left ?? 40, r: spec.right ?? 104, t: 10, b: 24 };
   const pw = W - m.l - m.r, ph = H - m.t - m.b;
-  const t1 = hist.at(-1).t, t0 = Math.min(hist[0].t, t1 - 60);
+  const t1 = spec.t1 ?? hist.at(-1).t, t0 = spec.t0 ?? Math.min(hist[0].t, t1 - 60);
   const x = (t) => m.l + ((t - t0) / (t1 - t0)) * pw;
   let vmax = 0;
   for (const p of hist) for (const s of series) vmax = Math.max(vmax, s.get(p) ?? 0);
@@ -257,23 +280,30 @@ function drawSeriesPlot(plot) {
   const y = (v) => m.t + ph - (v / ymax) * ph;
 
   const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img",
-    "aria-label": `${spec.what} over the last ${Math.round((t1 - t0) / 60)} minutes for ${series.map((s) => s.name).join(", ")}; peak ${spec.value(vmax)}` });
+    "aria-label": `${spec.what} over the last ${t1 - t0 > 7200 ? `${Math.round((t1 - t0) / 3600)} hours` : `${Math.round((t1 - t0) / 60)} minutes`} for ${series.map((s) => s.name).join(", ")}; peak ${spec.value(vmax)}` });
   for (let v = 0; v <= ymax + 1e-9; v += step) {
     svg.append(svgEl("line", { class: v === 0 ? "base" : "grid", x1: m.l, x2: m.l + pw, y1: y(v), y2: y(v) }));
     svg.append(svgEl("text", { class: "tick", x: m.l - 6, y: y(v) + 4, "text-anchor": "end" }, spec.tick(v)));
   }
   const span = t1 - t0;
-  const tstep = [10, 15, 30, 60, 120, 300, 600].find((s) => span / s <= 6) ?? 900;
-  for (let t = Math.ceil(t0 / tstep) * tstep; t <= t1; t += tstep) {
-    svg.append(svgEl("text", { class: "tick", x: x(t), y: H - 6, "text-anchor": "middle" }, timeLabel(t, tstep < 60)));
+  const longAxis = span > 86400 * 1.5;
+  // As many time labels as fit (a label is about 60-80 px wide), at most 6.
+  const maxTicks = Math.max(2, Math.min(6, Math.floor(pw / (longAxis ? 80 : 64))));
+  const tstep = [10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400].find((s) => span / s <= maxTicks) ?? 172800;
+  // Hour steps start on local hours (and day steps on local midnight), not on UTC boundaries.
+  const tz = tstep >= 3600 ? new Date(t0 * 1000).getTimezoneOffset() * 60 : 0;
+  for (let t = Math.ceil((t0 - tz) / tstep) * tstep + tz; t <= t1; t += tstep) {
+    svg.append(svgEl("text", { class: "tick", x: x(t), y: H - 6, "text-anchor": "middle" }, timeLabel(t, tstep < 60, longAxis, tstep >= 86400)));
   }
 
   const labels = [];
   for (const s of series) {
-    let dpath = "", pen = false, last = null;
+    let dpath = "", pen = false, last = null, lastT = null;
     for (const p of hist) {
       const v = s.get(p);
       if (v == null) { pen = false; continue; }
+      if (spec.gapS && lastT != null && p.t - lastT > spec.gapS) pen = false;  // no readings in between: don't bridge
+      lastT = p.t;
       dpath += `${pen ? "L" : "M"}${x(p.t).toFixed(1)},${y(v).toFixed(1)}`;
       pen = true;
       last = v;
@@ -300,7 +330,7 @@ function drawSeriesPlot(plot) {
     const rows = series.filter((s) => s.get(p) != null).sort((a, b) => (b.get(p) ?? 0) - (a.get(p) ?? 0));
     for (const s of rows) svg.append(svgEl("circle", { class: "dot", cx, cy: y(s.get(p)), r: 4, fill: s.color }));
     tip = h("div", { class: "cm-tip" },
-      h("div", { class: "when" }, timeLabel(p.t, true)),
+      h("div", { class: "when" }, timeLabel(p.t, !spec.gapS || spec.gapS < 600, t1 - t0 > 3 * 3600)),
       rows.map((s) => h("div", { class: "row" },
         h("span", { class: "cm-key", style: { background: s.color } }),
         h("strong", {}, spec.value(s.get(p))),
@@ -463,8 +493,17 @@ function askAbout(q) {
 
 // ---------------------------------------------------------------- Disk, Bottomless and IO tabs
 // Each has its own app tool, only called while the tab is open, so the overview refresh stays light.
-const TAB_TOOLS = { disk: "cluster_monitor_disk", bottomless: "cluster_monitor_bottomless", io: "cluster_monitor_io" };
+const TAB_TOOLS = { disk: "cluster_monitor_disk", bottomless: "cluster_monitor_bottomless", io: "cluster_monitor_io",
+  health: "cluster_monitor_health", history: "cluster_monitor_history", backups: "cluster_monitor_backups" };
 const DISK_REFRESH_MS = 60000;  // directory sizes are measured by walking the directories: once a minute is plenty
+// Tabs whose data changes slowly are refreshed less often than the overview (none of them run on open).
+const TAB_MIN_MS = { disk: DISK_REFRESH_MS, health: 30000, history: 60000, backups: 60000 };
+function tabArgs(tab, force) {
+  if (tab === "disk") return force ? { force: true } : {};
+  if (tab === "history") return { range: state.hist.range, ...(force === "sample" ? { sample_now: true } : {}) };
+  if (tab === "backups") return { warn_days: state.backupWarnDays };
+  return {};
+}
 const MBs = (b) => (b == null ? null : b / 1e6);
 const mbText = (v) => (v == null ? "–" : v >= 100 ? `${v.toFixed(0)} MB/s` : v >= 1 ? `${v.toFixed(1)} MB/s` : `${v.toFixed(2)} MB/s`);
 const bytesOrDash = (b) => (b == null ? "–" : fmt.bytes(b));
@@ -477,11 +516,11 @@ async function refreshTab(force = false) {
   if (!tool) return;
   const slot = state.extra[tab];
   if (slot.loading) return;
-  if (tab === "disk" && !force && slot.data && Date.now() - slot.at < DISK_REFRESH_MS) return;
+  if (!force && slot.data && TAB_MIN_MS[tab] && Date.now() - slot.at < TAB_MIN_MS[tab]) return;
   slot.loading = true;
   if (state.tab === tab) render();
   try {
-    slot.data = await S2.callTool(tool, tab === "disk" && force ? { force: true } : {});
+    slot.data = await S2.callTool(tool, tabArgs(tab, force));
     slot.error = null;
     slot.at = Date.now();
   } catch (e) {
@@ -490,6 +529,8 @@ async function refreshTab(force = false) {
     slot.loading = false;
     if (state.tab === tab) render();
   }
+  // The History range changed while a read was on its way: read the range now selected.
+  if (tab === "history" && !slot.error && slot.data && slot.data.range !== state.hist.range) refreshTab(true);
 }
 
 function tabStatus(slot, what) {
@@ -772,6 +813,234 @@ function ioTab(d, names) {
   ];
 }
 
+// ---------------------------------------------------------------- Health, History and Backups tabs
+async function openDocs(url) {
+  try { const r = await S2.app.openLink({ url }); if (r?.isError) throw new Error("refused"); }
+  catch { S2.copy(url, "Docs link copied (this host can't open links)"); }
+}
+
+const SEV_BADGE = { critical: "err", warning: "warn", info: "info", ERROR: "err", WARNING: "warn", NOTICE: "plain" };
+const SEV_TEXT = { critical: "Critical", warning: "Check", info: "Info" };
+
+function healthCount() {
+  const x = state.extra.health.data;
+  return x ? x.issues.filter((i) => i.severity !== "info").length : null;
+}
+
+function issueList(issues, docsFallback, what) {
+  if (!issues.length) return null;
+  return h("div", { class: "cm-issues" }, issues.map((i) => h("div", { class: `s2-card cm-issue ${i.severity}` },
+    h("span", { class: `s2-badge ${SEV_BADGE[i.severity] ?? "plain"}` }, SEV_TEXT[i.severity] ?? i.severity),
+    h("div", {}, h("div", { class: "t" }, i.title), h("div", { class: "x" }, i.explanation,
+      i.last_ago_s != null ? ` Last: ${agoText(i.last_ago_s)}.` : "")),
+    h("div", { class: "acts" },
+      (i.docs ?? docsFallback) ? h("button", { class: "s2-btn", title: i.docs ?? docsFallback, onclick: () => openDocs(i.docs ?? docsFallback) }, "Docs") : null,
+      h("button", { class: "s2-btn", title: "Ask Claude what this means and what to check (advice only)",
+        onclick: () => S2.sendPrompt(`The SingleStore ${what} shows: "${i.title}" (${i.explanation}). What does this mean for this cluster and what should an admin check? Don't change anything on the cluster.`) }, "Ask Claude")))));
+}
+
+function healthBanner(x) {
+  const n = (s) => x.issues.filter((i) => i.severity === s).length;
+  const text = x.status === "critical" ? `Action needed: ${n("critical")} critical problem${n("critical") === 1 ? "" : "s"}`
+    : x.status === "warning" ? `${n("warning")} thing${n("warning") === 1 ? "" : "s"} to check` : "Healthy: no problems found";
+  return h("div", { class: `cm-hbanner ${x.status}`, role: "status" }, text,
+    h("span", { class: "s2-spacer" }),
+    h("span", { class: "s2-small", style: { fontWeight: "normal" } }, `${x.nodes.length} nodes · ${x.databases.length} databases · SingleStore ${x.versions.join(", ")}`));
+}
+
+function eventDetails(details) {
+  return Object.entries(details ?? {}).map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join("  ");
+}
+
+function healthTab(d, names) {
+  const slot = state.extra.health;
+  const x = slot.data;
+  const head = h("div", { class: "cm-section", style: { marginTop: 0 } },
+    h("h2", {}, "Health"),
+    h("span", { class: "s2-faint s2-small" }, x ? `checked ${fmt.relTime(x.generated_at)} · every 30 s while this tab is open` : ""),
+    h("span", { class: "s2-spacer" }),
+    h("button", { class: "s2-btn", disabled: slot.loading, onclick: () => refreshTab(true) }, slot.loading ? h("span", { class: "s2-spinner" }) : null, "Check again"));
+  if (!x) return [head, tabStatus(slot, "Health check") ?? h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Checking nodes, partitions and events…")];
+  const nodeName = (id) => names[id] ?? x.nodes.find((n) => n.id === id)?.host ?? String(id);
+  const evs = x.events.filter((e) => state.healthEvents === "all" || e.severity === "ERROR" || e.severity === "WARNING");
+  const lic = x.license;
+  const errs = Object.entries(x.errors ?? {});
+  const yes = (v) => (v ? String(v) : "");
+  return [head, tabStatus(slot, "Health refresh"),
+    healthBanner(x),
+    issueList(x.issues, x.docs.events, "Cluster Monitor health check"),
+    errs.length ? h("div", { class: "s2-small s2-faint", style: { margin: "4px 0 8px" } }, "Couldn't read: ", errs.map(([k, v]) => `${k} (${v})`).join("; ")) : null,
+
+    h("div", { class: "cm-section" }, h("h2", {}, `Nodes (${x.nodes.length})`),
+      h("span", { class: "s2-faint s2-small" }, `MV_NODES, LEAVES, AGGREGATORS · redundancy_level ${x.settings.redundancy_level ?? "?"} · availability groups: ${Object.entries(x.availability_groups).map(([g, n]) => `${g} (${n} leaves)`).join(", ") || "–"}`)),
+    h("div", { class: "s2-table-wrap" }, h("table", { class: "s2-table cm-q" },
+      h("thead", {}, h("tr", {}, ["Node", "Type", "Role", "State", "Runtime", "Group", "Pair", "Latency", "Version", "Up"].map((c) => h("th", { class: c === "Latency" ? "num" : "" }, c)))),
+      h("tbody", {}, x.nodes.map((n) => h("tr", {},
+        h("td", { title: `${n.host}:${n.port}` }, nodeName(n.id)),
+        h("td", {}, n.type),
+        h("td", {}, n.role ?? (n.type === "LEAF" ? "Leaf" : "–")),
+        h("td", {}, h("span", { class: `s2-badge ${n.state.toLowerCase() === "online" ? "ok" : "err"}` }, n.state)),
+        h("td", {}, n.runtime_state ?? "–"),
+        h("td", {}, n.availability_group ?? "–"),
+        h("td", { class: "s2-mono" }, n.pair ?? "–"),
+        h("td", { class: "num" }, n.latency_ms != null ? `${n.latency_ms < 1 ? n.latency_ms.toFixed(3) : n.latency_ms.toFixed(1)} ms` : "–"),
+        h("td", {}, n.version ?? "–"),
+        h("td", {}, uptime(n.uptime_s))))))),
+
+    h("div", { class: "cm-section" }, h("h2", {}, `Databases and partitions (${x.databases.length})`),
+      h("span", { class: "s2-faint s2-small" }, "MV_DISTRIBUTED_DATABASES_STATUS, DISTRIBUTED_PARTITIONS, MV_REPLICATION_MANAGEMENT_ORPHANS_STATE · problems first")),
+    h("div", { class: "s2-table-wrap", style: { maxHeight: "360px" } }, h("table", { class: "s2-table cm-q" },
+      h("thead", {}, h("tr", {}, ["Database", "Status", "Partitions", "Masters", "Replicas", "Online", "Replicating", "Recovering", "Pending", "Offline", "Unrecoverable", "Orphans"]
+        .map((c, i) => h("th", { class: i > 1 ? "num" : "" }, c)))),
+      h("tbody", {}, x.databases.map((r) => h("tr", {},
+        h("td", {}, r.database),
+        h("td", {}, h("span", { class: `s2-badge ${r.summary === "healthy" ? "ok" : r.summary === "offline" ? "err" : "warn"}` }, r.summary || "?")),
+        ...["partitions", "masters", "replicas", "online", "replicating", "recovering", "pending", "offline", "unrecoverable", "orphans"].map((k) =>
+          h("td", { class: `num ${["offline", "unrecoverable", "orphans"].includes(k) && r[k] ? "verylong" : ""}` }, String(r[k] ?? "–")))))))),
+
+    x.replication.length ? h("div", { class: "cm-section" }, h("h2", {}, "Replication to other clusters"),
+      h("span", { class: "s2-faint s2-small" }, "MV_AGGREGATED_REPLICATION_STATUS")) : null,
+    x.replication.length ? S2.dataTable(["Database", "Secondary", "State", "LSN lag", "Lag MB", "Catch-up s"],
+      x.replication.map((r) => ({ Database: r.database, Secondary: r.secondary, State: `${r.primary_state} → ${r.secondary_state}`,
+        "LSN lag": r.lsn_lag, "Lag MB": r.volume_lag_mb, "Catch-up s": r.catchup_s })), { maxHeight: "220px" }) : null,
+
+    h("div", { class: "cm-section" }, h("h2", {}, `Events (${evs.length})`),
+      h("span", { class: "s2-faint s2-small" }, "MV_EVENTS: the cluster keeps its last 1,028 events (a node restart drops that node's)"),
+      h("span", { class: "s2-spacer" }),
+      seg("Events to show", [["problems", "Warnings and errors"], ["all", "All"]], state.healthEvents, (k) => { state.healthEvents = k; render(); })),
+    evs.length ? h("div", { class: "s2-table-wrap", style: { maxHeight: "360px" } }, h("table", { class: "s2-table cm-q cm-ev" },
+      h("thead", {}, h("tr", {}, ["When", "Severity", "Event", "Node", "Details"].map((c) => h("th", {}, c)))),
+      h("tbody", {}, evs.map((e) => h("tr", { title: e.help ?? "" },
+        h("td", { class: "ago", title: String(e.time ?? "") }, agoText(e.ago_s)),
+        h("td", {}, h("span", { class: `s2-badge ${SEV_BADGE[e.severity] ?? "plain"}` }, e.severity)),
+        h("td", { class: "s2-mono" }, e.type),
+        h("td", {}, nodeName(e.node_id)),
+        h("td", { class: "det", title: e.help ?? "" }, eventDetails(e.details))))))) :
+      h("div", { class: "s2-empty" }, state.healthEvents === "all" ? "No events recorded" : "No warnings or errors among the recorded events"),
+
+    h("div", { class: "cm-section" }, h("h2", {}, "License and version")),
+    h("div", { class: "s2-card", style: { padding: "8px 12px", maxWidth: "560px" } }, h("div", { class: "cm-kv", style: { marginTop: 0 } },
+      h("div", {}, h("span", {}, "SingleStore version"), h("strong", {}, x.versions.join(", ") || "–")),
+      h("div", {}, h("span", {}, "License type"), h("strong", {}, yes(lic.type) || "–")),
+      h("div", { title: "License_expiration (MV_GLOBAL_STATUS on the master aggregator)" }, h("span", {}, "License expires"),
+        h("strong", {}, lic.expires_at ? fmt.dateTime(lic.expires_at) : "no expiry date", lic.expired ? h("span", { class: "s2-badge warn", style: { marginLeft: "6px" } }, "expired") : null)),
+      h("div", { title: "Used_cluster_capacity / Maximum_cluster_capacity" }, h("span", {}, "Capacity used"),
+        h("strong", {}, `${lic.used_units ?? "?"} units of ${lic.unlimited || lic.max_units == null ? "unlimited" : lic.max_units}`)),
+      h("div", {}, h("span", {}, "redundancy_level"), h("strong", {}, String(x.settings.redundancy_level ?? "–"))),
+      h("div", {}, h("span", {}, "leaf_failure_detection"), h("strong", {}, yes(x.settings.leaf_failure_detection) || "–")))),
+  ];
+}
+
+// ---- History tab: per-node metrics kept in SQLite by the server's background sampler.
+const HIST_RANGES = [["1h", "1 hour"], ["24h", "24 hours"], ["7d", "7 days"]];
+const pctFmt = { tick: (v) => `${+v.toFixed(1)}%`, value: (v) => `${v.toFixed(1)}%`, cap: 100, floor: 1 };
+const cntFmt = { tick: (v) => `${+v.toFixed(1)}`, value: (v) => (v >= 10 ? v.toFixed(0) : `${+v.toFixed(1)}`), floor: 1 };
+const HIST_METRICS = [
+  ["cpu", "SingleStore CPU", "% of each node's core limit · average per point", pctFmt],
+  ["mem", "Memory", "% of max_memory", pctFmt],
+  ["disk", "Disk", "% of the data mount used", pctFmt],
+  ["queued", "Queued queries", "peak per point (workload manager queue)", cntFmt],
+  ["running", "Running queries", "average per point", cntFmt],
+  ["conns", "Connections", "client connections · average per point", cntFmt],
+];
+const histPlots = Object.fromEntries(HIST_METRICS.map(([k, label]) => [k, createPlot(`${label} per node, stored history`)]));
+
+function historyTab(d) {
+  const slot = state.extra.history;
+  const x = slot.data;
+  const hs = state.hist;
+  const st = x?.status;
+  const head = h("div", { class: "cm-section", style: { marginTop: 0 } },
+    h("h2", {}, "History"),
+    h("span", { class: "s2-faint s2-small" }, st ? (st.enabled
+      ? `sampled every ${st.interval_s} s while the server runs · kept ${st.retention_days} days (older than 24 h: 10-minute averages)${st.last_sample ? ` · last sample ${fmt.relTime(st.last_sample)}` : ""}`
+      : "sampling is off (SINGLESTORE_MCP_METRICS=0): only data stored earlier is shown") : ""),
+    h("span", { class: "s2-spacer" }),
+    seg("Time range", HIST_RANGES, hs.range, (k) => { hs.range = k; refreshTab(true); render(); }),
+    seg("Nodes to show", GROUPS, hs.group, (k) => { hs.group = k; hs.hidden.clear(); render(); }),
+    h("button", { class: "s2-btn", disabled: slot.loading, title: "Take one sample now and add it to the history", onclick: () => refreshTab("sample") },
+      slot.loading ? h("span", { class: "s2-spinner" }) : null, "Sample now"));
+  if (!x) return [head, tabStatus(slot, "History") ?? h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Reading the stored history…")];
+  // The live node list first (same colors as the other tabs), then nodes that only exist in the history.
+  const nodes = [...d.nodes, ...x.nodes.filter((n) => !d.nodes.some((m) => m.id === n.id))];
+  const stale = x.range !== hs.range;
+  const now = Date.now() / 1000;
+  const every = st?.interval_s ?? 60;
+  const empty = x.points.length === 1
+    ? `One sample so far: the lines start with the next one${st?.enabled ? ` (every ${every} s)` : " (Sample now, a minute from now)"}.`
+    : st?.enabled ? `No samples for this range yet. The server stores one every ${every} s (the first about 20 s after it starts).`
+      : "No samples stored, and sampling is off (SINGLESTORE_MCP_METRICS=0).";
+  const cards = HIST_METRICS.map(([key, label, sub, f]) => h("section", { class: "s2-card cm-chart", "aria-label": `${label} per node` },
+    h("div", { class: "cm-chart-head" }, h("h2", {}, label), h("span", { class: "s2-subtitle" }, sub)),
+    setPlot(histPlots[key], { ...f, hist: x.points, series: nodeSeries(nodes, hs, (p, id) => p[key]?.[id] ?? null),
+      what: label, empty, t0: now - x.range_s, t1: now, gapS: x.bucket_s * 3, left: 44, right: 140 })));
+  return [head, tabStatus(slot, "History refresh"),
+    stale ? h("div", { class: "s2-small s2-faint" }, h("span", { class: "s2-spinner" }), " Loading the new range…") : null,
+    nodeLegend(nodes, hs, render),
+    h("div", { class: "cm-io-charts" }, cards),
+    h("div", { class: "s2-small s2-faint", style: { marginTop: "8px" } },
+      `One point per ${x.bucket_s >= 3600 ? `${x.bucket_s / 3600} h` : x.bucket_s >= 60 ? `${x.bucket_s / 60} min` : `${x.bucket_s} s`}. `,
+      "Gaps are times no server was running. Stored locally in ", h("span", { class: "s2-mono" }, st?.file ?? "metrics.db"),
+      " per cluster; the Claude and the desktop Workspace server both add to it (one sample per interval).")];
+}
+
+// ---- Backups tab
+const BACKUP_STATE = { ok: ["ok", "OK"], old: ["warn", "too old"], failed: ["err", "last backup failed"], never: ["plain", "no backup"], dropped: ["plain", "database dropped"] };
+const mbBytes = (mb) => (mb == null ? "–" : fmt.bytes(Number(mb) * 1024 * 1024));
+
+function backupsTab() {
+  const slot = state.extra.backups;
+  const x = slot.data;
+  const head = h("div", { class: "cm-section", style: { marginTop: 0 } },
+    h("h2", {}, "Backups"),
+    h("span", { class: "s2-faint s2-small" }, "MV_BACKUP_HISTORY and MV_BACKUP_STATUS · read-only: this app never starts a backup"),
+    h("span", { class: "s2-spacer" }),
+    h("span", { class: "s2-small s2-muted" }, "Warn when older than"),
+    seg("Warn when the last good backup is older than", [["1", "1 day"], ["7", "7 days"], ["30", "30 days"]], String(state.backupWarnDays),
+      (k) => { state.backupWarnDays = Number(k); refreshTab(true); }),
+    h("button", { class: "s2-btn", disabled: slot.loading, onclick: () => refreshTab(true) }, slot.loading ? h("span", { class: "s2-spinner" }) : null, "Refresh"));
+  if (!x) return [head, tabStatus(slot, "Backups") ?? h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Reading the backup history…")];
+  const errs = Object.entries(x.errors ?? {});
+  return [head, tabStatus(slot, "Backups refresh"),
+    errs.length ? h("div", { class: "s2-small s2-faint" }, "Couldn't read: ", errs.map(([k, v]) => `${k} (${v})`).join("; ")) : null,
+    issueList(x.issues, x.docs.backup, "Cluster Monitor backup overview"),
+    x.running.length ? h("div", { class: "cm-section" }, h("h2", {}, `Running now (${x.running.length})`)) : null,
+    x.running.length ? S2.dataTable(["Database", "Status", "Rowstore", "Columnstore", "Step left", "Target"],
+      x.running.map((r) => ({ Database: r.database, Status: r.status, Rowstore: r.rowstore_pct != null ? `${r.rowstore_pct}%` : "–",
+        Columnstore: r.columnstore_pct != null ? `${r.columnstore_pct}%` : "–", "Step left": r.step_remaining_s != null ? fmt.duration(r.step_remaining_s) : "–", Target: r.target })),
+      { maxHeight: "200px" }) : null,
+    h("div", { class: "cm-section" }, h("h2", {}, `Per database (${x.databases.length})`),
+      h("span", { class: "s2-faint s2-small" }, `${x.total} backup${x.total === 1 ? "" : "s"} recorded, ${x.failed_total} failed`)),
+    h("div", { class: "s2-table-wrap", style: { maxHeight: "380px" } }, h("table", { class: "s2-table cm-q" },
+      h("thead", {}, h("tr", {}, ["Database", "State", "Last good backup", "Age", "Type", "Size", "Took", "Backups", "Failed", "Last failure"].map((c, i) => h("th", { class: [3, 5, 6, 7, 8].includes(i) ? "num" : "" }, c)))),
+      h("tbody", {}, x.databases.map((r) => {
+        const ls = r.last_success, lf = r.last_failure;
+        const [cls, label] = BACKUP_STATE[r.state] ?? ["plain", r.state];
+        return h("tr", {},
+          h("td", {}, r.database),
+          h("td", {}, h("span", { class: `s2-badge ${cls}` }, label)),
+          h("td", { title: ls?.path ?? "" }, ls ? String(ls.end ?? ls.start) : "–"),
+          h("td", { class: `num ${r.state === "old" ? "long" : ""}` }, r.age_s != null ? agoText(r.age_s).replace(" ago", "") : "–"),
+          h("td", {}, ls?.type ?? "–"),
+          h("td", { class: "num" }, mbBytes(ls?.size_mb)),
+          h("td", { class: "num" }, ls?.duration_s != null ? fmt.duration(ls.duration_s) : "–"),
+          h("td", { class: "num" }, String(r.backups)),
+          h("td", { class: `num ${r.failures ? "verylong" : ""}` }, String(r.failures)),
+          h("td", { title: lf?.error ?? "" }, lf ? `${lf.end ?? lf.start}${lf.error_code ? ` · error ${lf.error_code}` : ""}` : "–"));
+      })))),
+    h("div", { class: "cm-section" }, h("h2", {}, "History"), h("span", { class: "s2-faint s2-small" }, "newest first, up to 200")),
+    x.history.length ? S2.dataTable(["Finished", "Database", "Status", "Type", "Size", "Took", "Partitions", "Path", "Error"],
+      x.history.map((r) => ({ Finished: r.end ?? r.start, Database: r.database, Status: r.status, Type: r.type ?? "", Size: mbBytes(r.size_mb),
+        Took: r.duration_s != null ? fmt.duration(r.duration_s) : "–", Partitions: r.partitions, Path: r.path, Error: r.error ?? "" })), { maxHeight: "320px" })
+      : h("div", { class: "s2-card", style: { padding: "14px 16px" } },
+        h("div", {}, h("strong", {}, "No backups recorded on this cluster.")),
+        h("div", { class: "s2-small s2-muted", style: { marginTop: "6px" } },
+          "MV_BACKUP_HISTORY lists backups made with BACKUP DATABASE (full or incremental) on this cluster; CLEAR BACKUP_HISTORY empties it. ",
+          "Backups taken outside SingleStore (e.g. volume snapshots in Kubernetes) don't appear here. "),
+        h("button", { class: "s2-btn", style: { marginTop: "8px" }, onclick: () => openDocs(x.docs.backup) }, "Backup and restore docs")),
+  ];
+}
+
 function render() {
   if (!state.data) {
     root.replaceChildren(state.error ? S2.errorBox(state.error) : h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Measuring the cluster…"));
@@ -796,7 +1065,9 @@ function render() {
     state.error ? h("div", { class: "s2-error", style: { marginBottom: "10px" } }, `Refresh failed: ${state.error.message}`) : null,
     tabs(d),
     ...(state.tab === "queries" ? queriesTab(d, names) : state.tab === "disk" ? diskTab(d, names)
-      : state.tab === "bottomless" ? bottomlessTab(d, names) : state.tab === "io" ? ioTab(d, names) : [
+      : state.tab === "bottomless" ? bottomlessTab(d, names) : state.tab === "io" ? ioTab(d, names)
+      : state.tab === "health" ? healthTab(d, names) : state.tab === "history" ? historyTab(d)
+      : state.tab === "backups" ? backupsTab() : [
       h("div", { class: "cm-overview" },
         chartEl,
         h("div", {}, h("div", { class: "cm-nodes" }, d.nodes.map((n, i) => nodeCard(n, names[n.id], i))))),
@@ -811,10 +1082,13 @@ function tabs(d) {
     onclick: () => { state.tab = key; render(); refreshTab(); } }, label, count != null ? h("span", { class: `count${busy ? " busy" : ""}` }, String(count)) : null);
   return h("div", { class: "cm-tabs", role: "tablist" },
     tab("overview", "Overview"),
+    tab("health", "Health", healthCount(), healthCount() > 0),
     tab("queries", "Queries", d.queries.length, d.queries.length > 0),
     tab("disk", "Disk"),
     tab("bottomless", "Bottomless"),
     tab("io", "IO"),
+    tab("history", "History"),
+    tab("backups", "Backups"),
     recent ? h("span", { class: "s2-faint s2-small", style: { alignSelf: "center", marginLeft: "6px" } }, `${recent} ran in the last ${d.recent_seconds ?? 60} s`) : null);
 }
 

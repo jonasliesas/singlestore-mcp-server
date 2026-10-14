@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import fileio
 from .paths import data_dir
 
 ENV_PROFILE = "Environment variables"
@@ -244,16 +245,14 @@ def _env_profile(env: Any = None) -> Profile | None:
 
 
 def _read() -> dict[str, Any]:
-    try:
-        return json.loads(_file().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {"active": None, "profiles": []}
+    # A file that exists but can't be read raises instead of reading as empty: a save after that would
+    # otherwise drop every saved connection.
+    data = fileio.read_json(_file(), None)
+    return data if isinstance(data, dict) else {"active": None, "profiles": []}
 
 
 def _write(data: dict[str, Any]) -> None:
-    tmp = _file().with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    os.replace(tmp, _file())
+    fileio.write_json(_file(), data, indent=2)
 
 
 def profiles() -> list[Profile]:

@@ -143,6 +143,71 @@ def test_sql_editor_select_ticked_columns(workspace) -> None:
     _no_problems(page, errors, "SQL editor column picking")
 
 
+def test_sql_editor_streams_a_big_result(workspace) -> None:
+    """LIMIT 100000: the first rows show before the rest has been read (the ROADMAP's "fetches all rows before
+    showing any"), the total appears when loading ends, scrolling loads more rows into the grid, and Export CSV
+    writes every row."""
+    page, errors, ws = workspace
+    sql = find_frame(page, "SQL Editor")
+    _run_sql(sql, "SELECT a.Make, a.Model, a.MSRP, b.Make AS make2 FROM CARS a, CARS b LIMIT 100000")
+    assert wait_js(sql, "document.querySelectorAll('.sq-out tbody tr').length >= 1000", 60), "no first page: " + text(sql)[-300:]
+    assert wait_js(sql, r"/\b100,000 rows\b/.test(document.querySelector('.sq-status').innerText)", 120), \
+        "the total didn't show when loading ended: " + sql.locator(".sq-status").inner_text()
+    assert "loading" not in sql.locator(".sq-status").inner_text()
+    shown = sql.evaluate("document.querySelectorAll('.sq-out tbody tr').length")
+    assert shown < 100_000, "the grid should hold only the pages scrolled to"
+    for _ in range(3):
+        sql.evaluate("(() => { const o = document.querySelector('.sq-out'); o.scrollTop = o.scrollHeight; o.dispatchEvent(new Event('scroll')); })()")
+        time.sleep(0.3)
+    assert wait_js(sql, f"document.querySelectorAll('.sq-out tbody tr').length > {shown}", 20), "scrolling didn't load more rows"
+    sql.evaluate("window.__csv = null; S2.download = (name, text) => { window.__csv = text; return true; }")
+    sql.get_by_role("button", name="Export CSV", exact=True).click()
+    lines = wait_js(sql, "window.__csv && window.__csv.split('\\r\\n').length", 120)
+    assert lines == 100_001, f"Export CSV should hold the header and all 100,000 rows, got {lines}"
+    _no_problems(page, errors, "SQL Editor streamed result")
+
+
+def test_sql_editor_stop_while_loading(workspace) -> None:
+    page, errors, ws = workspace
+    sql = find_frame(page, "SQL Editor")
+    _run_sql(sql, "SELECT a.*, b.Model AS m2 FROM CARS a, CARS b LIMIT 150000")
+    stop = sql.locator(".sq-status").get_by_role("button", name="Stop", exact=True)
+    try:
+        stop.click(timeout=30_000)
+    except Exception:  # noqa: BLE001 - it finished before Stop could be clicked
+        pytest.skip("the result loaded before Stop could be pressed")
+    assert wait_js(sql, r"/\bstopped\b/.test(document.querySelector('.sq-status').innerText)", 20), \
+        "Stop didn't stop loading: " + sql.locator(".sq-status").inner_text()
+    status = sql.locator(".sq-status").inner_text()
+    assert "loading" not in status and "150,000 rows" not in status
+    _no_problems(page, errors, "SQL Editor Stop")
+
+
+def test_schema_explorer_distribution(workspace) -> None:
+    """Skew: the Distribution tab of a table and the database's Check skew; nothing is read until asked."""
+    page, errors, ws = workspace
+    ws.locator('nav.ws-rail button[aria-label^="Schema Explorer"]').click()
+    se = find_frame(page, re.compile(r"Schema Explorer"), 25)
+    se.evaluate("(db) => window.parent.postMessage({type: 's2-open-view', view: 'schema', database: db, table: 'CARS'}, '*')", DB)
+    tab = se.get_by_role("tab", name="Distribution")
+    if not wait_js(se, "[...document.querySelectorAll('[role=tab]')].some((t) => t.innerText === 'Distribution')", 20):
+        row = se.locator('.se-row.tbl:has(.se-name:text-is("CARS"))').first
+        if not row.count():
+            se.locator(f'.se-row.db:has(.se-name:text-is("{DB}"))').first.click()
+        se.locator('.se-row.tbl:has(.se-name:text-is("CARS"))').first.click()
+    expect(tab).to_be_visible(timeout=20_000)
+    assert not re.search("row variation", text(se), re.I), "skew must not be read before the tab is opened"
+    tab.click()
+    assert wait_js(se, "/Row variation/i.test(document.body.innerText) && /Rows per partition/i.test(document.body.innerText)", 30), \
+        "Distribution tab didn't show the partitions: " + text(se)[-400:]
+    assert re.search("shard key", text(se), re.I) and "Detecting and resolving data skew" in text(se)
+    # The database overview: Check skew lists every table, worst first.
+    se.locator(f'.se-row.db:has(.se-name:text-is("{DB}"))').first.click()
+    se.get_by_role("button", name="Check skew", exact=True).click()
+    assert wait_js(se, r"/Skew: \d+ table\(s\) high/.test(document.body.innerText)", 60), "Check skew showed nothing: " + text(se)[-400:]
+    _no_problems(page, errors, "Schema Explorer distribution")
+
+
 def _visible_sql(page: Any, timeout: float = 30, ready: bool = True) -> Any:
     """The SQL Editor frame of the tab that is shown (each SQL tab is its own frame; the others are hidden).
     ``ready``: wait until it has restored its draft (its help then mentions the tab shortcuts)."""
@@ -384,6 +449,16 @@ def _workload_named(cluster: McpSession, name: str) -> dict | None:
     return next((w for w in cluster.ok("workload_list")["workloads"] if w["name"] == name), None)
 
 
+def _save_workload(wl: Any) -> None:
+    """Click the Workload view's Save and wait until the app has saved (its "unsaved" badge is gone), before the
+    test reads the store: polling workload_list while the save replaced workloads.json made that replace fail
+    on Windows (file in use), which was the flaky "Save didn't store the added statement"."""
+    wl.locator("#wl-save").click()
+    saved = wait_js(wl, r"!/\bunsaved\b/.test(document.querySelector('.wl-main h2')?.innerText ?? 'unsaved')", 15)
+    toasts = wl.evaluate("[...document.querySelectorAll('#s2-toasts .s2-toast')].map((t) => t.innerText).join(' | ')")
+    assert saved, f"Save didn't finish in the Workload view (toasts: {toasts!r})"
+
+
 @pytest.fixture
 def editor_workload(cluster: McpSession):
     name = "zz test ui editor"
@@ -417,7 +492,7 @@ def test_sql_editor_and_workload_round_trip(workspace, cluster: McpSession, edit
     assert wait_js(wl, f"{added} === 1", 20), "statement not added to the workload: " + text(wl)[-400:]
     assert "unsaved" in text(wl), "added statements should be unsaved until Save"
     assert wl.locator('.wl-stmt input[aria-label="Runs per minute"]').nth(1).input_value() == "30"
-    wl.locator("#wl-save").click()
+    _save_workload(wl)
     _, secs = cluster.wait_until("workload_list", {}, lambda d: any(w["name"] == editor_workload and len(w["statements"]) == 2 for w in d["workloads"]), 15, 0.5)
     assert secs is not None, "Save didn't store the added statement"
     _no_problems(page, errors, "SQL Editor → Workload")
@@ -524,7 +599,7 @@ def test_workload_chat_buttons(ui, app_url, cluster: McpSession, chat_workload: 
     toast = wl.locator("#s2-toasts .s2-toast").last
     expect(toast).to_contain_text("Copied")
 
-    wl.locator("#wl-save").click()
+    _save_workload(wl)
     _, secs = cluster.wait_until("workload_list", {}, lambda d: any(
         w["name"] == chat_workload and len(w["statements"]) == 3 and "zz_replaced" in w["statements"][1]["sql"]
         and w["statements"][2]["per_minute"] == 12 for w in d["workloads"]), 15, 0.5)
@@ -557,3 +632,4 @@ def test_standalone_app_opens(ui, app_url, tool: str, args: dict, expect: str) -
         f"{tool}: expected {expect!r} in: {text(f)[:300]}"
     time.sleep(1.0)
     _no_problems(page, errors, tool)
+

@@ -117,12 +117,21 @@ def run_query(sql: str, database: str | None, max_rows: int) -> dict[str, Any]:
     check_read_only(sql)
     max_rows = max(1, min(int(max_rows), MAX_ROWS_LIMIT))
     started = time.perf_counter()
-    # One extra row tells us whether the result was cut off. An explicit LIMIT
-    # in the SQL overrides sql_select_limit, so slice in Python as well.
+    # One extra row tells us whether the result was cut off. An explicit LIMIT in the SQL overrides
+    # sql_select_limit, so the result is streamed and reading stops after that row: a LIMIT 10000000
+    # no longer pulls ten million rows into memory to show a thousand.
+    columns: list[str] = []
+    rows: list[dict[str, Any]] = []
+    gen = db.stream(sql, database, max_rows=max_rows + 1, chunk=min(max_rows + 1, 5000))
     try:
-        columns, rows, _ = db.execute(sql, database=database, max_rows=max_rows + 1)
+        for columns, chunk in gen:
+            rows.extend(chunk)
+            if len(rows) > max_rows:
+                break
     except s2.Error as exc:
         raise ToolError(_db_error_text(exc)) from exc
+    finally:
+        gen.close()
     elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
     truncated = len(rows) > max_rows
     rows = jsonable_rows(rows[:max_rows])

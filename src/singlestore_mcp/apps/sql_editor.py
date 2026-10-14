@@ -18,13 +18,14 @@ import time
 from pathlib import Path
 from typing import Any
 
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, ToolAnnotations
 
-from .. import assistant
+from .. import assistant, fileio, result_stream
 from .. import sql_editor_state as editor_state
 from ..db import db
-from ._core import APP_ONLY, apps, jsonable_rows, page_html, register_app, tool_result, with_browser_link
-from .query_grid import MAX_ROWS_LIMIT, ReadOnlyViolation, check_read_only, run_query
+from ._core import APP_ONLY, apps, head_hash, jsonable_rows, page_parts, register_app, tool_result, with_browser_link
+from .query_grid import MAX_ROWS_LIMIT, ReadOnlyViolation, check_read_only
 
 URI = "ui://singlestore/sql-editor.html"
 READ_ONLY = ToolAnnotations(readOnlyHint=True)
@@ -52,16 +53,27 @@ register_app(
 
 
 @apps.tool(resource_uri=WORKSPACE_URI, visibility=APP_ONLY, annotations=READ_ONLY)
-def app_page(uri: str) -> CallToolResult:
+def app_page(uri: str, head: str | None = None, build: str | None = None) -> CallToolResult:
     """HTML of one of this server's app pages (the workspace loads its views with this).
 
     Tool results aren't cached by hosts, unlike resources/read, so views pick
     up changes right after restart_server.
+
+    ``head``: the caller's shared-head hash (its ``s2-head`` meta); when it matches,
+    the page comes without the shared head (``head_omitted``; the caller puts its own
+    copy in at SHARED_HEAD_MARKER). ``build``: the build the caller already has; when
+    it matches, only ``unchanged`` comes back.
     """
-    html = page_html(uri)
-    if html is None:
+    parts = page_parts(uri)
+    if parts is None:
         raise LookupError(f"No app page {uri!r}")
-    return tool_result(f"{uri} ({len(html) // 1024} KB)", {"uri": uri, "html": html})
+    page_build, html, lite = parts
+    if build and build == page_build:
+        return tool_result(f"{uri} unchanged", {"uri": uri, "build": page_build, "unchanged": True})
+    omit = bool(head) and head == head_hash()
+    page = lite if omit else html
+    return tool_result(f"{uri} ({len(page) // 1024} KB)",
+                       {"uri": uri, "build": page_build, "html": page, "head_omitted": omit})
 
 
 def _databases() -> list[str]:
@@ -141,15 +153,46 @@ def _record_failure(sql: str, database: str | None, kind: str, started: float, e
                              elapsed_ms=round((time.perf_counter() - started) * 1000, 1))
 
 
-@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
-def sql_editor_query(sql: str, database: str | None = None, max_rows: int = 1000, tab_id: str | None = None,
-                     tab: str | None = None, file: str | None = None) -> CallToolResult:
-    """Run a read-only statement from the SQL Editor app.
+def _stream_columns(stream: result_stream.Stream, rows: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    """Column names and warnings: singlestoredb keys a repeated column name as "table.col", so the row
+    keys are the reliable column list then (as in query_grid.run_query)."""
+    columns = list(stream.columns or [])
+    unique = list(dict.fromkeys(columns))
+    if len(unique) == len(columns):
+        return unique, []
+    if rows and len(rows[0]) == len(columns):
+        unique = list(rows[0].keys())
+    dupes = sorted({c for c in columns if columns.count(c) > 1})
+    return unique, [f"Duplicate column names ({', '.join(dupes)}); alias them for clearer headers."]
 
-    Statements that change data or schema are answered with
-    ``needs_confirmation`` instead of running; the app then asks the user and
-    uses sql_editor_execute. Every run lands in the editor's history, with the
-    tab (``tab_id``, its label ``tab``) and open ``file`` it ran from.
+
+def _stream_data(stream: result_stream.Stream, rows: list[dict[str, Any]], offset: int = 0) -> dict[str, Any]:
+    st = stream.status()
+    columns, warnings = _stream_columns(stream, rows)
+    return {
+        **st,
+        "sql": stream.sql, "database": stream.database, "kind": "read",
+        "columns": columns, "has_result_set": bool(stream.columns),
+        "rows": rows, "offset": offset,
+        # Compatibility with the non-streamed result: row_count = rows read so far (the total once done).
+        "row_count": st["loaded"], "truncated": st["capped"], "warnings": warnings,
+    }
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def sql_editor_query(sql: str, database: str | None = None, max_rows: int = result_stream.FIRST_PAGE,
+                     tab_id: str | None = None, tab: str | None = None, file: str | None = None,
+                     stream_id: str | None = None, replaces: str | None = None) -> CallToolResult:
+    """Run a read-only statement from the SQL Editor app, streaming its result.
+
+    Returns as soon as the first ``max_rows`` rows (the first page) are in, or the result is complete; the
+    rest keeps loading on the server (up to SINGLESTORE_MCP_EDITOR_MAX_ROWS, default 100,000 rows) and the
+    app pages through it with sql_editor_rows (``done`` / ``loaded`` give the progress and the total).
+    ``stream_id`` is chosen by the app, so its Stop (sql_editor_stop) works before this call returns;
+    ``replaces``: the tab's previous result, dropped. Statements that change data or schema are answered
+    with ``needs_confirmation`` instead of running; the app then asks the user and uses
+    sql_editor_execute. Every run lands in the editor's history (when it has finished), with the tab
+    (``tab_id``, its label ``tab``) and open ``file`` it ran from.
     """
     try:
         check_read_only(sql)
@@ -157,16 +200,56 @@ def sql_editor_query(sql: str, database: str | None = None, max_rows: int = 1000
         data = {"needs_confirmation": True, "reason": str(exc), "sql": sql, "database": database}
         return tool_result("This statement changes data or schema and needs confirmation.", data)
     source = {"tab_id": tab_id, "tab": tab, "file": file}
-    started = time.perf_counter()
-    try:
-        data = run_query(sql, database, max_rows)
-    except Exception as exc:
-        _record_failure(sql, database, "read", started, exc, source)
-        raise
-    data["kind"] = "read"
-    editor_state.add_history(sql, database, ok=True, kind="read", elapsed_ms=data["elapsed_ms"], source=source,
-                             rows=data["row_count"] if data["has_result_set"] else None)
-    return tool_result(f"{data['row_count']} row(s) in {data['elapsed_ms']} ms", data)
+    first = max(1, min(int(max_rows), result_stream.MAX_PAGE_ROWS))
+
+    def record(s: result_stream.Stream) -> None:
+        if s.error is not None:
+            editor_state.add_history(sql, database, ok=False, kind="read", error=_error_text(s.error), source=source,
+                                     elapsed_ms=s.total_ms)
+        else:
+            editor_state.add_history(sql, database, ok=True, kind="read", elapsed_ms=s.total_ms, source=source,
+                                     rows=len(s.rows) if s.columns else None)
+
+    stream = result_stream.start(sql, database, stream_id=stream_id, replaces=replaces, on_finish=record)
+    stream.wait_first(first)
+    if stream.done:
+        stream.finished.wait(5)  # its history entry is written before the app refreshes the history
+    if stream.error is not None and not stream.rows:
+        raise ToolError(_error_text(stream.error))
+    data = _stream_data(stream, stream.page(0, first))
+    more = "" if data["done"] else "; more loading"
+    return tool_result(f"{data['loaded']} row(s) in {data['elapsed_ms']} ms{more}", data)
+
+
+def _error_text(exc: BaseException) -> str:
+    args = getattr(exc, "args", ())
+    if len(args) >= 2 and isinstance(args[0], int):
+        return f"SingleStore error {args[0]}: {args[1]}"
+    return str(exc).replace("\n", " ") or type(exc).__name__
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def sql_editor_rows(stream_id: str, offset: int = 0, limit: int = 5000, wait_ms: int = 0) -> CallToolResult:
+    """More rows of a streamed SQL Editor result (from sql_editor_query), from ``offset``, plus its progress.
+
+    At most ``limit`` rows and about 2 MB per call. ``wait_ms``: wait up to this long for rows past
+    ``offset`` (or the end) while the result is still loading, instead of polling.
+    """
+    stream = result_stream.get(stream_id)
+    if wait_ms:
+        stream.wait_first(int(offset) + 1, timeout=min(int(wait_ms), 10_000) / 1000)
+    rows = stream.page(offset, limit)
+    data = _stream_data(stream, rows, int(offset))
+    return tool_result(f"{len(rows)} row(s) from {offset}; {data['loaded']} loaded{'' if data['done'] else ', loading'}", data)
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def sql_editor_stop(stream_id: str) -> CallToolResult:
+    """Stop a SQL Editor query that is still running or loading rows (KILL QUERY on its own connection,
+    after checking it still runs this statement). The rows read so far stay."""
+    stream = result_stream.find(stream_id)
+    stopped = bool(stream and stream.stop())
+    return tool_result("Stopped." if stopped else "Nothing to stop.", {"stream_id": stream_id, "stopped": stopped})
 
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
@@ -225,6 +308,7 @@ def sql_editor_execute(sql: str, database: str | None = None, max_rows: int = 10
 # either way they must be inside an allowed root: the user's home folder, the
 # SQL folder, and any SINGLESTORE_MCP_FILE_ROOTS (separated by os.pathsep).
 _SQL_SUFFIX = ".sql"
+_SAS_SUFFIX = ".sas"  # SAS programs open and save too (a .sas file opens as PROC SQL)
 _MAX_FILE_BYTES = 2_000_000
 _MAX_LISTED = 500
 
@@ -261,7 +345,7 @@ def _sql_path(name: str, suffix: str = _SQL_SUFFIX) -> Path:
     name = name.strip()
     if not name or name.endswith(("/", "\\")):
         raise ValueError("Give the file a name.")
-    if not name.lower().endswith(suffix):
+    if not name.lower().endswith(suffix) and not (suffix == _SQL_SUFFIX and name.lower().endswith(_SAS_SUFFIX)):
         name += suffix
     raw = Path(name).expanduser()
     path = _check_allowed(raw if raw.is_absolute() else sql_dir() / name.replace("\\", "/"))
@@ -307,12 +391,12 @@ def _hidden(path: Path) -> bool:
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
 def files_browse(path: str | None = None, kind: str = "sql") -> CallToolResult:
-    """List a folder for the file browser: subfolders and .sql (kind="sql") or .ipynb (kind="notebook") files.
+    """List a folder for the file browser: subfolders and .sql / .sas (kind="sql") or .ipynb (kind="notebook") files.
 
     ``path`` defaults to the SQL folder. Only folders inside the allowed roots
     (the user's home folder, the SQL folder, SINGLESTORE_MCP_FILE_ROOTS) can be browsed.
     """
-    suffix = {"notebook": (".ipynb",), "pem": (".pem", ".crt", ".cer", ".key")}.get(kind, (_SQL_SUFFIX,))
+    suffix = {"notebook": (".ipynb",), "pem": (".pem", ".crt", ".cer", ".key")}.get(kind, (_SQL_SUFFIX, _SAS_SUFFIX))
     folder = _check_allowed(Path(path).expanduser() if path else sql_dir())
     if not folder.is_dir():
         if folder == sql_dir().resolve():
@@ -401,7 +485,7 @@ def sql_editor_save_file(name: str, sql: str, overwrite: bool = False) -> CallTo
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(sql, encoding="utf-8", newline="")
-    os.replace(tmp, path)
+    fileio.replace(tmp, path)  # retried while Windows has the file open (an editor, antivirus)
     editor_state.remember_file(path, _relative(path))
     return tool_result(
         f"Saved {_relative(path)}",
@@ -438,6 +522,7 @@ def sql_editor_save_draft(
     dirty: bool = False,
     language: str = "singlestore",
     origin: dict[str, Any] | None = None,
+    sas: dict[str, Any] | None = None,
 ) -> CallToolResult:
     """Autosave one SQL Editor tab's text, database and cursor (never writes the open .sql file itself).
 
@@ -445,12 +530,15 @@ def sql_editor_save_draft(
     restored draft knows whether it has unsaved changes; ``dirty`` says so for
     the tab bar. ``origin``: the workload statement the tab was opened from
     (``{"workload", "statement_id", "statement_name"}``), for "Update in workload".
+    ``language``: what the tab runs as (singlestore, procsql, fedsql, cas); ``sas``: its SAS library / caslib
+    and PROC SQL options (outobs, noexec, feedback, pushdown).
     ``closed`` in the result: the tab was closed (elsewhere) and the text wasn't kept.
     """
     file = {"name": file_name, "path": file_path, "external": file_external, "saved_hash": saved_hash} if file_name else None
     draft = editor_state.save_draft({"sql": sql, "database": database, "cursor": {"anchor": anchor, "head": head},
                                      "file": file, "continue_on_error": continue_on_error, "dirty": dirty,
-                                     "language": language, "origin": editor_state.clean_origin(origin)}, tab_id)
+                                     "language": language, "origin": editor_state.clean_origin(origin),
+                                     "sas": editor_state.clean_sas(sas)}, tab_id)
     closed = bool(draft.get("closed"))
     return tool_result("Tab is closed; draft not saved" if closed else "Draft saved",
                        {"updated": draft["updated"], "tab_id": draft["tab_id"], "closed": closed})

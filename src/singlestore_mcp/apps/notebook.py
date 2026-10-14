@@ -13,13 +13,12 @@ convention SingleStore Notebooks and Jupyter use.
 from __future__ import annotations
 
 import json
-import os
 import re
 from typing import Any
 
 from mcp.types import CallToolResult, ToolAnnotations
 
-from .. import assistant, notebook_kernel
+from .. import assistant, fileio, notebook_kernel
 from ..notebook_bridge import split_statements
 from ._core import APP_ONLY, apps, register_app, tool_result, with_browser_link
 from .query_grid import ReadOnlyViolation, check_read_only
@@ -226,7 +225,7 @@ def notebook_save(name: str, notebook: dict[str, Any], overwrite: bool = False) 
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8", newline="\n")
-    os.replace(tmp, path)
+    fileio.replace(tmp, path)
     return tool_result(f"Saved {_relative(path)}", {"name": _relative(path), "path": str(path), "saved": True, "exists": False, "folder": str(sql_dir())})
 
 

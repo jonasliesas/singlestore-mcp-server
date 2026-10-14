@@ -23,6 +23,10 @@ Running:
 * Read-only (SELECT / WITH) unless the workload has ``allow_writes``. A per-statement timeout cancels a
   statement with ``KILL QUERY`` (only after checking that connection still runs this workload's
   statement). Stop cancels the statements that are running.
+* A run lasts its full duration: statements are released (or, with pacing "max", started) until
+  ``duration_s`` after the start, and the run's elapsed time, end time and rates use that window
+  (or the time until Stop). Runs saved before this (no ``"timing": 2``) ended after their last
+  release; ``compare_runs`` puts their rates over the set duration too.
 """
 
 from __future__ import annotations
@@ -30,7 +34,6 @@ from __future__ import annotations
 import heapq
 import json
 import math
-import os
 import queue
 import random
 import re
@@ -42,7 +45,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import compare
+from . import compare, fileio
 from .paths import data_dir
 
 MAX_STATEMENTS = 50
@@ -69,20 +72,17 @@ def _runs_dir() -> Path:
 
 
 def _load_all() -> dict[str, dict[str, Any]]:
-    path = _dir() / "workloads.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    # A file that exists but can't be read raises (fileio.read_json) instead of reading as empty, so a later
+    # save can't overwrite every other workload.
+    data = fileio.read_json(_dir() / "workloads.json", {})
+    if not isinstance(data, dict):
         return {}
     return {w["name"]: w for w in data.get("workloads", []) if isinstance(w, dict) and w.get("name")}
 
 
 def _save_all(workloads: dict[str, dict[str, Any]]) -> None:
-    path = _dir() / "workloads.json"
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"version": 1, "workloads": sorted(workloads.values(), key=lambda w: w["name"].lower())},
-                              indent=1, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, path)
+    fileio.write_json(_dir() / "workloads.json",
+                      {"version": 1, "workloads": sorted(workloads.values(), key=lambda w: w["name"].lower())}, indent=1)
 
 
 def list_workloads() -> list[dict[str, Any]]:
@@ -401,9 +401,10 @@ class _Run:
         self.error: str | None = None
         self.stop_flag = threading.Event()
         self.started = time.time()
-        self.t0 = time.perf_counter()
+        self.t0 = self._now()
         self.finished: float | None = None
         self.finished_perf: float | None = None
+        self.stopped_perf: float | None = None
         self.rtt_ms: float | None = None
         self.lock = threading.Lock()
         self.busy: dict[int, tuple[int, float]] = {}  # worker -> (connection id, started)
@@ -413,8 +414,16 @@ class _Run:
         self.traced = False
 
     # -- recording
+    # -- clock (tests swap these for a faster one)
+    def _now(self) -> float:
+        return time.perf_counter()
+
+    def _pause(self, seconds: float) -> bool:
+        """Wait ``seconds`` or until Stop; True when stopped."""
+        return self.stop_flag.wait(max(0.0, seconds))
+
     def record(self, sid: str, ms: float, wait_ms: float, rows: int | None, error: str | None, timeout: bool = False) -> None:
-        sec = int(time.perf_counter() - self.t0)
+        sec = int(self._now() - self.t0)
         with self.lock:
             self.stats[sid].add(ms, wait_ms, rows, error, timeout)
             b = self.seconds.get(sec)
@@ -427,8 +436,10 @@ class _Run:
                 b.lat.append(ms)
 
     def elapsed(self) -> float:
-        end = self.finished_perf or time.perf_counter()
-        return max(0.001, end - self.t0)
+        """Seconds the run has been running: until Stop, else at most the set duration (statements still
+        finishing after the end don't make the run longer)."""
+        end = self.stopped_perf or self.finished_perf or self._now()
+        return max(0.001, min(end - self.t0, float(self.settings["duration_s"])))
 
     def timeline(self, since: int = 0) -> list[dict[str, Any]]:
         with self.lock:
@@ -452,7 +463,7 @@ class _Run:
             "id": self.id, "workload": self.workload["name"], "label": self.label, "state": self.state, "error": self.error,
             "started": self.started, "finished": self.finished, "elapsed_s": round(el, 1),
             "duration_s": self.settings["duration_s"], "settings": self.settings, "database": self.workload.get("database"),
-            "source": self.source, "rtt_ms": self.rtt_ms, "notes": self.notes,
+            "source": self.source, "rtt_ms": self.rtt_ms, "notes": self.notes, "timing": 2,
             "totals": {"count": total, "errors": errors, "qps": round(total / el, 2),
                        "p50_ms": _round(_pct(all_lat, 50)), "p95_ms": _round(_pct(all_lat, 95)), "p99_ms": _round(_pct(all_lat, 99)),
                        "skipped": sum(p["skipped"] for p in per)},
@@ -512,9 +523,9 @@ class _Run:
 
                 cur.execute(f"USE {quote_identifier(database)}")
                 current_db[0] = database
-            self.busy[worker] = (cid, time.perf_counter())
+            self.busy[worker] = (cid, self._now())
             timer.start()
-            t = time.perf_counter()
+            t = self._now()
             cur.execute(sql)
             rows = None
             if cur.description is not None:
@@ -527,11 +538,11 @@ class _Run:
                         rows += len(chunk)
             else:
                 rows = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
-            ms = (time.perf_counter() - t) * 1000
+            ms = (self._now() - t) * 1000
             self.record(stmt["id"], ms, wait_ms, rows, None)
         except Exception as exc:  # noqa: BLE001 - counted per statement
-            timeout = killed["done"] or (time.perf_counter() - self.busy.get(worker, (0, time.perf_counter()))[1]
-                                         >= self.settings["timeout_s"])
+            now = self._now()
+            timeout = killed["done"] or (now - self.busy.get(worker, (0, now))[1] >= self.settings["timeout_s"])
             stopped = self.stop_flag.is_set()
             msg = (f"timed out after {self.settings['timeout_s']:g} s (cancelled)" if timeout and not stopped
                    else "cancelled (run stopped)" if stopped else str(exc)[:300])
@@ -585,7 +596,8 @@ class _Run:
                 self.traced = note.startswith("Every query")
                 self.notes.append(note)
             self.state = "running"
-            self.t0 = time.perf_counter()
+            self.started = time.time()  # the measured window starts now (connecting isn't part of it)
+            self.t0 = self._now()
             deadline = self.t0 + self.settings["duration_s"]
             if self.settings["pacing"] == "max":
                 self._run_max(conns, deadline)
@@ -594,8 +606,8 @@ class _Run:
         except Exception as exc:  # noqa: BLE001 - reported in the run
             self.error = str(exc)[:500]
         finally:
-            self.finished_perf = time.perf_counter()
-            self.finished = time.time()
+            self.finished_perf = self._now()
+            self.finished = self.started + self.elapsed()  # start + duration, or the time of Stop
             if self.traced:
                 problem = recover_trace()
                 if problem:
@@ -618,11 +630,11 @@ class _Run:
         def worker(i: int, conn: Any, cid: int) -> None:
             rnd = random.Random(hash((self.id, i)))
             current_db: list[str | None] = [self.workload.get("database")]
-            while not self.stop_flag.is_set() and time.perf_counter() < deadline:
+            while not self.stop_flag.is_set() and self._now() < deadline:
                 stmt = rnd.choices(self.statements, weights)[0]
                 self._execute(i, conn, cid, current_db, stmt, rnd, 0.0)
                 if think:
-                    self.stop_flag.wait(think)
+                    self._pause(min(think, deadline - self._now()))
 
         threads = [threading.Thread(target=worker, args=(i, c, cid), daemon=True, name=f"s2-workload-{i}")
                    for i, (c, cid) in enumerate(conns)]
@@ -647,7 +659,7 @@ class _Run:
                 stmt, due = item
                 if self.stop_flag.is_set():
                     continue
-                wait_ms = max(0.0, (time.perf_counter() - due) * 1000)
+                wait_ms = max(0.0, (self._now() - due) * 1000)
                 self._execute(i, conn, cid, current_db, stmt, wr, wait_ms)
 
         threads = [threading.Thread(target=worker, args=(i, c, cid), daemon=True, name=f"s2-workload-{i}")
@@ -662,11 +674,11 @@ class _Run:
             heapq.heappush(heap, (self.t0 + rnd.uniform(0, min(gap, 1.0)), k))
         while heap and not self.stop_flag.is_set():
             due, k = heap[0]
-            now = time.perf_counter()
+            now = self._now()
             if due >= deadline:
                 break
             if due > now:
-                self.stop_flag.wait(min(due - now, 0.25))
+                self._pause(min(due - now, 0.25))
                 continue
             heapq.heappop(heap)
             s = self.statements[k]
@@ -677,9 +689,13 @@ class _Run:
                 q.put((s, due))
             gap = 60.0 / s["per_minute"]
             heapq.heappush(heap, (due + (rnd.expovariate(1 / gap) if random_arrivals else gap), k))
-        # Let what's queued finish (until the deadline), then stop the workers.
-        while not q.empty() and not self.stop_flag.is_set() and time.perf_counter() < deadline + self.settings["timeout_s"]:
-            time.sleep(0.05)
+        # The next release falls after the end: the run still lasts until the deadline (it used to end
+        # here, after the last release, a little before the set duration).
+        while not self.stop_flag.is_set() and self._now() < deadline:
+            self._pause(min(deadline - self._now(), 0.25))
+        # Let what's still queued finish (up to one statement timeout), then stop the workers.
+        while not q.empty() and not self.stop_flag.is_set() and self._now() < deadline + self.settings["timeout_s"]:
+            self._pause(0.05)
         if not q.empty():
             dropped = 0
             while True:
@@ -699,6 +715,8 @@ class _Run:
     def stop(self) -> None:
         if self.stop_flag.is_set() or self.state not in ("starting", "running"):
             return
+        if self.state == "running":
+            self.stopped_perf = self._now()
         self.stop_flag.set()
         for cid, _ in list(self.busy.values()):
             threading.Thread(target=lambda c=cid: _quiet(self._kill, c), daemon=True).start()
@@ -815,8 +833,30 @@ def delete_run(run_id: str) -> int:
 
 # ------------------------------------------------------------------ comparing runs
 
+def _full_window(r: dict[str, Any]) -> dict[str, Any]:
+    """A run saved before runs lasted their full duration (no ``"timing": 2``) ended after its last release,
+    so its rates were over a shorter time than the window its statements were released in; put them over
+    the set duration, like newer runs."""
+    dur = (r.get("settings") or {}).get("duration_s") or r.get("duration_s")
+    el = r.get("elapsed_s")
+    if r.get("timing") or r.get("state") != "done" or not dur or not el or el >= dur - 0.5:
+        return r
+    out = {**r, "elapsed_s": float(dur), "statements": []}
+    for s in r.get("statements") or []:
+        s = dict(s)
+        if s.get("count") is not None:
+            s["qps"] = round(s["count"] / dur, 3)
+            s["per_minute"] = round(s["count"] / dur * 60, 1)
+        out["statements"].append(s)
+    t = dict(r.get("totals") or {})
+    if t.get("count") is not None:
+        t["qps"] = round(t["count"] / dur, 2)
+    out["totals"] = t
+    return out
+
+
 def compare_runs(base_id: str, new_id: str) -> dict[str, Any]:
-    a, b = status(base_id), status(new_id)
+    a, b = _full_window(status(base_id)), _full_window(status(new_id))
     notes = []
     if a.get("source") and b.get("source") and a["source"] != b["source"]:
         notes.append(f"The runs used different clusters ({a['source']} vs {b['source']}).")

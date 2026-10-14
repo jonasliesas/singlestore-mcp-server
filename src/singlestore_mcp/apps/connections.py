@@ -1,8 +1,10 @@
-"""Connections app: manage saved SingleStore connections and pick the active one.
+"""Connections app: manage saved SingleStore connections and SAS Viya connections, and pick the active ones.
 
-One connection is active at a time; every app, Claude's tools and new
+One SingleStore connection is active at a time; every app, Claude's tools and new
 notebook kernels use it. Passwords never leave the server: the app sends them
-when saving or testing, and only ever gets ``has_password`` back.
+when saving or testing, and only ever gets ``has_password`` back. Likewise one
+SAS Viya connection is active (SAS cells in notebooks, SAS in the Workspace); its
+tokens stay in the OS credential store and only "signed in as … until …" is shown.
 """
 
 from __future__ import annotations
@@ -47,7 +49,11 @@ def connections_window() -> CallToolResult:
     includes ``browser_url``: post it as a clickable link under the app.
     """
     state = _state()
-    return tool_result(with_browser_link(_summary(state), state, "connections_window", {}), state)
+    try:
+        text = _summary(state) + "\n" + _sas_summary(_sas_state())
+    except Exception:  # noqa: BLE001 - the SAS Viya list is extra here
+        text = _summary(state)
+    return tool_result(with_browser_link(text, state, "connections_window", {}), state)
 
 
 # ------------------------------------------------------------------ app-only
@@ -101,40 +107,134 @@ def connection_sso_sign_in(name: str) -> CallToolResult:
     return tool_result(f"Signed in for {name}", {**_state(), "token": info, "test": check})
 
 
+# ------------------------------------------------------------------ SAS Viya connections
+# Like the SingleStore ones: saved connections, one active. Tokens never leave the server; the app only gets
+# who is signed in and until when. Nothing is saved as a side effect of signing in.
+
+
+def _sas_state() -> dict[str, Any]:
+    act = sas_viya.active_name()
+    items = []
+    for c in sas_viya.saved():
+        try:
+            info = sas_viya.token_info(c["name"])
+        except Exception as exc:  # noqa: BLE001 - the credential store may fail; the list still shows
+            info = {"signed_in": False, "problem": str(exc)[:200]}
+        items.append({**c, **info, "active": c["name"] == act})
+    return {"active": act, "connections": items, "password_store": connections.password_store()}
+
+
+def _sas_summary(state: dict[str, Any]) -> str:
+    lines = [f"Active SAS Viya connection: {state['active'] or '(none)'}"]
+    for c in state["connections"]:
+        lines.append(f"- {c['name']}{' (active)' if c['active'] else ''}: {c['url']}"
+                     f"{', signed in as ' + c['user'] if c.get('signed_in') and c.get('user') else ''}")
+    return "\n".join(lines)
+
+
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
-def sas_viya_state() -> CallToolResult:
-    """SAS Viya settings and sign-in status (for SAS cells in notebooks)."""
-    info = sas_viya.status()
+def sas_connections_state() -> CallToolResult:
+    """Saved SAS Viya connections, the active one and each one's sign-in (from the stored token; no network)."""
+    state = _sas_state()
+    return tool_result(_sas_summary(state), state)
+
+
+_SESSION_KEYS = ("url", "compute_context", "cas_server", "startup_code", "ssl_verify", "client_id")
+
+
+def _reset_if_active_changes(name: str | None, values: dict[str, Any]) -> None:
+    """End the Workspace's SAS sessions before connection ``name``'s session settings change, if it's the active
+    one (so they're closed on the Viya they were started on, with its sign-in)."""
+    from .. import sas_rest
+
+    act = sas_viya.active_name()
+    if not act or name != act:
+        return
+    cur = sas_viya.settings(act)
+    if any(k in values and values[k] is not None and values[k] != cur[k] for k in _SESSION_KEYS):
+        sas_rest.reset()
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=CHANGES)
+def sas_connection_save(connection: dict[str, Any], original_name: str | None = None, activate: bool = False) -> CallToolResult:
+    """Create or update a saved SAS Viya connection (name, Viya address, compute context, client ID, certificate
+    check, SingleStore libref, CAS server, startup code). ``activate`` also makes it the active one."""
+    from .. import sas_rest
+
+    _reset_if_active_changes(original_name, connection)
+    c = sas_viya.save_connection(connection, original_name)
+    if activate and sas_viya.active_name() != c["name"]:
+        sas_rest.reset()
+        sas_viya.activate(c["name"])
+    return tool_result(f"Saved {c['name']}", _sas_state())
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+def sas_connection_delete(name: str) -> CallToolResult:
+    """Delete a saved SAS Viya connection and its sign-in."""
+    from .. import sas_rest
+
+    if sas_viya.active_name() == name:
+        sas_rest.reset()
+    sas_viya.delete_connection(name)
+    return tool_result(f"Deleted {name}", _sas_state())
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=CHANGES)
+def sas_connection_activate(name: str) -> CallToolResult:
+    """Make a saved SAS Viya connection the active one: the Workspace's SAS sessions restart on it, and new
+    notebook kernels use it."""
+    from .. import sas_rest
+
+    if sas_viya.active_name() != name:
+        sas_viya.settings(name)  # LookupError before ending any session
+        sas_rest.reset()
+        sas_viya.activate(name)
+    return tool_result(f"Active SAS Viya connection: {name}", _sas_state())
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def sas_viya_state(name: str | None = None) -> CallToolResult:
+    """Settings and sign-in status of a SAS Viya connection (default: the active one)."""
+    info = sas_viya.status(name)
     return tool_result("signed in" if info.get("signed_in") else info.get("problem") or "not set up", info)
 
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=CHANGES)
 def sas_viya_save(settings: dict[str, Any]) -> CallToolResult:
-    """Save the SAS Viya address, compute context, certificate check and SingleStore libref."""
+    """Update the active SAS Viya connection with the settings given (others stay; an empty address never
+    blanks the saved one). Without any connection, an address creates one."""
+    _reset_if_active_changes(sas_viya.active_name(), settings)
     sas_viya.save_settings(settings)
-    info = sas_viya.status()
-    return tool_result("saved", info)
+    return tool_result("saved", sas_viya.status())
 
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=CHANGES)
-def sas_viya_sign_in(code: str | None = None) -> CallToolResult:
-    """Without ``code``: open SAS Logon in the browser. With ``code``: finish signing in with the code SAS Logon shows."""
+def sas_viya_sign_in(code: str | None = None, name: str | None = None) -> CallToolResult:
+    """Sign in to a saved SAS Viya connection (default: the active one). Without ``code``: open SAS Logon in the
+    browser. With ``code``: finish signing in with the code SAS Logon shows. Saves no settings."""
     if not code:
-        return tool_result("Sign in in the browser, then paste the code.", sas_viya.sign_in_start())
-    return tool_result("Signed in to SAS Viya.", sas_viya.sign_in_finish(code))
+        return tool_result("Sign in in the browser, then paste the code.", sas_viya.sign_in_start(name))
+    info = sas_viya.sign_in_finish(code, name)
+    return tool_result("Signed in to SAS Viya.", {**info, "state": _sas_state()})
 
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=CHANGES)
-def sas_viya_sign_out() -> CallToolResult:
-    """Forget the SAS Viya sign-in."""
-    sas_viya.sign_out()
-    return tool_result("Signed out.", sas_viya.status())
+def sas_viya_sign_out(name: str | None = None) -> CallToolResult:
+    """Forget the sign-in of a SAS Viya connection (default: the active one)."""
+    from .. import sas_rest
+
+    if name is None or name == sas_viya.active_name():
+        sas_rest.reset()
+    sas_viya.sign_out(name)
+    return tool_result("Signed out.", _sas_state())
 
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
-def sas_viya_test() -> CallToolResult:
-    """Check the SAS Viya sign-in and compute context (lists the compute contexts; starts no SAS session)."""
-    res = sas_viya.test()
+def sas_viya_test(name: str | None = None) -> CallToolResult:
+    """Check a SAS Viya connection's sign-in and compute context (lists the compute contexts; starts no SAS
+    session). Reuses the SAS Viya MCP server's or CLI's sign-in to the same Viya if there's no own one."""
+    res = sas_viya.test(name)
     return tool_result("ok" if res["ok"] else res.get("error", "failed"), res)
 
 

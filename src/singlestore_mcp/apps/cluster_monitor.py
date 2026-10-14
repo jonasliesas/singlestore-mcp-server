@@ -36,7 +36,10 @@ register_app(
 
 _NODE_TYPES = {"MA": "Master aggregator", "CA": "Child aggregator", "LEAF": "Leaf"}
 _sample_lock = threading.Lock()
-_prev_sample: dict[int, dict[str, Any]] = {}
+# Recent counter samples, oldest first. Rates are measured against the newest one that is at
+# least _MIN_SAMPLE_GAP_S old, so calls close together (several views, Claude and the app)
+# don't each wait a second for a fresh baseline.
+_samples: deque[dict[int, dict[str, Any]]] = deque(maxlen=8)
 
 # CPU readings kept in this server process so the chart has history when the
 # app (re)opens. Only collected while a monitor is refreshing.
@@ -111,17 +114,17 @@ def _counters() -> dict[int, dict[str, Any]]:
 
 def _rates() -> tuple[dict[int, dict[str, Any]], float]:
     """Current counters plus rates since the previous sample. Returns (nodes, seconds measured)."""
-    global _prev_sample
     with _sample_lock:
         now = _counters()
-        prev = _prev_sample
-        gap = _sample_gap(prev, now)
-        if gap is None or not _MIN_SAMPLE_GAP_S <= gap <= _MAX_SAMPLE_GAP_S:
+        prev = next((s for s in reversed(_samples)
+                     if _MIN_SAMPLE_GAP_S <= (_sample_gap(s, now) or 0) <= _MAX_SAMPLE_GAP_S), None)
+        if prev is None:  # no usable earlier sample (first call, or after a long gap): measure over a second
+            _samples.append(now)
             prev = now
             time.sleep(1.0)
             now = _counters()
-            gap = _sample_gap(prev, now)
-        _prev_sample = now
+        gap = _sample_gap(prev, now)
+        _samples.append(now)
 
     result: dict[int, dict[str, Any]] = {}
     for node_id, cur in now.items():
@@ -819,3 +822,7 @@ def cluster_monitor_remote_stats() -> CallToolResult:
             acc[k] += int(r[col] or 0)
     dbs = [{"database": k, **v, "bytes": v["blobs"] + v["logs"] + v["snapshots"] + v["other"]} for k, v in sorted(per_db.items())]
     return tool_result(f"Remote storage of {len(dbs)} bottomless database(s)", {"databases": dbs})
+
+
+# Health, History and Backups tabs (their own app tools, only called while their tab is open).
+from . import cluster_ops  # noqa: E402,F401

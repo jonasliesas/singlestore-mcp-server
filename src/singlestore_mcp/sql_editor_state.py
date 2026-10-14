@@ -21,7 +21,6 @@ other's writes; writes are atomic (temp file + replace).
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import secrets
@@ -30,6 +29,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from . import fileio
 from .paths import data_dir
 
 MAX_DRAFT_CHARS = 2_000_000      # same limit as a .sql file
@@ -41,7 +41,8 @@ MAX_HISTORY_SQL = 20_000         # longer statements are kept cut off (and can't
 MAX_ERROR_CHARS = 500
 MAX_RECENT = 10
 PREVIEW_CHARS = 400
-LANGUAGES = ("singlestore",)     # what a tab's SQL runs as; PROC SQL / FedSQL / CAS can be added here
+LANGUAGES = ("singlestore", "procsql", "fedsql", "cas")  # what a tab's SQL runs as ("Run as")
+HISTORY_LANGUAGES = (*LANGUAGES, "sas")  # "sas": plain SAS code (proc / data / %…) run from a SAS tab
 
 _TAB_ID = re.compile(r"^t[0-9a-f]{4,16}$")
 _lock = threading.RLock()
@@ -52,18 +53,16 @@ def _file(name: str) -> Path:
 
 
 def _read(name: str, default: Any) -> Any:
-    try:
-        return json.loads(_file(name).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return default
+    """The file's JSON, or ``default`` when it's missing or not JSON. A file that exists but stays
+    unreadable (in use on Windows, see ``fileio``) raises OSError: taking it for missing would, for
+    tabs.json, start the tab list over and lose the user's tabs."""
+    with _lock:  # in this process, never read a file while it's being replaced (Windows refuses the replace)
+        return fileio.read_json(_file(name), default)
 
 
 def _write(name: str, value: Any) -> None:
-    path = _file(name)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    tmp.write_text(json.dumps(value, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-    os.replace(tmp, path)
+    with _lock:
+        fileio.write_json(_file(name), value)
 
 
 def _valid_draft(draft: Any) -> dict[str, Any] | None:
@@ -246,6 +245,27 @@ def clean_origin(origin: Any) -> dict[str, str] | None:
     return out if out["workload"].strip() and out["statement_id"].strip() else None
 
 
+def clean_sas(sas: Any) -> dict[str, Any] | None:
+    """A tab's SAS settings: SAS library / caslib it runs in, PROC SQL options and Show pushdown."""
+    if not isinstance(sas, dict):
+        return None
+    out: dict[str, Any] = {}
+    for key in ("library", "caslib"):
+        v = sas.get(key)
+        if isinstance(v, str) and v.strip():
+            out[key] = v.strip()[:128]
+    try:
+        if sas.get("outobs") not in (None, ""):
+            out["outobs"] = max(1, min(int(sas["outobs"]), 10_000_000))
+    except (TypeError, ValueError):
+        pass
+    for key in ("noexec", "feedback"):
+        if sas.get(key):
+            out[key] = True
+    out["pushdown"] = sas.get("pushdown") is not False
+    return out
+
+
 def load_draft(tab_id: str | None = None) -> dict[str, Any] | None:
     """A tab's draft (the active tab's when ``tab_id`` is None)."""
     return _valid_draft(_read(_draft_name(resolve_tab(tab_id)), None))
@@ -282,7 +302,7 @@ def _history() -> dict[str, Any]:
 
 def add_history(sql: str, database: str | None, *, ok: bool, elapsed_ms: float | None = None,
                 rows: int | None = None, affected: int | None = None, error: str | None = None,
-                kind: str = "read", source: dict[str, Any] | None = None) -> None:
+                kind: str = "read", source: dict[str, Any] | None = None, language: str | None = None) -> None:
     """Record one statement the user ran. Never fails the run itself.
 
     ``source``: the editor tab it ran from, ``{"tab_id", "tab", "file"}`` (tab
@@ -297,6 +317,8 @@ def add_history(sql: str, database: str | None, *, ok: bool, elapsed_ms: float |
         "error": (error or "")[:MAX_ERROR_CHARS] or None,
         "sql": sql[:MAX_HISTORY_SQL], "sql_truncated": len(sql) > MAX_HISTORY_SQL,
     }
+    if language and language != "singlestore" and language in HISTORY_LANGUAGES:
+        entry["language"] = language
     for key in ("tab_id", "tab", "file"):
         value = (source or {}).get(key)
         if isinstance(value, str) and value.strip():
@@ -366,7 +388,11 @@ def remember_file(path: str | Path, name: str) -> None:
 def recent_files() -> list[dict[str, Any]]:
     """Recent files that still exist, newest first."""
     out = []
-    for r in _read("recent.json", []):
+    try:
+        recent = _read("recent.json", [])
+    except OSError:  # in use right now: the list is optional
+        recent = []
+    for r in recent if isinstance(recent, list) else []:
         if isinstance(r, dict) and r.get("path"):
             try:
                 if Path(r["path"]).is_file():

@@ -27,7 +27,7 @@ import threading
 import time
 from typing import Any
 
-from . import history_store
+from . import fileio, history_store
 from .db import db
 from .paths import data_dir
 
@@ -76,8 +76,12 @@ def _load() -> None:
     if _state and mtime == _mtime:
         return
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        data = fileio.read_json(path, {})
+    except OSError:  # still in use after the retries: keep what we have, try again next time
+        if not _state:
+            _state = _fresh()
+        return
+    if not isinstance(data, dict):
         data = {}
     state = _fresh()
     for name, rule in (data.get("rules") or {}).items():
@@ -94,10 +98,8 @@ def _save() -> None:
     global _mtime
     _state["alerts"] = _state["alerts"][-MAX_ALERTS:]
     path = _file()
-    tmp = path.with_suffix(f".{os.getpid()}.tmp")
     rules = {k: {f: v for f, v in r.items() if f in ("enabled", "seconds", "percent")} for k, r in _state["rules"].items()}
-    tmp.write_text(json.dumps({**_state, "rules": rules}, indent=1, default=str), encoding="utf-8")
-    os.replace(tmp, path)
+    fileio.write_text(path, json.dumps({**_state, "rules": rules}, indent=1, default=str))
     _mtime = path.stat().st_mtime
 
 

@@ -124,6 +124,7 @@ window.addEventListener("message", (ev) => {
   if (msg?.type === "s2-visibility") embeddedHidden = Boolean(msg.hidden);
   else if (msg?.type === "s2-set-sql") window.dispatchEvent(new CustomEvent("s2:set-sql", { detail: msg }));
   else if (msg?.type === "s2-connection-changed") window.dispatchEvent(new CustomEvent("s2:connection-changed", { detail: msg }));
+  else if (msg?.type === "s2-sas-connection-changed") window.dispatchEvent(new CustomEvent("s2:sas-connection-changed", { detail: msg }));
 });
 
 // Header button; null when the host doesn't offer fullscreen.
@@ -371,7 +372,10 @@ S2.isNumericColumn = function (rows, col) {
 S2.cellText = (v) => (v == null ? "NULL" : typeof v === "object" ? JSON.stringify(v) : String(v));
 
 // Basic sortable table. opts.onRowClick(row) optional; opts.render[col](value,row) optional.
+// For a result that arrives in pages: the returned element has appendRows(rows) (adds rows at the end, or
+// re-sorts when sorted), and opts.beforeSort() (async, optional) runs before a sort, e.g. to load every row.
 S2.dataTable = function (columns, rows, opts = {}) {
+  rows = [...rows];
   const numeric = Object.fromEntries(columns.map((c) => [c, S2.isNumericColumn(rows, c)]));
   let sortCol = null;
   let sortDir = 1;
@@ -379,7 +383,10 @@ S2.dataTable = function (columns, rows, opts = {}) {
   const headCells = columns.map((col) =>
     S2.h("th", {
       class: `sortable${numeric[col] ? " num" : ""}`, title: col,
-      onclick: () => { sortDir = sortCol === col ? -sortDir : 1; sortCol = col; draw(); },
+      onclick: async () => {
+        if (opts.beforeSort) await opts.beforeSort();
+        sortDir = sortCol === col ? -sortDir : 1; sortCol = col; draw();
+      },
     }, col, S2.h("span", { class: "s2-sort" })));
   const compare = (a, b) => {
     const x = a[sortCol], y = b[sortCol];
@@ -389,24 +396,33 @@ S2.dataTable = function (columns, rows, opts = {}) {
     if (numeric[sortCol]) return (Number(x) - Number(y)) * sortDir;
     return String(x).localeCompare(String(y), undefined, { numeric: true }) * sortDir;
   };
+  const tr = (row) => S2.h("tr", {
+    style: opts.onRowClick ? { cursor: "pointer" } : null,
+    onclick: opts.onRowClick ? () => opts.onRowClick(row) : null,
+  }, columns.map((col) => {
+    const v = row[col];
+    const custom = opts.render?.[col];
+    return S2.h("td", { class: `${numeric[col] ? "num" : ""}${v == null ? " null" : ""}`, title: S2.cellText(v) },
+      custom ? custom(v, row) : S2.cellText(v));
+  }));
   function draw() {
     const sorted = sortCol ? [...rows].sort(compare) : rows;
     headCells.forEach((th, i) => {
       th.querySelector(".s2-sort").textContent = columns[i] === sortCol ? (sortDir > 0 ? "▲" : "▼") : "";
     });
-    tbody.replaceChildren(...sorted.map((row) => S2.h("tr", {
-      style: opts.onRowClick ? { cursor: "pointer" } : null,
-      onclick: opts.onRowClick ? () => opts.onRowClick(row) : null,
-    }, columns.map((col) => {
-      const v = row[col];
-      const custom = opts.render?.[col];
-      return S2.h("td", { class: `${numeric[col] ? "num" : ""}${v == null ? " null" : ""}`, title: S2.cellText(v) },
-        custom ? custom(v, row) : S2.cellText(v));
-    }))));
+    tbody.replaceChildren(...sorted.map(tr));
   }
   draw();
-  return S2.h("div", { class: "s2-table-wrap", style: { maxHeight: opts.maxHeight ?? "420px" } },
+  const wrap = S2.h("div", { class: "s2-table-wrap", style: { maxHeight: opts.maxHeight ?? "420px" } },
     S2.h("table", { class: "s2-table" }, S2.h("thead", {}, S2.h("tr", {}, headCells)), tbody));
+  wrap.appendRows = (more) => {
+    if (!more?.length) return;
+    rows.push(...more);
+    if (sortCol) draw();
+    else tbody.append(...more.map(tr));
+  };
+  wrap.rowCount = () => rows.length;
+  return wrap;
 };
 
 // File browser shared by the SQL Editor and the Notebook: folders to

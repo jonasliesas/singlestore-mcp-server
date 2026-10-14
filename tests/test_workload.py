@@ -168,6 +168,110 @@ class TestCompareRuns:
             wl.load_run("../etc/passwd")
 
 
+    def test_old_run_rates_go_over_the_set_duration(self, wl) -> None:
+        """Runs saved before runs lasted their full duration ended after the last release (51 of 60 s), so
+        their rates were too high; compare puts them over the set duration, new runs are left alone."""
+        old = [{**_stmt("s1", "SELECT 1", 60, 1.0), "qps": round(60 / 51, 3)}]
+        _save_run(wl, "zz-old", "done", old, duration_s=60)
+        path = wl._runs_dir() / "zz-old.json"
+        d = json.loads(path.read_text(encoding="utf-8"))
+        d.update(elapsed_s=51.0, totals={**d["totals"], "qps": round(60 / 51, 2)})
+        path.write_text(json.dumps(d), encoding="utf-8")
+        _save_run(wl, "zz-new2", "done", [{**_stmt("s1", "SELECT 1", 60, 1.0), "qps": 1.0}], duration_s=60)
+        d = json.loads((wl._runs_dir() / "zz-new2.json").read_text(encoding="utf-8"))
+        d.update(elapsed_s=60.0, timing=2)
+        (wl._runs_dir() / "zz-new2.json").write_text(json.dumps(d), encoding="utf-8")
+        c = wl.compare_runs("zz-old", "zz-new2")
+        [s] = c["statements"]
+        assert s["base_qps"] == 1.0 and s["new_qps"] == 1.0, s
+        assert c["totals"]["base_qps"] == 1.0
+        assert wl.load_run("zz-old")["elapsed_s"] == 51.0, "the saved file itself isn't changed"
+
+
+# ----------------------------------------------------------------------------- run timing (fake clock and connection)
+
+_SCALE = 50.0  # the fake clock runs 50x real time: a 10 s run takes 0.2 s
+
+
+class _FakeCursor:
+    description = None
+    rowcount = 0
+
+    def execute(self, sql: str) -> None:
+        time.sleep(0.002)  # 0.1 s on the fake clock
+
+    def close(self) -> None:
+        pass
+
+
+class _FakeConn:
+    def cursor(self) -> _FakeCursor:
+        return _FakeCursor()
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.fixture
+def fake_run(wl, monkeypatch: pytest.MonkeyPatch):
+    """A _Run factory whose connections are fakes and whose clock runs _SCALE times faster."""
+    base = time.perf_counter()
+    monkeypatch.setattr(wl._Run, "_now", lambda self: base + (time.perf_counter() - base) * _SCALE)
+    monkeypatch.setattr(wl._Run, "_pause", lambda self, s: self.stop_flag.wait(max(0.0, s) / _SCALE))
+    monkeypatch.setattr(wl._Run, "_connect", lambda self, database: (_FakeConn(), 1))
+    monkeypatch.setattr(wl._Run, "_rtt", lambda self, conn: None)
+    monkeypatch.setattr("singlestore_mcp.history_store.source_id", lambda: "test")
+
+    def make(pacing: str = "rate", per_minute: float = 30, duration_s: int = 10, think_ms: int = 0):
+        wl.save({"name": "zz timing", "statements": [{"id": "a", "sql": "SELECT 1", "per_minute": per_minute}],
+                 "settings": {"pacing": pacing, "concurrency": 2, "duration_s": duration_s, "think_ms": think_ms}})
+        return wl._Run(wl.get("zz timing"), "", {})
+
+    return make
+
+
+class TestRunTiming:
+    def test_rate_run_lasts_the_full_duration(self, fake_run) -> None:
+        """Regression: with 30/min (every 2 s) the last release is at ~8-9 s and the run ended there."""
+        run = fake_run("rate", 30, 10)
+        run.run()
+        r = run.summary()
+        assert r["state"] == "done" and r["error"] is None, r
+        assert r["elapsed_s"] == 10.0, r["elapsed_s"]
+        assert r["finished"] - r["started"] == pytest.approx(10.0)
+        [s] = r["statements"]
+        assert s["count"] == 5, s  # released at ~0.x, 2.x, 4.x, 6.x, 8.x
+        assert s["qps"] == 0.5 and s["per_minute"] == 30.0 and r["totals"]["qps"] == 0.5
+        assert r["timing"] == 2
+
+    def test_max_run_lasts_the_full_duration(self, fake_run) -> None:
+        run = fake_run("max", 1, 10, think_ms=700)
+        run.run()
+        r = run.summary()
+        assert r["state"] == "done" and r["elapsed_s"] == 10.0, r
+        assert r["statements"][0]["count"] > 10
+
+    def test_stop_is_immediate_and_ends_the_run_there(self, fake_run, wl) -> None:
+        import threading
+
+        run = fake_run("rate", 60, 600)
+        t = threading.Thread(target=run.run)
+        t.start()
+        deadline = time.monotonic() + 5
+        while run.state != "running" and time.monotonic() < deadline:
+            time.sleep(0.005)
+        time.sleep(3 / _SCALE)  # ~3 s on the fake clock
+        stopped_at = time.monotonic()
+        run.stop()
+        t.join(5)
+        assert not t.is_alive() and time.monotonic() - stopped_at < 1.0, "Stop should end the run at once"
+        r = run.summary()
+        assert r["state"] == "stopped", r
+        assert 2.0 <= r["elapsed_s"] <= 8.0, r["elapsed_s"]
+        assert r["finished"] - r["started"] == pytest.approx(r["elapsed_s"], abs=0.1)
+        assert wl.load_run(run.id)["state"] == "stopped"
+
+
 class TestHints:
     def test_name_and_rate_lines_are_taken_out(self, wl) -> None:
         h = wl.parse_hints("-- name: Top makes\n-- per_minute: 30\nSELECT Make FROM CARS;\n")
@@ -394,6 +498,8 @@ class TestWorkloadRun:
         f = finished_run["final"]
         assert f["state"] == "done", f"state {f['state']}, error {f.get('error')}"
         assert f["totals"]["errors"] == 0, [s.get("error_samples") for s in f["statements"]]
+        assert f["elapsed_s"] == DURATION, f"the run should last its full duration, not {f['elapsed_s']} s"
+        assert f["finished"] - f["started"] == pytest.approx(DURATION, abs=0.2)
 
     @pytest.mark.parametrize("sid", [s["id"] for s in STATEMENTS])
     def test_rate_within_15_percent(self, finished_run, sid: str) -> None:
@@ -415,7 +521,10 @@ class TestWorkloadRun:
         assert {s["id"] for s in c["statements"]} == {s["id"] for s in STATEMENTS}
         notes = " ".join(c["notes"])
         assert stopped_run["id"] in notes and "stopped" in notes, c["notes"]
-        assert re.search(r"Fewer than \d+ executions", notes), c["notes"]
+        # The short stopped run usually has statements with 1–9 executions; how many depends on cluster load,
+        # so check the note against the data rather than assume it.
+        few = [s for r in (finished_run, stopped_run) for s in r["final"]["statements"] if 0 < (s.get("count") or 0) < 10]
+        assert bool(re.search(r"Fewer than \d+ executions", notes)) == bool(few), (c["notes"], few)
         cyl = next(s for s in c["statements"] if s["id"] == "cyl")
         assert cyl["rows_differ"] is False, "placeholder statements must not be flagged for differing rows"
 

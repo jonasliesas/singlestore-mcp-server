@@ -5,7 +5,8 @@ whole session. It runs against an isolated SINGLESTORE_MCP_HOME (see support.see
 SQL folder, with the background alert checker off.
 
 Markers (see pyproject.toml): ``cluster`` tests are skipped when the cluster can't be reached, ``sas``
-tests when SAS Viya can't, and ``assistants`` tests unless ``--assistants`` is given.
+tests when SAS Viya can't, and ``assistants`` tests unless ``--assistants`` is given. ``ui`` tests that
+need the cluster are marked ``cluster`` too.
 """
 
 from __future__ import annotations
@@ -83,7 +84,7 @@ def _gates(request: pytest.FixtureRequest) -> None:
     node = request.node
     if node.get_closest_marker("assistants") and not request.config.getoption("--assistants"):
         pytest.skip("assistant tests use Claude: run with --assistants")
-    if node.get_closest_marker("cluster") or node.get_closest_marker("ui"):
+    if node.get_closest_marker("cluster"):  # UI tests that need the cluster say so (``ui`` alone doesn't)
         request.getfixturevalue("cluster")
     if node.get_closest_marker("sas"):
         request.getfixturevalue("sas")
@@ -106,11 +107,11 @@ def browser_context_args(browser_context_args: dict[str, Any]) -> dict[str, Any]
 
 
 @pytest.fixture
-def app_url(cluster: McpSession):
+def app_url(mcp: McpSession):
     """``app_url(tool, args)``: a browser-view link served by the test server."""
 
     def make(tool: str, arguments: dict[str, Any] | None = None) -> str:
-        return cluster.ok("browser_link", {"tool": tool, "arguments": arguments or {}})["url"]
+        return mcp.ok("browser_link", {"tool": tool, "arguments": arguments or {}})["url"]
 
     return make
 

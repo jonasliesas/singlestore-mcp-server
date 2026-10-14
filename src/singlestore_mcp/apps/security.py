@@ -1,7 +1,9 @@
-"""Security view: users, roles & groups, resource pools. Read-only (see ..security for the sources).
+"""Security view: users, roles & groups, resource pools, audit log (see ..security for the sources).
 
 The model-visible tools (``security``, ``who_can_access``, ``user_privileges``, ``resource_pool_status``) all open
-this view on the matching tab; the page loads each tab through one app-only tool (one ``db.parallel`` batch).
+this view on the matching tab and only read; the page loads each tab through one app-only tool (one ``db.parallel``
+batch). Changes (v2, ..security_admin) go through two app-only tools: ``security_change_plan`` (read-only preview)
+and ``security_change_apply`` (refuses without ``confirm=True``, and without the typed name where the plan asks).
 """
 
 from __future__ import annotations
@@ -11,21 +13,33 @@ from typing import Literal
 from mcp.types import CallToolResult, ToolAnnotations
 
 from .. import security as sec
+from .. import security_admin as adm
 from ._core import APP_ONLY, apps, register_app, tool_result, with_browser_link
 
 URI = "ui://singlestore/security.html"
 READ_ONLY = ToolAnnotations(readOnlyHint=True)
-Tab = Literal["users", "roles", "pools"]
+Tab = Literal["users", "roles", "pools", "audit"]
+WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False)
 
 register_app(
     URI,
     "security.html",
     name="Security",
-    description="Users, groups, roles and effective privileges, who can access what, and resource pools / workload queue",
+    description=("Users, groups, roles and effective privileges, who can access what, resource pools / workload queue and"
+                 " audit log settings; previewed, confirmed changes for users with the right privileges"),
 )
 
-_TAB_SUMMARY = {"users": sec.users_summary, "roles": sec.roles_summary, "pools": sec.pools_summary}
-_TAB_COLLECT = {"users": lambda: sec.collect_users(), "roles": sec.collect_roles, "pools": sec.collect_pools}
+
+def _audit_summary(d: dict) -> str:
+    v = d["variables"]
+    head = (f"Audit logging is {'ON' if d['enabled'] else 'OFF'} (auditlog_level = {d['level'] or '?'}; files in "
+            f"{v.get('auditlogsdir', '?')} on each node). SingleStore has no SQL view of the audit log, so it isn't shown here.")
+    return "\n".join([head, *d["notes"]])
+
+
+_TAB_SUMMARY = {"users": sec.users_summary, "roles": sec.roles_summary, "pools": sec.pools_summary, "audit": _audit_summary}
+_TAB_COLLECT = {"users": lambda: sec.collect_users(), "roles": sec.collect_roles, "pools": sec.collect_pools,
+                "audit": adm.audit_status}
 
 
 @apps.tool(resource_uri=URI, title="Security", annotations=READ_ONLY)
@@ -135,3 +149,58 @@ def security_pools() -> CallToolResult:
     """Resource pools tab data (with the per-pool history kept while the view refreshes)."""
     data = sec.collect_pools()
     return tool_result(f"{len(data['pools'])} pools", data)
+
+
+# ----------------------------------------------------------------------------- v2: changes (preview + confirmation)
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def security_admin_capabilities() -> CallToolResult:
+    """What the connected user may change in the Security view (and why not), plus the privilege and pool-setting
+    lists for the pickers. Read-only."""
+    data = adm.capabilities(adm.load_context())
+    allowed = [k for k, v in data.items() if isinstance(v, dict) and v.get("ok")]
+    return tool_result(f"Allowed: {', '.join(allowed) or 'nothing'}", data)
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def security_change_plan(action: dict) -> CallToolResult:
+    """Read-only preview of one change: the exact statements (any password masked), warnings, blockers (lock-out,
+    last admin, missing objects) and whether the user must type the object's name to confirm. Runs nothing.
+
+    Args:
+        action: {"action": one of create_user, drop_user, grant, revoke, revoke_all, create_role, drop_role,
+            create_group, drop_group, grant_role, revoke_role, grant_group, revoke_group, create_pool, alter_pool,
+            drop_pool, set_default_pool, grant_pool, revoke_pool, plus its fields: user, host, role, group,
+            grantee_type ("user"/"role"), privileges, database, table, with_grant_option, grant_option, pool,
+            settings, default_pool}. Never a password.
+    """
+    data = adm.plan({k: v for k, v in (action or {}).items() if k != "password"})
+    return tool_result(adm.summary(data), data)
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=WRITE)
+def security_change_apply(action: dict, confirm: bool = False, typed_confirmation: str | None = None,
+                          password: str | None = None) -> CallToolResult:
+    """Run one previewed change (users, roles, groups, grants, resource pools) on the cluster.
+
+    Refuses unless ``confirm`` is true: call it only after the user saw the plan (security_change_plan) and
+    explicitly confirmed. Where the plan asks for it (DROP, revoke all, the connected user or an admin user),
+    ``typed_confirmation`` must be the name the user typed. The plan is rebuilt from fresh cluster state first,
+    and blockers (lock-out, last admin) refuse the change. ``password`` (create_user only) is sent as a bound
+    parameter and never returned, logged or stored.
+
+    Args:
+        action: The same action object as for security_change_plan.
+        confirm: Must be true: the user's explicit confirmation.
+        typed_confirmation: The object name the user typed, when the plan requires it.
+        password: The new user's password (create_user only).
+    """
+    data = adm.apply({k: v for k, v in (action or {}).items() if k != "password"}, confirm, typed_confirmation, password)
+    return tool_result(adm.summary(data), data)
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def security_audit() -> CallToolResult:
+    """Audit tab data: audit log settings and how to turn audit logging on. Read-only."""
+    data = adm.audit_status()
+    return tool_result(_audit_summary(data), data)

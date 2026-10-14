@@ -64,7 +64,7 @@ flowchart LR
 
 | Process | Started by | What it does |
 |---|---|---|
-| **Supervisor** (`supervisor.py`) | Claude, via `uv run singlestore-mcp-server` | A small stdio relay. It runs the real server as a child and copies JSON-RPC lines between Claude and the child. `restart_server` replaces the child without breaking Claude's connection: it replays `initialize` for older protocol revisions, and with protocol 2026-07-28+ the requests carry their version in `_meta`. |
+| **Supervisor** (`supervisor.py`) | Claude, via `uv run singlestore-mcp-server` | A small stdio relay. It runs the real server as a child and copies JSON-RPC lines between Claude and the child. `restart_server` replaces the child without breaking Claude's connection: it replays `initialize` for older protocol revisions, and with protocol 2026-07-28+ the requests carry their version in `_meta`. A child that exits on its own is started again after a back-off (1–30 s), and meanwhile requests get its error at once. |
 | **MCP server** (`server_impl.py`) | The supervisor (child), or `workspace_app.py` | All tools, prompts and apps; the connection pool; the background services. |
 | **Browser view** (`apps/browser_view.py`) | Inside the server process | A local HTTP server on 127.0.0.1 that serves the apps full-window ("Open in browser"). It forwards the page's tool calls to the server in-process. |
 | **Standalone Workspace** (`workspace_app.py`) | The desktop shortcut (`pythonw -m singlestore_mcp.workspace_app`) | Starts the server code and a browser view on port 8790 and opens an Edge app window. It shows a splash page while starting, stops 5 minutes after the last window closes, and restarts itself when the code changes. |
@@ -106,7 +106,7 @@ src/singlestore_mcp/
   alerts.py            background alert checker and rules
   compare.py           before/after timing of a rebuilt table
   housekeeping.py      scan / drop leftover SAS work tables
-  sas_viya.py          SAS Viya settings, OAuth sign-in and tokens
+  sas_viya.py          saved SAS Viya connections (one active), OAuth sign-in and tokens per connection
   workspace_app.py     standalone Workspace
   skills/              SKILL.md given to the in-app assistant
 claude-skills/         slash-command skills for Claude Code (/singlestore-workspace, …)
@@ -338,7 +338,7 @@ history, Advisor and Cluster Monitor leave them out.
 | `query_history.db` | local copy of the query history (Trends) |
 | `alerts.json` | alert rules and alert history |
 | `cleanup.json`, `cleanup-log.jsonl` | Clean-up patterns and the log of dropped tables |
-| `sas.json` | SAS Viya address, compute context, libref |
+| `sas.json` | saved SAS Viya connections (address, compute context, libref, CAS server, startup code; no tokens), the active one |
 | `workspace.json`, `starting.html` | the standalone Workspace's address and splash page |
 | `assistant/` | the in-app assistant's working folder and MCP config |
 

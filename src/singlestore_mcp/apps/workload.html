@@ -390,7 +390,7 @@ function runPanel() {
   return h("div", {},
     h("div", { style: { display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" } },
       h("b", {}, `${r.label || "Run"} · ${r.id}`),
-      h("span", { class: `s2-badge ${r.state === "done" ? "ok" : r.state === "error" ? "err" : live ? "info" : "warn"}` }, r.state === "starting" ? "connecting…" : r.state),
+      h("span", { class: `s2-badge ${r.state === "done" ? "ok" : r.state === "error" ? "err" : live ? "info" : "warn"}` }, r.state === "starting" ? "connecting…" : live && r.elapsed_s >= r.duration_s ? "finishing…" : r.state),
       h("span", { class: "s2-small s2-faint" }, `${when(r.started)} · ${r.settings.concurrency} connections · ${r.settings.pacing === "rate" ? "fixed rate" : "as fast as possible"}${r.rtt_ms != null ? ` · network round trip ${ms(r.rtt_ms)}` : ""}`),
       h("span", { class: "s2-spacer" }),
       live ? h("button", { class: "s2-btn danger", onclick: stopRun }, "Stop") : null,

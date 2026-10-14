@@ -15,8 +15,13 @@ Verified on SingleStore 9.0 with SAS EP:
   EP.h<32 hex>_EP(cols) AS ep``, also inside CTEs, and for CAS parallel loads one statement per partition
   (``… WHERE partition_id() = N``). The function's name changes every run (history_store.normalize ignores it),
   so each run is a new plan, used once, and soon gone from the plan cache.
-- On this cluster most EP calls of both kinds take 5.0–5.4 s whatever they read: a fixed wait, which the card
-  points out by comparing a run with every other EP call in the history.
+- On this cluster most *traced* EP calls of both kinds take 5.0–5.4 s whatever they read: a fixed wait, which the card
+  points out by comparing a run with every other EP call in the history. Measured on 9.0 (2026-10, read-only):
+  the same sasepFunction job takes ~0.24 s on some days and ~5.25 s on others (a +5.0 s step); in the slow runs the
+  EP sends its generated statement 5.2 s after the call started and everything after that takes < 50 ms; the plan
+  cache counts the 5.25 s as execution time but only ~3 ms CPU and 0 queued; concurrent EP calls that started up to
+  3.6 s apart finish within ~0.2 s of each other (one shared wait). The trace keeps only calls over its threshold
+  (1 s here), so fast EP calls are missing from it: the plan cache's EP.sasepv5 registrations count all of them.
 
 Sources: TABLE_STATISTICS (rows per master partition), COLUMNAR_SEGMENTS (compressed bytes per partition),
 DISTRIBUTED_PARTITIONS (partitions per leaf), MV_SYSINFO_CPU (leaf cores, with the container's CFS quota),
@@ -26,6 +31,8 @@ SHOW CREATE TABLE (shard / sort key), OPTIMIZER_STATISTICS (column cardinality),
 
 from __future__ import annotations
 
+import bisect
+import datetime as _dt
 import re
 import statistics
 from typing import Any
@@ -186,12 +193,221 @@ def cpus() -> Any:
 
 
 def peers() -> Any:
-    """Runtimes of every SAS EP call in the query history (both kinds), for the "fixed wait" comparison."""
-    rows = _q("SELECT DETAILS::%%duration_ms AS ms FROM information_schema.MV_TRACE_EVENTS WHERE EVENT_TYPE = 'Query_completion'"
-              " AND DETAILS::%%success = 1 AND (DETAILS::$query_text LIKE %s OR DETAILS::$query_text REGEXP %s)"
+    """Every SAS EP call (both kinds) in the cluster's query history and the local copy of it, for the "fixed wait",
+    "shared wait" and rows-vs-time comparisons: [{"start", "end" (epoch s), "ms", "rows", "ok", "kind", "db", "user"}]."""
+    live = live_calls()
+    try:
+        stored = stored_calls()
+    except Exception:  # noqa: BLE001 - the live trace alone still compares
+        stored = []
+    return merge_calls(live, stored)
+
+
+def live_calls() -> list[dict[str, Any]]:
+    """EP calls in the cluster's query history (MV_TRACE_EVENTS), with their exact start times."""
+    rows = _q("SELECT TIME, DETAILS::$start_time AS st, DETAILS::%%duration_ms AS ms, DETAILS::%%row_count AS n,"
+              " DETAILS::%%success AS ok, DETAILS::$context_database AS db, DETAILS::$user_name AS u,"
+              " LEFT(DETAILS::$query_text, 4000) AS q FROM information_schema.MV_TRACE_EVENTS WHERE EVENT_TYPE = 'Query_completion'"
+              " AND (DETAILS::$query_text LIKE %s OR DETAILS::$query_text REGEXP %s)"
               " AND DETAILS::$query_text NOT LIKE %s",
               ("%sasepFunction%", "EP[.]h[0-9A-Fa-f]{32}_EP", f"%{history_store.MARKER_PREFIX}%"))
-    return [float(r["ms"] or 0) for r in rows]
+    live = []
+    for r in rows:
+        text = history_store._text(r["q"])
+        # The WHERE matched the whole text; only the first 4000 characters are read, so the EP function of a long VA
+        # statement may lie beyond them: anything without sasepFunction is a format call.
+        if _METADATA.match(text):
+            continue
+        kind = kind_of(text)
+        if kind not in ("job", "format"):
+            kind = "job" if "sasepfunction" in text.lower() else "format"
+        end, ms = epoch(r["TIME"]), float(r["ms"] or 0)
+        live.append({"start": epoch(r["st"]) or (end - ms / 1000), "end": end, "ms": ms,
+                     "rows": None if r["n"] is None else int(r["n"]), "ok": r["ok"] not in (0, False),
+                     "kind": kind, "db": r["db"] or None, "user": r["u"],
+                     "stmt": history_store.statement_key(text, r["db"] or None)})
+    return live
+
+
+# SHOW CREATE … / DESCRIBE of an EP function: metadata, not an EP call.
+_METADATA = re.compile(r"\s*(?:SHOW|DESC|DESCRIBE)\b", re.I)
+
+
+def kind_of(sql: str | None) -> str | None:
+    """"job" (sasepFunction), "format" (VA / CAS EP.h…_EP function), "bookkeeping" (EP.sasep… tables) or None."""
+    if not sql:
+        return None
+    if re.search(r"sasepFunction`?\s*\(", sql, re.I):
+        return "job"
+    if re.search(r"`?EP`?\s*\.\s*`?h[0-9A-F]{32}_EP`?\s*\(", sql, re.I):
+        return "format"
+    if _BOOKKEEPING.search(sql):
+        return "bookkeeping"
+    return None
+
+
+def epoch(t: Any) -> float:
+    """Seconds since the epoch for a trace time ("2026-10-14T12:13:29.476228", "2026-10-14 12:13:24.230128",
+    or a datetime); 0.0 if unreadable. Naive times are read as UTC so differences stay exact."""
+    if t is None:
+        return 0.0
+    if isinstance(t, _dt.datetime):
+        d = t
+    else:
+        try:
+            d = _dt.datetime.fromisoformat(str(t).strip().replace(" ", "T")[:26])
+        except ValueError:
+            return 0.0
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=_dt.timezone.utc)
+    return d.timestamp()
+
+
+def stored_calls(since: str | None = None) -> list[dict[str, Any]]:
+    """EP calls kept in the local history store (traced runs; the store has no start time, so start = end − ms)."""
+    conn = history_store.connect()
+    try:
+        cond, params = ("AND finished >= ?", [since]) if since else ("", [])
+        rows = conn.execute(f"SELECT finished, ms, rows, ok, database, user, sample, stmt, shape FROM runs"
+                            f" WHERE source = ? AND origin = 'SAS EP' {cond}", (history_store.source_id(), *params)).fetchall()
+    finally:
+        conn.close()
+    out = []
+    for r in rows:
+        if _METADATA.match(r["sample"] or ""):
+            continue
+        kind = kind_of(r["sample"])
+        if kind not in ("job", "format"):
+            # The sample is cut at 300 characters: an EP statement whose function comes later is still a format call.
+            kind = "format" if "sasepfunction" not in (r["sample"] or "").lower() else "job"
+        end = epoch(r["finished"])
+        out.append({"start": end - float(r["ms"]) / 1000, "end": end, "ms": float(r["ms"]), "rows": r["rows"],
+                    "ok": bool(r["ok"]), "kind": kind, "db": r["database"], "user": r["user"], "stmt": r["stmt"]})
+    return out
+
+
+def merge_calls(live: list[dict[str, Any]], stored: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Live trace rows (with exact start times) plus older stored ones, without counting a run twice."""
+    seen = {(round(c["end"], 2), round(c["ms"])) for c in live}
+    out = list(live)
+    for c in stored:
+        if (round(c["end"], 2), round(c["ms"])) not in seen:
+            out.append(c)
+    out.sort(key=lambda c: c["start"])
+    return out
+
+
+# ------------------------------------------------------------------ fixed wait, shared wait, rows vs time
+# Pure functions over a list of calls, so they can be unit tested without a cluster.
+
+PLATEAU_TOLERANCE = 0.04    # a call is on the plateau when it is within ±4 % of the plateau's centre
+PLATEAU_MIN_SHARE = 0.3     # … and the plateau holds at least 30 % of the calls
+PLATEAU_MIN_CALLS = 3
+PLATEAU_FLOOR_MS = 1000     # only waits of a second or more count as a "fixed wait"
+
+
+def plateau(values: list[float], min_share: float = PLATEAU_MIN_SHARE, min_calls: int = PLATEAU_MIN_CALLS,
+            tolerance: float = PLATEAU_TOLERANCE) -> dict[str, Any] | None:
+    """The most common runtime band of a set of calls when many take (almost) the same time, else None.
+
+    {"center_ms", "low_ms", "high_ms", "count", "share", "total", "warm_ms" (median of the calls faster than the
+    band, or None), "fixed_ms" (estimated fixed wait: centre − warm median, or the centre when there's no faster call)}."""
+    vals = sorted(float(v) for v in values if v is not None)
+    if not vals:
+        return None
+    best: tuple[int, float] = (0, 0.0)
+    for v in vals:
+        if v < PLATEAU_FLOOR_MS:
+            continue
+        n = bisect.bisect_right(vals, v * (1 + tolerance)) - bisect.bisect_left(vals, v * (1 - tolerance))
+        if n > best[0]:
+            best = (n, v)
+    if not best[0]:
+        return None
+    first = [x for x in vals if abs(x - best[1]) <= tolerance * best[1]]
+    center = statistics.median(first)
+    members = [x for x in vals if abs(x - center) <= tolerance * center]
+    share = len(members) / len(vals)
+    if len(members) < min_calls or share < min_share:
+        return None
+    low, high = min(members), max(members)
+    faster = [x for x in vals if x < low]
+    warm = statistics.median(faster) if faster else None
+    return {"center_ms": round(center), "low_ms": round(low), "high_ms": round(high), "count": len(members),
+            "share": round(share, 3), "total": len(vals), "warm_ms": round(warm) if warm is not None else None,
+            "fixed_ms": round(center - warm) if warm is not None else round(center)}
+
+
+def calls_plateau(calls: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """plateau() over calls, with the warm baseline taken only from calls that didn't overlap a plateau call: a call
+    that joined a shared wait late is short because it waited less, not because the EP was warm."""
+    ok = [c for c in calls if c.get("ok", True)]
+    pl = plateau([c["ms"] for c in ok])
+    if not pl:
+        return None
+    slow = [c for c in ok if on_plateau(c["ms"], pl) and c.get("start") and c.get("end")]
+    alone = [c["ms"] for c in ok if c["ms"] < pl["low_ms"]
+             and not any(s["start"] < c.get("end", 0) and s["end"] > c.get("start", 0) for s in slow)]
+    warm = statistics.median(alone) if alone else None
+    return {**pl, "warm_ms": round(warm) if warm is not None else None, "warm_calls": len(alone),
+            "fixed_ms": round(pl["center_ms"] - warm) if warm is not None else pl["center_ms"]}
+
+
+def on_plateau(ms: float, p: dict[str, Any] | None, tolerance: float = PLATEAU_TOLERANCE) -> bool:
+    return bool(p and ms and abs(ms - p["center_ms"]) <= tolerance * p["center_ms"])
+
+
+def bursts(calls: list[dict[str, Any]], min_calls: int = 2) -> list[dict[str, Any]]:
+    """Calls that overlapped in time, grouped: {"calls", "start", "end", "start_spread_s", "end_spread_s", "shared",
+    "members"}. "shared": they started at least a second apart but finished within half a second of each other, so
+    they waited for one shared step rather than each for its own."""
+    groups: list[list[dict[str, Any]]] = []
+    for c in sorted((c for c in calls if c.get("start") and c.get("end")), key=lambda c: c["start"]):
+        if groups and c["start"] < max(x["end"] for x in groups[-1]):
+            groups[-1].append(c)
+        else:
+            groups.append([c])
+    out = []
+    for g in groups:
+        if len(g) < min_calls:
+            continue
+        starts, ends = [x["start"] for x in g], [x["end"] for x in g]
+        ss, es = max(starts) - min(starts), max(ends) - min(ends)
+        out.append({"calls": len(g), "start": min(starts), "end": max(ends), "start_spread_s": round(ss, 2),
+                    "end_spread_s": round(es, 2), "shared": ss >= 1.0 and es <= 0.5, "members": g})
+    return out
+
+
+def rows_fit(calls: list[dict[str, Any]], min_calls: int = 5) -> dict[str, Any] | None:
+    """Least-squares fit of runtime on rows returned: {"intercept_ms", "per_1000_rows_ms", "r2", "n", "max_rows"},
+    or None when there are too few calls or the row counts don't vary."""
+    pts = [(float(c["rows"]), float(c["ms"])) for c in calls if c.get("rows") is not None and c.get("ok", True) and c.get("ms")]
+    if len(pts) < min_calls or len({x for x, _ in pts}) < 3:
+        return None
+    n = len(pts)
+    mx, my = sum(x for x, _ in pts) / n, sum(y for _, y in pts) / n
+    sxx = sum((x - mx) ** 2 for x, _ in pts)
+    if not sxx:
+        return None
+    slope = sum((x - mx) * (y - my) for x, y in pts) / sxx
+    intercept = my - slope * mx
+    syy = sum((y - my) ** 2 for _, y in pts)
+    r2 = (slope * slope * sxx / syy) if syy else 0.0
+    return {"intercept_ms": round(intercept), "per_1000_rows_ms": round(slope * 1000, 2), "r2": round(r2, 2), "n": n,
+            "max_rows": int(max(x for x, _ in pts))}
+
+
+def histogram(values: list[float], width_ms: int = 250, max_buckets: int = 14) -> list[dict[str, Any]]:
+    """Non-empty runtime buckets ({"lo_ms", "n"}), at most ``max_buckets`` (the rest folded into the last)."""
+    counts: dict[int, int] = {}
+    for v in values:
+        b = int(v // width_ms) * width_ms
+        counts[b] = counts.get(b, 0) + 1
+    out = [{"lo_ms": k, "n": n} for k, n in sorted(counts.items())]
+    if len(out) > max_buckets:
+        out = out[: max_buckets - 1] + [{"lo_ms": out[max_buckets - 1]["lo_ms"], "n": sum(b["n"] for b in out[max_buckets - 1:]),
+                                         "more": True}]
+    return out
 
 
 def analyze(event: dict[str, Any], plan: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -219,16 +435,26 @@ def analyze(event: dict[str, Any], plan: dict[str, Any] | None) -> dict[str, Any
     if not (in_db and in_table):
         card["note"] = "The call names no input table, so the table-based checks don't apply."
 
+    call_end = epoch(event.get("finished"))
+    call_start = epoch(event.get("start_time")) or (call_end - ms / 1000 if call_end else 0.0)
+
     def generated() -> Any:
         # The statement the EP generated for this job (CREATE TABLE <out> AS SELECT … FROM <in> AS sasepin JOIN …).
-        rows = _q("SELECT TIME, DETAILS::$query_text AS q, DETAILS::%%duration_ms AS ms FROM information_schema.MV_TRACE_EVENTS"
+        # Traced when it ran ≥ the threshold or failed; the one inside this call's time window tells where the time went.
+        rows = _q("SELECT TIME, DETAILS::$start_time AS st, DETAILS::$query_text AS q, DETAILS::%%duration_ms AS ms,"
+                  " DETAILS::%%success AS ok, DETAILS::$error_code AS err FROM information_schema.MV_TRACE_EVENTS"
                   " WHERE EVENT_TYPE = 'Query_completion' AND DETAILS::$query_text LIKE %s AND DETAILS::$query_text LIKE %s"
-                  " AND DETAILS::$query_text NOT LIKE %s ORDER BY TIME DESC LIMIT 5",
+                  " AND DETAILS::$query_text NOT LIKE %s ORDER BY TIME DESC LIMIT 40",
                   ("%AS sasepin%", f"%{in_table}%", f"%{history_store.MARKER_PREFIX}%"))
         found = [r for r in rows if re.search(rf"FROM\s+`?{re.escape(in_db or '')}`?\s*\.\s*`?{re.escape(in_table)}`?\s+AS\s+sasepin",
                                               history_store._text(r["q"]), re.I)]
+        inside = [r for r in found if call_start and call_start - 1 <= epoch(r["TIME"]) <= call_end + 1]
         if found:
-            return {"sql": history_store._text(found[0]["q"]), "source": "trace"}
+            r = (inside or found)[0]
+            g_end, g_ms = epoch(r["TIME"]), float(r["ms"] or 0)
+            return {"sql": history_store._text(r["q"]), "source": "trace", "in_call": bool(inside),
+                    "start": epoch(r["st"]) or g_end - g_ms / 1000, "end": g_end, "ms": g_ms,
+                    "ok": r["ok"] not in (0, False), "error": r["err"] or None}
         rows = _q("SELECT LEFT(QUERY_TEXT, 8000) AS q FROM information_schema.MV_PLANCACHE WHERE QUERY_TEXT LIKE %s"
                   " AND QUERY_TEXT LIKE %s LIMIT 5", ("%AS sasepin%", f"%{in_table}%"))
         for r in rows:
@@ -246,6 +472,15 @@ def analyze(event: dict[str, Any], plan: dict[str, Any] | None) -> dict[str, Any
 
     calls = [*_table_calls(in_db, in_table), generated, trend] if in_db and in_table else []
     results = dict(zip([c.__name__ for c in [*calls, cpus, peers]], db.parallel(*[_safe(c) for c in [*calls, cpus, peers]])))
+    all_calls = results.get("peers") if isinstance(results.get("peers"), list) else []
+    pl = calls_plateau(all_calls)
+    gen = results.get("generated") if isinstance(results.get("generated"), dict) else None
+    this = {"start": call_start, "end": call_end, "ms": ms, "rows": event.get("row_count"), "kind": "job"}
+    card["points"].append(breakdown(ms, plan, pl, gen if gen and gen.get("in_call") else None, call_start))
+    if gen and gen.get("in_call") and not gen.get("ok"):
+        card["points"].append(_generated_failed(gen, p))
+    card["points"].append(_peers_point(all_calls, ms, pl))
+    card["points"].append(_burst_point(all_calls, this))
     if in_db and in_table:
         card["points"].append(_skew(results, ms))
         card["points"].append(_cores_point(results))
@@ -253,7 +488,7 @@ def analyze(event: dict[str, Any], plan: dict[str, Any] | None) -> dict[str, Any
     card["points"].append(_waits(plan, ms))
     if in_db and in_table:
         card["points"].append(_trend(results.get("trend")))
-    card["points"].append(_peers_point(results.get("peers"), ms))
+    card["tips"] = tips(card, pl)
     return card
 
 
@@ -292,6 +527,14 @@ def _analyze_format(event: dict[str, Any], plan: dict[str, Any] | None, info: di
     if not first:
         card["note"] = "No input table could be read from the statement, so the table-based checks don't apply."
     traced = results.get("runs") if isinstance(results.get("runs"), list) else []
+    all_calls = results.get("peers") if isinstance(results.get("peers"), list) else []
+    pl = calls_plateau(all_calls)
+    end = epoch(event.get("finished"))
+    this = {"start": epoch(event.get("start_time")) or (end - ms / 1000 if end else 0.0), "end": end, "ms": ms,
+            "rows": event.get("row_count"), "kind": "format"}
+    card["points"].append(breakdown(ms, plan, pl, None, this["start"]))
+    card["points"].append(_peers_point(all_calls, ms, pl))
+    card["points"].append(_burst_point(all_calls, this))
     if info["partition"] is not None:
         card["points"].append(_partition_spread(traced, finished, results))
     if first:
@@ -301,7 +544,7 @@ def _analyze_format(event: dict[str, Any], plan: dict[str, Any] | None, info: di
     card["points"].append(_waits(plan, ms))
     loads = _loads(traced) if info["partition"] is not None else traced
     card["points"].append(_trend(loads))
-    card["points"].append(_peers_point(results.get("peers"), ms))
+    card["tips"] = tips(card, pl)
     return card
 
 
@@ -401,27 +644,343 @@ def _data_format(r: dict[str, Any], info: dict[str, Any]) -> dict[str, Any]:
     return point
 
 
-def _peers_point(peers: Any, ms: float) -> dict[str, Any]:
+def _peers_point(calls: list[dict[str, Any]], ms: float, pl: dict[str, Any] | None) -> dict[str, Any]:
     """This run's time against every EP call in the history: many calls taking the same time whatever the data
-    is a fixed wait (seen on this cluster: most EP calls take 5.0 to 5.4 s)."""
+    is a fixed wait (seen on this cluster: most traced EP calls take 5.0 to 5.4 s)."""
     point: dict[str, Any] = {"key": "peers", "title": "Compared with other EP calls"}
-    if not isinstance(peers, list) or len(peers) < 5 or not ms:
+    ok = [c for c in calls if c.get("ok")]
+    if len(ok) < 5 or not ms:
         point["verdict"] = _verdict("info", "Too few EP calls in the query history to compare.")
         return point
-    near = sum(1 for x in peers if abs(x - ms) <= 0.05 * ms)
-    share = near / len(peers)
-    med = statistics.median(peers)
-    point["value"] = (f"{len(peers)} EP calls in the history, median {_fmt_s(med)}; {near} ({share:.0%}) took "
-                      f"{_fmt_s(ms)} ± 5%")
-    if share >= 0.3:
-        point["verdict"] = _verdict(
-            "warn", f"{share:.0%} of all EP calls take almost exactly this long, whatever table they read and however "
-            "big it is. That points at a fixed wait (the EP starting up, or a time-out somewhere), not at the data.",
-            "Check the SAS EP side (its start-up, connection and time-out settings, and its logs) for a wait of about "
-            f"{_fmt_s(ms)}; tuning the SingleStore table won't remove it.")
+    values = [c["ms"] for c in ok]
+    point["histogram"] = histogram(values)
+    point["this_ms"] = ms
+    fit = rows_fit(ok)
+    point["fit"] = fit
+    kinds = {k: sum(1 for c in ok if c["kind"] == k) for k in ("job", "format")}
+    point["value"] = (f"{len(ok)} traced EP calls ({kinds['job']} jobs, {kinds['format']} VA / CAS), median "
+                      f"{_fmt_s(statistics.median(values))}")
+    fit_text = ""
+    if fit and fit["max_rows"] >= 100:
+        grows = fit["per_1000_rows_ms"] * fit["max_rows"] / 1000
+        if fit["r2"] < 0.3 or abs(grows) < 0.1 * max(fit["intercept_ms"], 1):
+            fit_text = (f" Their time doesn't follow the rows they return (1 to {fit['max_rows']:,} rows; r² {fit['r2']:.2f} "
+                        "for a straight line through rows and time): the cost is per call, not per row.")
+        else:
+            fit_text = (f" Across them, time grows with the rows returned: about {_fmt_s(fit['intercept_ms'])} per call plus "
+                        f"{fit['per_1000_rows_ms']:g} ms per 1,000 rows (r² {fit['r2']:.2f}).")
+    if pl:
+        point["plateau"] = pl
+        point["value"] += (f"; {pl['count']} ({pl['share']:.0%}) took {_fmt_s(pl['low_ms'])}–{_fmt_s(pl['high_ms'])}")
+        warm = (f" EP calls that ran on their own off the plateau took a median {_fmt_s(pl['warm_ms'])}, so the plateau "
+                f"is about {_fmt_s(pl['fixed_ms'])} of waiting on top of the work." if pl.get("warm_ms") is not None else "")
+        if on_plateau(ms, pl):
+            point["verdict"] = _verdict(
+                "warn", f"This call is on the plateau: {pl['share']:.0%} of the traced EP calls take "
+                f"{_fmt_s(pl['low_ms'])}–{_fmt_s(pl['high_ms'])} whatever table they read and however many rows they return."
+                + warm + fit_text + " That's a fixed wait, not the data. Only calls of 1 s or more are traced, so faster EP "
+                "calls aren't in this count (see the EP overview in the Usage tab).",
+                "Tuning the SingleStore table won't remove it: raise it with the SAS EP owners (what the EP does in the "
+                "first seconds of a call; see the tips below).")
+        else:
+            point["verdict"] = _verdict("ok", f"This call ({_fmt_s(ms)}) isn't on the {_fmt_s(pl['center_ms'])} plateau that "
+                                        f"{pl['share']:.0%} of the traced EP calls sit on, so its time is mostly its own work"
+                                        f"{' or a warm EP' if ms < pl['low_ms'] else ''}." + fit_text)
     else:
-        point["verdict"] = _verdict("ok", "This run's time isn't shared by many other EP calls, so it's mostly this job's own work.")
+        point["verdict"] = _verdict("ok", "No runtime is shared by many EP calls, so this run's time is mostly its own work." + fit_text)
     return point
+
+
+def breakdown(ms: float, plan: dict[str, Any] | None, pl: dict[str, Any] | None, gen: dict[str, Any] | None,
+              call_start: float = 0.0) -> dict[str, Any]:
+    """Where this call's time went, as far as SingleStore can see: measured parts (the EP's generated statement inside
+    a sasepFunction call; queueing and CPU from the plan cache) and estimated ones (the fixed wait from the plateau)."""
+    point: dict[str, Any] = {"key": "breakdown", "title": "Where the time went"}
+    if not ms:
+        point["verdict"] = _verdict("info", "No duration recorded for this call.")
+        return point
+    runs = max(1, int((plan or {}).get("runs") or 1))
+    queued = ((float((plan or {}).get("QUEUED_TIME") or 0) or float((plan or {}).get("WORKLOAD_MANAGEMENT_QUEUED_TIME") or 0)
+               + float((plan or {}).get("RESOURCE_POOL_QUEUED_TIME") or 0)) / runs) if plan else None
+    cpu = float(plan["CPU_TIME"]) / runs if plan and plan.get("CPU_TIME") is not None else None
+    segs: list[dict[str, Any]] = []
+    facts: list[str] = []
+    if gen and call_start and gen.get("start"):
+        before = max(0.0, (gen["start"] - call_start) * 1000)
+        g_ms = float(gen.get("ms") or 0)
+        after = max(0.0, ms - before - g_ms)
+        segs = [{"label": "before the EP's SQL", "ms": round(before), "how": "measured", "kind": "wait"},
+                {"label": "EP's generated statement", "ms": round(g_ms), "how": "measured", "kind": "work"},
+                {"label": "after (results back to SAS)", "ms": round(after), "how": "measured", "kind": "other"}]
+        facts.append(f"The EP sent its generated statement {_fmt_s(before)} after the call started; that statement took "
+                     f"{_fmt_s(g_ms)}{'' if gen.get('ok', True) else ' and failed'}.")
+    else:
+        fixed = None
+        if on_plateau(ms, pl) and pl and pl.get("warm_ms") is not None:
+            fixed = max(0.0, min(ms, ms - pl["warm_ms"]))
+        q = queued or 0.0
+        if q:
+            segs.append({"label": "queued (workload management)", "ms": round(q), "how": "plan cache", "kind": "queue"})
+        if fixed:
+            segs.append({"label": "fixed EP wait (estimate)", "ms": round(fixed), "how": "estimate", "kind": "wait"})
+        segs.append({"label": "work + transfer" if fixed or q else "whole call", "ms": round(max(0.0, ms - q - (fixed or 0))),
+                     "how": "rest", "kind": "work"})
+    if queued is not None:
+        facts.append(f"Queued {_fmt_s(queued)}" + (" (no workload management queueing)." if not queued else "."))
+    if cpu is not None:
+        facts.append(f"CPU in SingleStore {_fmt_s(cpu)} per run ({cpu / ms:.1%} of the call)." if ms else "")
+    point["segments"] = segs
+    point["total_ms"] = round(ms)
+    point["value"] = " · ".join(f"{s['label']} {_fmt_s(s['ms'])}" for s in segs)
+    waiting = sum(s["ms"] for s in segs if s["kind"] in ("wait", "queue"))
+    idle = cpu is not None and ms >= 1000 and cpu < 0.05 * ms
+    text = " ".join(f for f in facts if f)
+    if waiting >= 0.5 * ms or (idle and on_plateau(ms, pl)):
+        share = waiting / ms if waiting else 1 - (cpu or 0) / ms
+        point["verdict"] = _verdict(
+            "warn", f"About {share:.0%} of this call is waiting, not work. " + text
+            + (" The plan cache's execution time includes the EP's wait, but SingleStore spends almost no CPU on it."
+               if idle else ""),
+            "See the tips below: the wait is outside the data (start-up / connection / shared step on the EP side).")
+    else:
+        point["verdict"] = _verdict("ok" if text else "info", text or "Only the total is known for this call.")
+    return point
+
+
+def _generated_failed(gen: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+    out = f"{params.get('outputDatabase') or params.get('inputDatabase') or ''}.{params.get('outputTable') or ''}".strip(".")
+    exists = (gen.get("error") or "").upper() == "ER_TABLE_EXISTS_ERROR"
+    return {"key": "generated_failed", "title": "The EP's own statement failed",
+            "value": f"{gen.get('error') or 'error'} after {_fmt_s(float(gen.get('ms') or 0))}",
+            "verdict": _verdict(
+                "crit", "The statement the EP generated for this job failed"
+                + (f" because the output table {out} already exists" if exists else "")
+                + ", yet the sasepFunction call itself completed normally in SingleStore. The job didn't write its output: "
+                "check the status / message the call returned to SAS and the SAS log.",
+                ("Drop or rename the output table before the job runs (or have the job replace it) – " if exists else "")
+                + "a scheduled job that fails like this every run still costs the full EP wait each time.")}
+
+
+def _burst_point(calls: list[dict[str, Any]], this: dict[str, Any]) -> dict[str, Any]:
+    """EP calls running at the same time as this one: did they share one wait (finishing together)? Many small ones?"""
+    point: dict[str, Any] = {"key": "burst", "title": "EP calls running at the same time"}
+    if not this.get("start") or not this.get("end"):
+        point["verdict"] = _verdict("info", "This call's start time isn't known, so overlapping calls can't be found.")
+        return point
+    mine = [c for c in calls if c["start"] < this["end"] and c["end"] > this["start"]]
+    if not any(abs(c["end"] - this["end"]) < 0.01 and abs(c["ms"] - this["ms"]) < 2 for c in mine):
+        mine.append(this)
+    group = next((b for b in bursts(mine) if any(m is this or (abs(m["end"] - this["end"]) < 0.01) for m in b["members"])), None)
+    if not group:
+        point["verdict"] = _verdict("ok", "No other traced EP call ran at the same time.")
+        return point
+    point["value"] = (f"{group['calls']} EP calls overlapped: started {group['start_spread_s']:g} s apart, finished "
+                      f"{group['end_spread_s']:g} s apart")
+    rows = [m.get("rows") for m in group["members"] if m.get("rows") is not None]
+    small = len(rows) >= 3 and statistics.median(rows) <= 10
+    point["members"] = [{"start_offset_s": round(m["start"] - group["start"], 2), "end_offset_s": round(m["end"] - group["start"], 2),
+                         "ms": m["ms"], "rows": m.get("rows"), "this": m is this or abs(m["end"] - this["end"]) < 0.01}
+                        for m in sorted(group["members"], key=lambda m: m["start"])]
+    text = ""
+    if group["shared"]:
+        text = (f"They started up to {group['start_spread_s']:g} s apart but finished within {group['end_spread_s'] * 1000:.0f} ms "
+                "of each other: the later ones didn't wait their own full time, they waited for the same step as the "
+                "first. Running EP queries in parallel therefore doesn't multiply the wait; running them one after "
+                "another does.")
+    if small:
+        text += (f" {group['calls']} calls returned only {int(statistics.median(rows))} row(s) each (median): each is a separate "
+                 "EP query with its own per-job function (and its own EP.sasepv5 registration).")
+    point["verdict"] = _verdict(
+        "warn" if small else "info" if not group["shared"] else "ok",
+        text or "Other EP calls ran at the same time; they didn't finish together, so each did its own work.",
+        "Fewer, larger EP queries pay the wait fewer times: e.g. one VA object / one CAS action asking for several "
+        "measures instead of one per measure, or compute the formatted / calculated columns once in the data (a "
+        "SingleStore view or table) so no EP function is needed (to verify with SAS: which VA items need EP)."
+        if small else None)
+    return point
+
+
+# ------------------------------------------------------------------ tuning tips, with their sources
+# "kind": measured (seen in this cluster's data), documented (the source says so), hypothesis (to verify).
+
+SOURCES: dict[str, dict[str, str]] = {
+    "s2_extfn": {"short": "external functions", "title": "SingleStore: CREATE [OR REPLACE] EXTERNAL FUNCTION (collocated services, batching)",
+                 "url": "https://docs.singlestore.com/db/v9.0/reference/sql-reference/procedural-sql-reference/create-or-replace-external-function/"},
+    "s2_vars": {"short": "engine variables", "title": "SingleStore: list of engine variables (external_functions_*, plan_expiration_minutes)",
+                "url": "https://docs.singlestore.com/db/v9.0/reference/configuration-reference/engine-variables/list-of-engine-variables/"},
+    "s2_history": {"short": "Query History", "title": "SingleStore: Query History (event trace, Duration_threshold_ms; DDL traced from 9.1)",
+                   "url": "https://docs.singlestore.com/db/v9.1/query-data/query-tuning/query-history/"},
+    "s2_trace": {"short": "trace commands", "title": "SingleStore: trace event commands (CREATE / DROP EVENT TRACE)",
+                 "url": "https://docs.singlestore.com/cloud/reference/sql-reference/trace-event-commands/"},
+    "s2_pools": {"short": "resource pools", "title": "SingleStore: RESOURCE_POOLS (MAX_CONCURRENCY, MAX_QUEUE_DEPTH)",
+                 "url": "https://docs.singlestore.com/cloud/reference/information-schema-reference/resource-and-user-management/resource-pools/"},
+    "resolv": {"short": "resolv.conf(5)", "title": "resolv.conf(5): resolver timeout defaults to 5 s; single-request(-reopen)",
+               "url": "https://man7.org/linux/man-pages/man5/resolv.conf.5.html"},
+    "k8s_dns": {"short": "5 s DNS delay", "title": "The 5-second DNS delay in Kubernetes (conntrack race on parallel A/AAAA lookups)",
+                "url": "https://cloud.tencent.com/developer/article/1583706"},
+    "sas_speedystore": {"short": "SpeedyStore admin guide", "title": "SAS SpeedyStore: Administration and Configuration Guide (EP on each leaf pod)",
+                        "url": "https://documentation.sas.com/api/collections/sasadmincdc/v_042/docsets/calsinglestore/content/calsinglestore.pdf?locale=en"},
+    "sas_indb": {"short": "In-Database guide", "title": "SAS Viya In-Database Technologies: Deployment and Administration Guide (EP for SingleStore)",
+                 "url": "https://documentation.sas.com/api/collections/pgmsascdc/v_037/docsets/indbepdg/content/indbepdg.pdf?locale=en"},
+    "sas_caslib": {"short": "SingleStore caslib", "title": "SAS Communities: Using SAS with SingleStore – aggregate pushdown (epDatabase, udfDatabase, aggregatePushdown)",
+                   "url": "https://communities.sas.com/t5/SAS-Communities-Library/Using-SAS-with-SingleStore-Enhancing-Performance-with-Aggregate/ta-p/961443"},
+    "sas_multinode": {"short": "NUMREADNODES", "title": "SAS blog: Multi-node data transfer to CAS (NUMREADNODES)",
+                      "url": "https://blogs.sas.com/content/sgf/2018/03/29/multi-node-data-transfer-to-cas/"},
+}
+
+
+def _tip(kind: str, text: str, *sources: str) -> dict[str, Any]:
+    return {"kind": kind, "text": text, "sources": [{"id": s, **SOURCES[s]} for s in sources]}
+
+
+def tips(card: dict[str, Any], pl: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Concrete next steps for this EP call, each marked measured / documented / hypothesis, with sources."""
+    pts = {p["key"]: p for p in card.get("points", [])}
+    ms = float(card.get("duration_ms") or 0)
+    out: list[dict[str, Any]] = []
+    plateau_hit = on_plateau(ms, pl)
+    bd = pts.get("breakdown", {})
+    if plateau_hit:
+        out.append(_tip("measured",
+                        f"{pl['share']:.0%} of the traced EP calls take {_fmt_s(pl['low_ms'])}–{_fmt_s(pl['high_ms'])} whatever "
+                        f"they read. On the cluster this was investigated on (Oct 2026) the same sasepFunction job "
+                        "also ran in ~0.24 s on other days (a +5.0 s step), and in its slow runs the EP sent its first SQL "
+                        "5.2 s after the call started: the wait comes before the EP touches the data (README, SAS EP)."))
+        out.append(_tip("hypothesis",
+                        "A constant +5.0 s is the Linux resolver's default timeout (resolv.conf timeout:5). If the EP opens a "
+                        "connection or looks up a host name at the start of a call, one lost DNS packet (in Kubernetes: the "
+                        "conntrack race on parallel A/AAAA lookups) costs exactly 5 s. Ask the SAS EP / platform owners to time "
+                        "`getent hosts <the aggregator host the EP uses>` in a leaf pod and to check its /etc/resolv.conf "
+                        "(ndots, single-request-reopen).", "resolv", "k8s_dns"))
+        out.append(_tip("hypothesis",
+                        "Warm calls are fast: the EP probably keeps something (a process, a connection, the job definition) for "
+                        "a while and pays the start-up again when it's gone. Ask the SAS EP owners what the EP does in the first "
+                        "~5 s of a cold call, whether it reconnects to SingleStore per call, and whether there's an idle "
+                        "timeout or keep-alive setting. Their EP log on the leaf pods at this call's start time shows it.",
+                        "sas_speedystore", "sas_indb"))
+    burst = pts.get("burst", {})
+    if burst.get("verdict", {}).get("level") == "warn":
+        out.append(_tip("measured", "Many small EP queries ran together: each needs its own per-job EP function. Fewer, "
+                        "larger queries pay the fixed cost fewer times.", "s2_extfn"))
+    if card.get("kind") == "format":
+        out.append(_tip("hypothesis",
+                        "SAS VA / CAS uses EP functions for what plain SQL can't express (SAS formats, calculated items, "
+                        "custom categories: the va__d_ / va__c_ / __ndistinct columns). Where a report only needs a few of "
+                        "them, storing those values as columns (a SingleStore view or table built once) lets VA / CAS read "
+                        "them without an EP call. Verify with SAS which items trigger EP.", "sas_speedystore"))
+        out.append(_tip("documented",
+                        "aggregatePushdown=true on the SingleStore caslib lets CAS push aggregations into SingleStore; "
+                        "epDatabase / udfDatabase name where the EP and its functions live. NUMREADNODES only changes how "
+                        "many CAS workers read in parallel (the transfer), not the fixed EP wait.", "sas_caslib", "sas_multinode"))
+    else:
+        out.append(_tip("hypothesis",
+                        "Each in-database DATA step is one sasepFunction call with its own generated function, so the fixed "
+                        "wait is paid per step: combine small steps (several outputs in one DATA step, BY-group processing) "
+                        "and filter the input with WHERE= and only the needed columns with KEEP= so SingleStore does that "
+                        "before the EP (check the generated statement above after the change).", "sas_indb"))
+    queued = next((s for s in bd.get("segments", []) if s["kind"] == "queue" and s["ms"] > 0.1 * ms), None)
+    if queued:
+        out.append(_tip("documented", "The call was queued by workload management: give SAS EP work its own resource pool "
+                        "(MAX_CONCURRENCY / MAX_QUEUE_DEPTH) or schedule it apart from other heavy work. Ask the "
+                        "SingleStore admin – this is a cluster setting.", "s2_pools"))
+    else:
+        out.append(_tip("measured", "Not resource-pool or workload-management queueing: no queued time in the plan cache "
+                        "(and none on this cluster since start-up, MV_WORKLOAD_MANAGEMENT_STATUS).", "s2_pools"))
+    out.append(_tip("documented",
+                    "Only calls over the trace threshold are in the query history, so fast EP calls are missing from every "
+                    "share above. To see them, an admin can recreate the trace with a lower threshold for a while (DROP EVENT "
+                    "TRACE Query_completion; CREATE EVENT TRACE Query_completion WITH (Query_text = on, "
+                    "Duration_threshold_ms = 100, Trace_all_failed_executions = on); – not 0, and back to 1000 afterwards). "
+                    "The Workspace keeps EP calls of any duration it finds.", "s2_history", "s2_trace"))
+    return out
+
+
+# ------------------------------------------------------------------ EP overview (Usage tab)
+
+def overview(since: str | None = None, live: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """EP calls by source from the local store (plus ``live`` calls from the trace the store doesn't have yet): count,
+    total time, plateau share, shared-wait bursts, and how many EP calls the plan cache saw in all (the trace misses
+    the fast ones). ``since``: cluster time "YYYY-MM-DD HH:MM:SS"."""
+    cut = epoch(since) if since else 0.0
+    calls = merge_calls([c for c in live or [] if c["end"] >= cut], stored_calls(since))
+    src = history_store.source_id()
+    conn = history_store.connect()
+    try:
+        plans = history_store._plan_executions(conn, src, since)
+    finally:
+        conn.close()
+    ok = [c for c in calls if c["ok"]]
+    pl = calls_plateau(calls)
+    groups: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for c in calls:
+        key = (c["kind"], c["db"] or "", c["user"] or "")
+        g = groups.setdefault(key, {"kind": c["kind"], "source": _SOURCE_LABEL[c["kind"]], "database": c["db"], "user": c["user"],
+                                    "calls": 0, "ms": 0.0, "failed": 0, "plateau": 0, "plateau_ms": 0.0, "times": [], "last": 0.0})
+        g["calls"] += 1
+        g["ms"] += c["ms"]
+        g["failed"] += 0 if c["ok"] else 1
+        g["times"].append(c["ms"])
+        g["last"] = max(g["last"], c["end"])
+        if c["ok"] and on_plateau(c["ms"], pl):
+            g["plateau"] += 1
+            g["plateau_ms"] += c["ms"]
+    rows = []
+    for g in groups.values():
+        times = g.pop("times")
+        rows.append({**g, "ms": round(g["ms"]), "plateau_ms": round(g["plateau_ms"]), "median_ms": round(statistics.median(times)),
+                     "last": _iso(g["last"])})
+    rows.sort(key=lambda r: -r["ms"])
+    bs = bursts(calls)
+    # Every EP execution the plan cache saw, however short: sasepFunction plans, and the VA / CAS format functions'
+    # registrations (INSERT INTO EP.sasepv5, one per function; written once, seen on more than one aggregator).
+    reg: dict[str, int] = {}
+    jobs: dict[str, int] = {}
+    for p in plans:
+        text = p.get("text") or ""
+        dbname = p.get("database") or ""
+        if re.match(r"\s*INSERT\s+INTO\s+`?EP`?\s*\.\s*`?sasepv\d*", text, re.I):
+            reg[dbname] = max(reg.get(dbname, 0), int(p["execs"] or 0))
+        elif kind_of(text) == "job":
+            jobs[dbname] = jobs.get(dbname, 0) + int(p["execs"] or 0)
+    traced_fn = len({(c["db"], c.get("stmt"), round(c["start"])) for c in calls if c["kind"] == "format"})
+    traced_jobs = sum(1 for c in calls if c["kind"] == "job")
+    total_ms = sum(c["ms"] for c in calls)
+    plateau_ms = sum(r["plateau_ms"] for r in rows)
+    fixed_ms = sum(r["plateau"] for r in rows) * (pl["fixed_ms"] if pl else 0)
+    return {
+        "since": since, "calls": len(calls), "ms": round(total_ms), "failed": sum(r["failed"] for r in rows),
+        "plateau": pl, "plateau_calls": sum(r["plateau"] for r in rows), "plateau_ms": round(plateau_ms),
+        "plateau_time_share": round(plateau_ms / total_ms, 3) if total_ms else 0.0,
+        "fixed_wait_ms": round(fixed_ms), "rows": rows,
+        "bursts": len(bs), "shared_bursts": sum(1 for b in bs if b["shared"]), "calls_in_bursts": sum(b["calls"] for b in bs),
+        "all_format_functions": sum(reg.values()) or None, "traced_format_functions": traced_fn,
+        "all_jobs": sum(jobs.values()) or None, "traced_jobs": traced_jobs,
+        "fit": rows_fit(ok),
+    }
+
+
+_SOURCE_LABEL = {"job": "SAS job (sasepFunction)", "format": "SAS VA / CAS (format function)"}
+
+
+def _iso(t: float) -> str | None:
+    return _dt.datetime.fromtimestamp(t, _dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S") if t else None
+
+
+def overview_lines(o: dict[str, Any]) -> list[str]:
+    """The EP overview as text (tool summary)."""
+    if not o or not o.get("calls"):
+        return []
+    pl = o.get("plateau")
+    out = [f"SAS EP: {o['calls']} traced calls, {o['ms'] / 1000:.1f} s in all"
+           + (f"; {o['plateau_calls']} on the {pl['low_ms'] / 1000:.2f}–{pl['high_ms'] / 1000:.2f} s plateau "
+              f"({o['plateau_time_share']:.0%} of the EP time)" if pl else "") + "."]
+    for r in o["rows"][:6]:
+        out.append(f"- {r['source']} {r['database'] or '-'} ({r['user'] or '-'}): {r['calls']} calls, {r['ms'] / 1000:.1f} s, "
+                   f"median {r['median_ms'] / 1000:.2f} s, {r['plateau']} on the plateau")
+    if o.get("all_format_functions"):
+        out.append(f"- the plan cache saw {o['all_format_functions']} VA / CAS EP functions registered; {o['traced_format_functions']} "
+                   "were traced (the rest ran under the trace threshold)")
+    return out
 
 
 def _skew(r: dict[str, Any], ms: float) -> dict[str, Any]:
@@ -553,6 +1112,14 @@ def _data_in(r: dict[str, Any], in_db: str, in_table: str) -> dict[str, Any]:
                 "If the SAS step only needs part of the data, filter it in SAS before the EP call (a WHERE= data set "
                 "option on the input), so SingleStore filters first; a sort key on that column then skips whole "
                 "segments." if big else None)
+        if ncols and ncols >= 8 and point.get("columns_used", 0) >= ncols:
+            # Every column of the input goes through the EP: the SAS step's input has no KEEP= / DROP=.
+            v = point["verdict"]
+            v["text"] += (f" All {ncols} columns of the input go into the EP (like a SELECT *): if the step uses only some, "
+                          "KEEP= / DROP= on the input data set should shrink what is read and sent (check the generated "
+                          "statement after the change).")
+            if rows >= 1_000_000 and v["level"] == "ok":
+                v["level"] = "warn"
     else:
         point["verdict"] = _verdict(
             "info", "The statement the EP generated for this job (CREATE TABLE … AS SELECT … FROM the input AS sasepin "

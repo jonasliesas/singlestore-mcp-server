@@ -1,7 +1,8 @@
 """Shared test plumbing (used by tests/conftest.py and perf/perf.py).
 
 * ``isolated_home``: a throwaway SINGLESTORE_MCP_HOME seeded from the real ~/.singlestore-mcp
-  (SAS settings, query history cache, CA bundle; the notebook Python env through a directory junction).
+  (SAS Viya connections, query history cache, CA bundle; the notebook Python env through a directory junction).
+  S2_TEST_SAS_URL / S2_TEST_SAS_CONNECTION / S2_TEST_SAS_CONTEXT choose the SAS Viya connection (see ``seed_sas``).
 * ``server_env``: the environment the test server runs with: the isolated home, which holds a copy of
   your saved connections (passwords stay in the OS credential store), so the test server uses your
   active connection – or the one named in S2_TEST_CONNECTION. Only without saved connections does it
@@ -115,6 +116,7 @@ def seed_home(home: Path) -> dict[str, Any]:
         if src.is_dir() and not (home / name).exists():
             _make_junction(home / name, src)
             done["linked"].append(name)
+    seed_sas(home)
     wanted = os.environ.get("S2_TEST_CONNECTION")
     if wanted and (home / "connections.json").is_file():
         data = json.loads((home / "connections.json").read_text(encoding="utf-8"))
@@ -123,6 +125,46 @@ def seed_home(home: Path) -> dict[str, Any]:
         data["active"] = wanted
         (home / "connections.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
     return done
+
+
+def seed_sas(home: Path) -> None:
+    """The test home's sas.json in the current format (a list of SAS Viya connections, one active).
+
+    An old single-settings file is converted here, so the test server never migrates it (migrating moves the
+    sign-in in the OS credential store, which the real server shares). S2_TEST_SAS_URL adds (or updates) a
+    connection with that Viya address and makes it active, named S2_TEST_SAS_CONNECTION (default "Test Viya");
+    S2_TEST_SAS_CONTEXT sets its compute context. S2_TEST_SAS_CONNECTION alone picks a saved connection.
+    The sign-in itself: the test server's own (encrypted file, see S2_TEST_SAS_SECRETS) or the SAS Viya MCP
+    server's / CLI's cached sign-in to the same Viya.
+    """
+    path = home / "sas.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data.get("connections"), list):
+        url = str(data.get("url") or "").strip().rstrip("/")
+        conns = []
+        if url:
+            host = url.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+            conns = [{**{k: v for k, v in data.items() if k != "url"}, "name": host or "SAS Viya", "url": url}]
+        data = {"version": 2, "active": conns[0]["name"] if conns else None, "connections": conns}
+    name = os.environ.get("S2_TEST_SAS_CONNECTION")
+    url = os.environ.get("S2_TEST_SAS_URL", "").strip().rstrip("/")
+    if url:
+        name = name or "Test Viya"
+        conn = next((c for c in data["connections"] if c.get("name") == name), None)
+        if conn is None:
+            conn = {"name": name}
+            data["connections"].append(conn)
+        conn["url"] = url
+        if os.environ.get("S2_TEST_SAS_CONTEXT"):
+            conn["compute_context"] = os.environ["S2_TEST_SAS_CONTEXT"]
+    if name:
+        if not any(c.get("name") == name for c in data["connections"]):
+            raise LookupError(f"S2_TEST_SAS_CONNECTION: no saved SAS Viya connection named {name!r}")
+        data["active"] = name
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 def _has_saved_connections(home: Path) -> bool:
@@ -140,6 +182,7 @@ def server_env(home: Path, sql_dir: Path, extra: dict[str, str] | None = None) -
         "SINGLESTORE_MCP_HOME": str(home),
         "SINGLESTORE_MCP_SQL_DIR": str(sql_dir),
         "SINGLESTORE_MCP_ALERTS": "0",
+        "SINGLESTORE_MCP_METRICS": "0",  # no background metrics sampler (tests take samples with sample_now)
         "PYTHONIOENCODING": "utf-8",
     })
     env.update(extra or {})

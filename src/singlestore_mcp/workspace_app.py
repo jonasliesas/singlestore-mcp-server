@@ -200,6 +200,9 @@ def main() -> None:
     from . import alerts
 
     alerts.start()  # background alert checks while the workspace server runs
+    from . import metrics_store
+
+    metrics_store.start()  # metrics history for the Cluster Monitor (SINGLESTORE_MCP_METRICS=0 turns it off)
     _state_file().write_text(json.dumps(state), encoding="utf-8")
     if opts.no_open:
         print(_workspace_url(state, args), flush=True)
@@ -216,6 +219,7 @@ def main() -> None:
         from . import assistant
 
         alerts.stop(timeout=2.0)
+        metrics_store.stop(timeout=2.0)
         assistant._close_all()
 
 
