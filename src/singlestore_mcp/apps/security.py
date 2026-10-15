@@ -4,6 +4,7 @@ The model-visible tools (``security``, ``who_can_access``, ``user_privileges``, 
 this view on the matching tab and only read; the page loads each tab through one app-only tool (one ``db.parallel``
 batch). Changes (v2, ..security_admin) go through two app-only tools: ``security_change_plan`` (read-only preview)
 and ``security_change_apply`` (refuses without ``confirm=True``, and without the typed name where the plan asks).
+``security_change_script`` (read-only) writes changes out as a .sql script for a DBA instead of running them.
 """
 
 from __future__ import annotations
@@ -163,9 +164,10 @@ def security_admin_capabilities() -> CallToolResult:
 
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
-def security_change_plan(action: dict) -> CallToolResult:
+def security_change_plan(action: dict, pending: list[dict] | None = None) -> CallToolResult:
     """Read-only preview of one change: the exact statements (any password masked), warnings, blockers (lock-out,
     last admin, missing objects) and whether the user must type the object's name to confirm. Runs nothing.
+    Works without the change privileges (``allowed`` says whether the connected user may run it).
 
     Args:
         action: {"action": one of create_user, drop_user, grant, revoke, revoke_all, create_role, drop_role,
@@ -173,9 +175,28 @@ def security_change_plan(action: dict) -> CallToolResult:
             drop_pool, set_default_pool, grant_pool, revoke_pool, plus its fields: user, host, role, group,
             grantee_type ("user"/"role"), privileges, database, table, with_grant_option, grant_option, pool,
             settings, default_pool}. Never a password.
+        pending: The changes already in the script basket (same shape), for a change that needs objects they
+            create (the plan then says ``needs_script``).
     """
-    data = adm.plan({k: v for k, v in (action or {}).items() if k != "password"})
+    data = adm.plan({k: v for k, v in (action or {}).items() if k != "password"}, pending)
     return tool_result(adm.summary(data), data)
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def security_change_script(actions: list[dict], keep_order: bool = False) -> CallToolResult:
+    """Read-only: one or more changes as a SQL script for review (e.g. by a DBA), instead of running them. The
+    statements are what Run would execute, rebuilt from the cluster state now (each change checked as if the
+    earlier ones had run), in a safe order (creates, grants, revokes, drops) unless ``keep_order``, with a header
+    (connection, connected user, time, one line per change) and each change's warnings as ``-- WARNING:``
+    comments. Runs nothing and needs none of the change privileges. Never takes or writes a password: CREATE USER
+    gets ``IDENTIFIED BY '<set password>'`` to fill in.
+
+    Args:
+        actions: The changes, each the same object as for security_change_plan.
+        keep_order: Keep the given order instead of the safe order.
+    """
+    data = adm.script(list(actions or []), keep_order)
+    return tool_result(data["script"], data)
 
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=WRITE)

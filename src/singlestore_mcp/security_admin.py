@@ -9,6 +9,10 @@ Every change goes through two steps:
    blocker, a missing confirmation or a wrong typed name, and runs the statements one by one (stopping at the
    first error).
 
+``script(actions)`` (read-only) writes one or more planned changes out as a reviewable .sql script for a DBA
+instead: same statements, safe order, warnings as comments, no password (a ``'<set password>'`` placeholder), and it
+needs none of the change privileges.
+
 Passwords: only ``create_user`` takes one. It is sent to SingleStore as a bound parameter, shown as
 ``'********'`` in every statement, result and error text, and never logged or stored. Every statement starts with
 ``/* s2-security-change */``; the local Query History store leaves "/* s2-" statements out.
@@ -784,20 +788,267 @@ def public(plan_: dict[str, Any]) -> dict[str, Any]:
     return {**plan_, "statements": [s["display"] for s in plan_["statements"]]}
 
 
-def _check_allowed(ctx: dict[str, Any], kind: str) -> None:
+def _allowed(ctx: dict[str, Any], kind: str) -> dict[str, Any]:
     cap = capabilities(ctx).get(_ACTION_CAP.get(kind, ""), {"ok": True})
-    if not cap["ok"]:
-        raise ChangeError(f"Not allowed for {ctx['me']['user']}@{ctx['me']['host']}: {cap['reason']}")
+    return {"ok": bool(cap["ok"]), "reason": None if cap["ok"] else cap["reason"]}
 
 
-def plan(action: dict[str, Any]) -> dict[str, Any]:
-    """Read-only: the statements and checks for one change. No password is taken (it shows masked)."""
-    ctx = load_context()
-    _check_allowed(ctx, action.get("action", ""))
+def _check_allowed(ctx: dict[str, Any], kind: str) -> None:
+    a = _allowed(ctx, kind)
+    if not a["ok"]:
+        raise ChangeError(f"Not allowed for {ctx['me']['user']}@{ctx['me']['host']}: {a['reason']}")
+
+
+def _plan_on(ctx: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    """The plan without a password: CREATE USER shows it masked; the "enter a password" checks are left out."""
     p = build(ctx, action, password="********" if action.get("action") == "create_user" else None)
     p["blockers"] = [b for b in p["blockers"] if not b.startswith("Enter a password")]
     p["warnings"] = [w for w in p["warnings"] if not w.startswith("The password is shorter")]
+    return p
+
+
+def plan(action: dict[str, Any], pending: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Read-only: the statements and checks for one change. No password is taken (it shows masked).
+
+    Works without the change privileges too (for a script a DBA runs): ``allowed`` says whether the connected user
+    may run it. ``pending`` (the script basket) is used only when the change needs objects the basket creates; the
+    plan then has ``needs_script`` (it can go into the script, but can't run now)."""
+    action = _no_password(action)
+    ctx = load_context()
+    try:
+        p = _plan_on(ctx, action)
+        p["needs_script"] = False
+    except ChangeError:
+        if not pending:
+            raise
+        p = _plan_on(_with_pending(ctx, pending), action)
+        p["needs_script"] = True
+        p["warnings"].insert(0, "Uses objects that changes earlier in the script create: it can go into the script, "
+                                "but can't run on its own now.")
+    p["allowed"] = _allowed(ctx, action.get("action", ""))
     return public(p)
+
+
+# ----------------------------------------------------------------------------- SQL scripts (nothing runs)
+# The same plans as Run, written out as a .sql script for someone else (a DBA) to review and run. Read-only:
+# reads the cluster state for the checks, never runs a change, needs none of the change privileges, and never
+# holds a password (CREATE USER gets a placeholder the DBA replaces).
+
+SCRIPT_PASSWORD = "'<set password>'"
+# Safe order: creates (pools before the users that use them, roles and groups before grants), then grants and
+# changes, then revokes, then drops (users before the groups, roles and pools they use).
+_SCRIPT_ORDER = [
+    "create_pool", "create_role", "create_group", "create_user",
+    "alter_pool", "grant", "grant_role", "grant_group", "grant_pool", "set_default_pool",
+    "revoke", "revoke_all", "revoke_role", "revoke_group", "revoke_pool",
+    "drop_user", "drop_group", "drop_role", "drop_pool",
+]
+_PHASE = {k: (0 if i < 4 else 1 if i < 10 else 2 if i < 15 else 3) for i, k in enumerate(_SCRIPT_ORDER)}
+_PHASE_RANK = {k: i for i, k in enumerate(_SCRIPT_ORDER)}
+MAX_SCRIPT_ITEMS = 200
+
+
+def _no_password(action: Any) -> dict[str, Any]:
+    if not isinstance(action, dict):
+        raise ChangeError("Each change must be an object with an \"action\"")
+    return {k: v for k, v in action.items() if k != "password"}
+
+
+def script_order(actions: list[dict[str, Any]], keep_order: bool = False) -> list[int]:
+    """Indexes of ``actions`` in script order: by kind (see _SCRIPT_ORDER), the given order within a kind group
+    (creates sorted by dependency: pools, roles, groups, users; drops the other way round)."""
+    idx = list(range(len(actions)))
+    if keep_order:
+        return idx
+
+    def key(i: int) -> tuple[int, int, int]:
+        kind = actions[i].get("action", "")
+        phase = _PHASE.get(kind, 1)
+        # creates and drops: by dependency rank; grants / revokes: the user's order
+        sub = _PHASE_RANK.get(kind, 0) if phase in (0, 3) else 0
+        return phase, sub, i
+
+    return sorted(idx, key=key)
+
+
+def _advance(ctx: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    """The context after the action ran (for the checks of later changes in the same script)."""
+    c = {**ctx, **copy.deepcopy({k: ctx[k] for k in ("users", "global", "grantable", "schema", "table", "user_groups",
+                                                     "group_roles", "roles", "groups", "role_privs", "pools", "pool_grants")})}
+    kind = action["action"]
+    user = action.get("user")
+    host = action.get("host") if action.get("host") is not None else "%"
+    g = sec.grantee(str(user).strip(), host) if user else None
+    if kind == "create_user" and g:
+        c["users"][g] = {"user": str(user).strip(), "host": host, "connections": 0, "default_pool": action.get("default_pool") or None}
+    elif kind == "create_role":
+        c["roles"].add(str(action.get("role")).strip())
+    elif kind == "create_group":
+        c["groups"].add(str(action.get("group")).strip())
+    elif kind == "create_pool":
+        c["pools"][action["pool"].strip()] = {k.lower(): v for k, v in pool_settings(action.get("settings"), ctx["cpu_mode"])}
+    elif kind == "alter_pool":
+        c["pools"].setdefault(action["pool"], {}).update({k.lower(): v for k, v in pool_settings(action.get("settings"), ctx["cpu_mode"])})
+    elif kind == "drop_pool":
+        c["pools"].pop(action.get("pool"), None)
+    elif kind == "drop_role":
+        c["roles"].discard(action.get("role"))
+    elif kind == "drop_group":
+        c["groups"].discard(action.get("group"))
+    elif kind == "grant_role":
+        c["group_roles"].setdefault(action.get("group"), set()).add(action.get("role"))
+    elif kind == "grant_group" and g:
+        c["user_groups"].setdefault(g, set()).add(action.get("group"))
+    elif kind == "set_default_pool" and g in c["users"]:
+        c["users"][g]["default_pool"] = action.get("pool")
+    elif kind in ("grant_pool", "revoke_pool"):
+        target = g if action.get("grantee_type", "user") == "user" else None
+        if target and kind == "grant_pool":
+            c["pool_grants"].append((target, action.get("pool")))
+        elif target:
+            c["pool_grants"] = [pg for pg in c["pool_grants"] if pg != (target, action.get("pool"))]
+    elif kind in ("grant", "revoke"):
+        privs = {" ".join(str(p).upper().split()) for p in action.get("privileges") or []}
+        db_, tb = action.get("database") or None, action.get("table") or None
+        if action.get("grantee_type") == "role":
+            bucket = c["role_privs"].setdefault(action.get("role"), {}).setdefault((db_, tb), set())
+        elif g:
+            if not db_:
+                bucket = c["global"].setdefault(g, set())
+            elif not tb:
+                bucket = c["schema"].setdefault(g, {}).setdefault(db_, set())
+            else:
+                bucket = c["table"].setdefault(g, {}).setdefault((db_, tb), set())
+            if kind == "grant" and action.get("with_grant_option") and not db_:
+                c["grantable"][g] = True
+        else:
+            bucket = set()
+        if kind == "grant":
+            bucket.update(privs)
+        else:
+            bucket.difference_update(privs)
+    elif kind == "revoke_all" and g and action.get("grantee_type", "user") == "user":
+        c["schema"].pop(g, None)
+        c["table"].pop(g, None)
+    after = simulate(c, action)  # drops, revokes, removals (what the admin checks read)
+    return {**c, **{k: after[k] for k in ("users", "global", "grantable", "user_groups", "group_roles", "role_privs")}}
+
+
+def _with_pending(ctx: dict[str, Any], pending: list[dict[str, Any]]) -> dict[str, Any]:
+    """The context after the (valid) changes of the script basket, in script order; invalid ones are skipped."""
+    actions = [_no_password(a) for a in pending[:MAX_SCRIPT_ITEMS]]
+    for i in script_order(actions):
+        try:
+            _plan_on(ctx, actions[i])
+            ctx = _advance(ctx, actions[i])
+        except (ChangeError, KeyError, TypeError, ValueError):
+            continue
+    return ctx
+
+
+def _script_statements(p: dict[str, Any]) -> list[str]:
+    """The statements as the preview shows them, with the masked password replaced by the placeholder."""
+    out = []
+    for s in p["statements"]:
+        text = s["display"]
+        if p["action"] == "create_user":
+            text = text.replace(f"IDENTIFIED BY {MASK}", f"IDENTIFIED BY {SCRIPT_PASSWORD}")
+        out.append(text)
+    return out
+
+
+def _one_line(text: str, n: int = 110) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_]+", "-", text).strip("-").lower()[:40] or "change"
+
+
+def _connection_label() -> str:
+    try:
+        from . import connections
+
+        p = connections.active()
+    except Exception:  # noqa: BLE001 - the label is informational
+        p = None
+    if p is None:
+        return "(unknown connection)"
+    return f"{p.name} ({p.host}:{p.port})" if p.host else p.name  # never the URL: it can hold a password
+
+
+def script(actions: list[dict[str, Any]], keep_order: bool = False, now: Any = None) -> dict[str, Any]:
+    """A reviewable SQL script for one or more changes: the statements Run would execute (built by the same plan
+    builder from the cluster state now, each change checked as if the earlier ones had run), in a safe order,
+    with a header and each change's warnings as ``-- WARNING:`` comments. Runs nothing and needs none of the
+    change privileges. Never holds a password: CREATE USER gets ``IDENTIFIED BY '<set password>'``."""
+    import datetime as _dt
+
+    if not actions:
+        raise ChangeError("Add at least one change to the script")
+    if len(actions) > MAX_SCRIPT_ITEMS:
+        raise ChangeError(f"At most {MAX_SCRIPT_ITEMS} changes in one script")
+    acts = [_no_password(a) for a in actions]
+    ctx = load_context()
+    me = f"{ctx['me']['user']}@{ctx['me']['host']}"
+    items: list[dict[str, Any]] = []
+    for n, i in enumerate(script_order(acts, keep_order), 1):
+        a = acts[i]
+        title = ACTIONS.get(a.get("action"), str(a.get("action")))
+        try:
+            p = _plan_on(ctx, a)
+        except ChangeError as exc:
+            raise ChangeError(f"Change {i + 1} ({title}): {exc}") from None
+        if p["blockers"]:
+            raise ChangeError(f"Change {i + 1} ({title}) is blocked: " + " ".join(p["blockers"]))
+        allowed = _allowed(ctx, a["action"])
+        statements = _script_statements(p)
+        warnings = list(p["warnings"])
+        if a["action"] == "create_user":
+            warnings.insert(0, "Replace '<set password>' with the new user's password before running (the "
+                               "script never holds a real password).")
+        items.append({"n": n, "index": i, "action": a["action"], "title": p["title"], "statements": statements,
+                      "warnings": warnings, "summary": f"{p['title']}: {_one_line(statements[0].rstrip(';'), 90)}" if statements else p["title"],
+                      "allowed": allowed})
+        ctx = _advance(ctx, a)
+
+    stamp = now or _dt.datetime.now().astimezone()
+    conn = _connection_label()
+    head = [
+        "-- SingleStore security changes - SQL script for review",
+        "-- Generated by the SingleStore MCP Workspace (Security view). Nothing has been run.",
+        f"-- Connection: {conn}",
+        f"-- Prepared by: {me} on {stamp.strftime('%Y-%m-%d %H:%M %z').strip()}",
+        f"-- Changes ({len(items)}):",
+        *[f"--   {it['n']}. {it['summary']}" for it in items],
+        "-- Order: " + ("as listed by the author." if keep_order else
+                        "creates, then grants and other changes, then revokes, then drops."),
+        "-- Checked against the cluster as it was when the script was made; review it before running.",
+    ]
+    if any(it["action"] == "create_user" for it in items):
+        head.append("-- WARNING: CREATE USER has the placeholder '<set password>': set a real password before running.")
+    lacking = sorted({it["allowed"]["reason"] for it in items if not it["allowed"]["ok"]})
+    if lacking:
+        head.append(f"-- NOTE: {me} can't run all of this; whoever runs it needs: " + " ".join(lacking))
+    body: list[str] = []
+    for it in items:
+        body += ["", f"-- {it['n']}. {it['title']}"]
+        body += [f"-- WARNING: {_one_line(w, 400)}" for w in it["warnings"]]
+        body += it["statements"]
+    text = "\n".join(head + body) + "\n"
+    if len(items) == 1:
+        a = acts[items[0]["index"]]
+        obj = next((a[k] for k in ("user", "role", "group", "pool") if a.get(k)), "")
+        what = _slug(f"{a['action'].replace('_', '-')}-{obj}")
+    else:
+        what = f"{len(items)}-changes"
+    return {
+        "script": text, "count": len(items), "statements": sum(len(it["statements"]) for it in items),
+        "items": [{k: it[k] for k in ("n", "index", "action", "title", "summary", "statements", "warnings", "allowed")} for it in items],
+        "file_name": f"security-{stamp.strftime('%Y%m%d-%H%M')}-{what}.sql",
+        "connection": conn,
+    }
 
 
 def apply(action: dict[str, Any], confirm: bool = False, typed: str | None = None, password: str | None = None) -> dict[str, Any]:

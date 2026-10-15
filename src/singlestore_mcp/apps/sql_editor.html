@@ -37,7 +37,16 @@
   .sq-files .item:hover, .sq-files .item:focus-visible { background: var(--s2-info-bg); }
   .sq-files .item .n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--s2-mono); }
   .sq-files .item .m { color: var(--s2-text-3); white-space: nowrap; }
+  .sq-files .sq-locs { margin-bottom: 6px; }
+  .sq-file .viyawarn { color: var(--s2-warn, #b45309); margin-left: 6px; }
   .sq-files .warn { color: var(--s2-warn); }
+  /* Open / Save as: a large dialog over the editor so the folder tree is easy to browse. */
+  .sq-files.dialog { position: fixed; inset: 4vh 4vw; z-index: 60; margin: 0; display: flex; flex-direction: column; padding: 12px 14px;
+    font-size: var(--s2-fs-sm); box-shadow: 0 0 0 100vmax rgba(0,0,0,.35), 0 10px 40px rgba(0,0,0,.3); }
+  .sq-files.dialog .sq-browser { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .sq-files.dialog .sq-browser .list { flex: 1; min-height: 120px; max-height: none; }
+  .sq-files.dialog .list.recent { max-height: 22vh; }
+  .sq-files.dialog .item { padding: 6px 10px; }
   .sq-files .sub { margin-top: 2px; font-weight: var(--font-weight-semibold, 600); color: var(--s2-text-2); }
   .sq-files .recent { max-height: 130px; margin-bottom: 8px; }
   .sq-origin { display: inline-flex; align-items: center; gap: 4px; font-size: var(--s2-fs-xs); }
@@ -253,7 +262,7 @@ const sas = {
 async function loadViya(force = false) {
   if (sas.viya && !force) return;
   try { sas.viya = await S2.callTool("sas_connections_state", {}); } catch { sas.viya = null; }
-  renderHeader(); renderSasPanel();
+  renderHeader(); renderSasPanel(); renderFileLabel();
 }
 function forgetSas() {
   sas.status = null; sas.libs = null; sas.caslibs = null; sas.libsError = null; sas.casError = null; sas.tables.clear(); sas.columns.clear();
@@ -266,7 +275,7 @@ async function switchViya(name) {
   forgetSas();
   if (S2.embedded()) window.parent.postMessage({ type: "s2-sas-connection-changed", name }, "*");
   S2.toast(`SAS Viya connection: ${name}`, "ok");
-  renderSasPanel();
+  renderSasPanel(); renderFileLabel();
   if (isSas()) loadSasLibraries(true); else renderHeader();
 }
 function viyaPick({ always = false } = {}) {
@@ -281,6 +290,7 @@ function viyaPick({ always = false } = {}) {
 window.addEventListener("s2:sas-connection-changed", () => {
   forgetSas(); sas.viya = null;
   if (isSas()) { loadViya(true); loadSasLibraries(true); }
+  else if (viyaRef(file.path)) loadViya(true);  // its file label says when the file is on another connection
 });
 const srcOf = (lang = state.language) => (lang === "cas" ? "cas" : "sas");
 const curLib = (lang = state.language) => (lang === "cas" ? state.sasOpts.caslib : state.sasOpts.library);
@@ -390,7 +400,8 @@ const chatView = h("aside", { class: "sq-chat", hidden: true, "aria-label": "Cha
     h("label", {}, includeSql, " Include the editor's SQL and last result"),
     h("label", {}, "Answer ", modeSelect), profileLabel, modeHint));
 const fileLabel = h("span", { class: "sq-file" });
-const filePanel = h("div", { class: "sq-files", hidden: true });
+const filePanel = h("div", { class: "sq-files", hidden: true,
+  onkeydown: (e) => { if (e.key === "Escape" && filePanel.classList.contains("dialog")) { e.stopPropagation(); hideFilePanel(); view.focus(); } } });
 const histPanel = h("div", { class: "sq-files sq-hist", hidden: true, "aria-label": "Run history" });
 const wlPanel = h("div", { class: "sq-files sq-towl", hidden: true, role: "group", "aria-label": "Send to a workload" });
 const sasPanel = h("div", { class: "sq-files sq-sasopts", hidden: true, role: "group", "aria-label": "SAS options" });
@@ -1759,7 +1770,7 @@ function renderHeader() {
     ? h("select", { class: "s2-input", "aria-label": "Recent files", title: "Open a recently used .sql file",
         onchange: (e) => { const r = state.recent[+e.target.value]; e.target.value = ""; if (r) openServerFile(r.path); } },
         h("option", { value: "" }, "Recent"),
-        state.recent.map((r, i) => h("option", { value: String(i), title: r.path }, r.name)))
+        state.recent.map((r, i) => h("option", { value: String(i), title: fileTitle(r.path) }, `${r.name}${viyaRef(r.path) ? ` (${viyaRef(r.path).label})` : ""}`)))
     : null;
   // "Run as": what this tab's SQL runs as; the picker next to it lists databases, SAS libraries or caslibs.
   const runAs = h("select", { class: "s2-input sq-runas", "data-lang": state.language, "aria-label": "Run as",
@@ -1798,10 +1809,10 @@ function renderHeader() {
       onclick: () => toggleHistory() }, `History${state.historyCount ? ` (${state.historyCount})` : ""}`),
     h("span", { class: "sq-filebtns" },
       h("button", { class: "s2-btn ghost", title: tabbed() ? "Open a new, empty tab (Ctrl+Alt+N)" : "Start a new, empty editor", onclick: () => newFile() }, "New"),
-      h("button", { class: "s2-btn ghost", title: "Open a .sql file", onclick: () => showFilePanel("open") }, "Open"),
+      h("button", { class: "s2-btn ghost", title: "Open a .sql or .sas file: on this computer, in SAS Content or on the SAS server", onclick: () => showFilePanel("open") }, "Open"),
       recentSelect,
       h("button", { class: "s2-btn ghost", title: "Save (Ctrl+S)", onclick: () => saveFile() }, "Save"),
-      h("button", { class: "s2-btn ghost", title: "Save under a new name", onclick: () => showFilePanel("save") }, "Save as"),
+      h("button", { class: "s2-btn ghost", title: "Save under a new name or in another place (this computer, SAS Content, SAS server)", onclick: () => showFilePanel("save") }, "Save as"),
       fileLabel),
     h("button", { class: "s2-btn ghost", "aria-pressed": String(!wlPanel.hidden),
       title: "Add the selection, the statement at the cursor or every statement in this tab to a test workload (Workload view)",
@@ -1819,7 +1830,24 @@ function renderHeader() {
 // server (sql_editor_files / _open_file / _save_file), so they work inside
 // Claude and in the browser view. "Browse computer…" reads any local file
 // with the browser's own file picker; saving it again goes to the folder.
-const file = { name: null, path: null, external: false, savedText: "", savedHash: null, folder: null };
+const file = { name: null, path: null, external: false, savedText: "", savedHash: null, folder: null, version: null };
+
+// Files on SAS Viya are named by refs (the server's viya_files): sas-content://<connection>/<path> (SAS Content)
+// and sas-server://<connection>/<path> (the SAS Compute server's file system). ``file.version`` is the version
+// (ETag) opened or last saved: Save sends it, so a newer version on Viya is never overwritten without asking.
+const VIYA_LOCS = { content: { scheme: "sas-content://", label: "SAS Content" }, server: { scheme: "sas-server://", label: "SAS Server" } };
+function viyaRef(p) {
+  if (typeof p !== "string") return null;
+  for (const [loc, v] of Object.entries(VIYA_LOCS)) {
+    if (!p.startsWith(v.scheme)) continue;
+    const rest = p.slice(v.scheme.length), i = rest.indexOf("/");
+    if (i > 0) return { loc, connection: rest.slice(0, i), path: rest.slice(i), label: v.label };
+  }
+  return null;
+}
+const fileTitle = (p) => { const r = viyaRef(p); return r ? `${r.label} (${r.connection}): ${r.path}` : p; };
+// The file belongs to another SAS Viya connection than the active one (Save then asks).
+const viyaElsewhere = () => { const r = viyaRef(file.path); return r && sas.viya?.active && r.connection !== sas.viya.active ? r : null; };
 const fileInput = h("input", { type: "file", accept: ".sql,.sas,.txt,text/plain", hidden: true, onchange: (e) => openLocalFile(e.target.files?.[0]) });
 document.body.append(fileInput);
 
@@ -1842,11 +1870,12 @@ const isDirty = () => (file.savedText != null ? view.state.doc.toString() !== fi
 function renderFileLabel() {
   const name = file.name ?? "untitled";
   const autosaved = draft.savedAt ? `\nEditor text autosaved at ${new Date(draft.savedAt * 1000).toLocaleTimeString()} (restored when the editor opens again)` : "";
-  fileLabel.title = (file.name ? (file.external ? `${file.name} (opened from your computer; Save stores a copy in the SQL folder)` : (file.path ?? `${file.folder ?? "SQL folder"}\\${file.name}`)) : "Not saved to a file yet") + autosaved;
+  fileLabel.title = (file.name ? (file.external ? `${file.name} (opened from your computer; Save stores a copy in the SQL folder)` : (fileTitle(file.path) ?? `${file.folder ?? "SQL folder"}\\${file.name}`)) : "Not saved to a file yet") + autosaved;
   const dirty = hasUnsaved();
+  const elsewhere = viyaElsewhere();
   fileLabel.replaceChildren(name, dirty
     ? h("span", { class: "dirty", title: file.name ? "Modified: changes not saved to the file yet (kept as an autosaved draft)" : "Not saved to a file (kept as an autosaved draft)" }, file.name ? "● modified" : "●")
-    : "");
+    : "", elsewhere ? h("span", { class: "viyawarn", title: `This file is on the SAS Viya connection "${elsewhere.connection}"; the active one is "${sas.viya.active}". Save asks where to save it.` }, `⚠ on Viya ${elsewhere.connection}`) : "");
   reportTitle(dirty);
 }
 // Text not saved to a file: an open file with changes, or text in an untitled editor.
@@ -1861,19 +1890,20 @@ function reportTitle(dirty = hasUnsaved()) {
   lastTitle = key;
   window.parent.postMessage(msg, "*");
 }
-function setFile(name, text, { external = false, path = null } = {}) {
+function setFile(name, text, { external = false, path = null, version = null } = {}) {
   // File type sets the language: .sas → PROC SQL, .sql → SingleStore SQL.
   if (name && /\.sas$/i.test(name) && !isSas()) setLanguage("procsql", { quiet: true });
   else if (name && /\.sql$/i.test(name) && isSas()) setLanguage("singlestore", { quiet: true });
   setSql(text);
-  file.name = name; file.external = external; file.path = external ? null : path;
+  file.name = name; file.external = external; file.path = external ? null : path; file.version = version;
   setSaved(text);
+  if (viyaRef(file.path)) loadViya();
   renderFileLabel();
   view.focus();
 }
 const ago = (t) => { const s = Date.now() / 1000 - t; return s < 90 ? "just now" : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 129600 ? `${Math.round(s / 3600)} h ago` : new Date(t * 1000).toLocaleDateString(); };
 
-function hideFilePanel() { filePanel.hidden = true; filePanel.replaceChildren(); }
+function hideFilePanel() { filePanel.hidden = true; filePanel.classList.remove("dialog"); filePanel.replaceChildren(); }
 const dirOf = (p) => (p ? p.replace(/[\\/][^\\/]*$/, "") : null);
 const baseOf = (p) => (p ? p.split(/[\\/]/).pop() : null);
 
@@ -1885,17 +1915,48 @@ function rememberRecent(path, name) {
   renderHeader();
 }
 
-function showFilePanel(mode) {
+const FILE_LOCS = [
+  { id: "local", label: "This computer", title: "Files on this computer (the SQL folder and your user folder)" },
+  { id: "content", label: "SAS Content", title: "SAS Content on the active SAS Viya connection: My Folder, Public and other folders you can see" },
+  { id: "server", label: "SAS Server", title: "The SAS Compute server's file system (as in SAS Studio's SAS Server), through the Workspace's SAS session" },
+];
+function fileLocDefault() {
+  const r = viyaRef(file.path);
+  if (r) return r.loc;
+  try { const l = localStorage.getItem("s2-file-loc"); return FILE_LOCS.some((x) => x.id === l) ? l : "local"; } catch { return "local"; }
+}
+function showFilePanel(mode, loc = fileLocDefault()) {
+  try { localStorage.setItem("s2-file-loc", loc); } catch {}
   filePanel.hidden = false;
-  const browser = h("div");
+  filePanel.classList.add("dialog");
+  const browser = h("div", { class: "sq-browser" });
   const recent = mode === "open" && state.recent.length
     ? [h("div", { class: "row sub" }, "Recent"),
-       h("div", { class: "list recent" }, state.recent.map((r) => h("button", { class: "item", title: r.path, onclick: () => openServerFile(r.path) },
-         h("span", { class: "n" }, `📄 ${r.name}`), h("span", { class: "m" }, r.t ? ago(r.t) : ""))))]
+       h("div", { class: "list recent" }, state.recent.map((r) => h("button", { class: "item", title: fileTitle(r.path), onclick: () => openServerFile(r.path) },
+         h("span", { class: "n" }, `${viyaRef(r.path) ? "☁" : "📄"} ${r.name}`), h("span", { class: "m" }, [viyaRef(r.path)?.label, r.t ? ago(r.t) : ""].filter(Boolean).join(" · ")))))]
     : [];
-  filePanel.replaceChildren(...recent, browser);
+  // Where to open from / save to: this computer (the SQL folder), SAS Content or the SAS server (active Viya connection).
+  const locBar = h("div", { class: "row sq-locs", role: "tablist", "aria-label": "Location" },
+    FILE_LOCS.map((l) => h("button", { class: `s2-btn ghost${l.id === loc ? " primary" : ""}`, role: "tab", "aria-selected": String(l.id === loc),
+      title: l.title, onclick: () => showFilePanel(mode, l.id) }, l.label)));
+  filePanel.replaceChildren(locBar, ...recent, browser);
+  const name = baseOf(file.name) ?? (isSas() ? "program.sas" : "query.sql");
+  if (loc !== "local") {
+    const cur = viyaRef(file.path);
+    S2.fileBrowser(browser, {
+      kind: "sql", mode, name, storageKey: `s2-browse-viya-${loc}`, start: cur?.loc === loc ? dirOf(cur.path) : null,
+      showAll: true, empty: "No .sql or .sas files or folders here",
+      list: (path, all) => S2.callTool("viya_files_browse", { location: loc, path, show_all: all }),
+      mkdir: mode === "save" ? (parent, folder) => S2.callTool("viya_files_mkdir", { location: loc, parent, name: folder }) : null,
+      onOpen: (path, f) => openServerFile(f?.ref ?? path),
+      onSave: (path, overwrite, listing) => saveAs(listing.ref_prefix + path, overwrite),
+      onClose: hideFilePanel,
+      extra: [h("button", { class: "s2-btn ghost", title: "Sign in to SAS Viya or switch the active SAS Viya connection", onclick: () => S2.openView("connections") }, "Connections…")],
+    });
+    return;
+  }
   S2.fileBrowser(browser, {
-    kind: "sql", mode, start: dirOf(file.path), name: baseOf(file.name) ?? (isSas() ? "program.sas" : "query.sql"),
+    kind: "sql", mode, start: viyaRef(file.path) ? null : dirOf(file.path), name,
     onOpen: (path) => openServerFile(path),
     onSave: (path, overwrite) => saveAs(path, overwrite),
     onClose: hideFilePanel,
@@ -1908,25 +1969,61 @@ function showFilePanel(mode) {
 // Returns the tool result ({exists} asks the browser to confirm); throws on errors.
 async function saveAs(name, overwrite) {
   const res = await S2.callTool("sql_editor_save_file", { name, sql: view.state.doc.toString(), overwrite });
-  if (res.exists) return res;
-  file.name = res.name; file.path = res.path; file.external = false; file.folder = res.folder;
+  if (res.exists || res.conflict) return { ...res, exists: true };  // the file browser asks "Replace it?"
+  savedTo(res);
+  return res;
+}
+function savedTo(res) {
+  file.name = res.name; file.path = res.path; file.external = false; file.folder = res.folder; file.version = res.version ?? null;
   setSaved(view.state.doc.toString());
   rememberRecent(res.path, res.name);
   renderFileLabel(); hideFilePanel(); scheduleDraftSave();
-  S2.toast(`Saved ${res.name}`, "ok");
+  S2.toast(`Saved ${viyaRef(res.path) ? fileTitle(res.path) : res.name}`, "ok");
   view.focus();
-  return res;
 }
 
 async function saveFile() {
   if (!file.name || file.external) return showFilePanel("save");
+  if (viyaRef(file.path)) return saveViya();
   try { await saveAs(file.path ?? file.name, true); } catch (e) { S2.toast(`Couldn't save: ${cleanError(e).message}`, "err"); }
+}
+
+// Save a file on SAS Viya where it came from. The server checks the version the editor opened: a newer one
+// on Viya (conflict), a file of another Viya connection or an existing file is asked about first.
+async function saveViya({ overwrite = false, useActive = false } = {}) {
+  const ref = viyaRef(file.path);
+  let res;
+  try {
+    res = await S2.callTool("sql_editor_save_file", { name: file.path, sql: view.state.doc.toString(), overwrite,
+      expected_version: file.version ?? null, use_active: useActive });
+  } catch (e) { S2.toast(`Couldn't save ${file.name}: ${cleanError(e).message}`, "err"); return; }
+  if (res.saved) { savedTo(res); return; }
+  const ask = (text, button) => {
+    filePanel.hidden = false;
+    filePanel.classList.remove("dialog");
+    filePanel.replaceChildren(h("div", { class: "row sq-ask" }, h("span", { class: "warn" }, text), button,
+      h("button", { class: "s2-btn ghost", onclick: () => showFilePanel("save") }, "Save as…"),
+      h("button", { class: "s2-btn ghost", onclick: hideFilePanel }, "Cancel")));
+    button.focus();
+  };
+  if (res.connection_mismatch) {
+    ask(`${file.name} is on the SAS Viya connection "${res.file_connection}", but the active one is "${res.active}".`,
+      h("button", { class: "s2-btn", onclick: () => saveViya({ useActive: true }) }, `Save to ${res.active} (same path)`));
+  } else if (res.conflict) {
+    const who = [res.modified_by && `by ${res.modified_by}`, res.modified && ago(res.modified)].filter(Boolean).join(", ");
+    ask(`${file.name} changed on ${ref.label} since you opened it${who ? ` (${who})` : ""}. Overwrite it with your version?`,
+      h("button", { class: "s2-btn", onclick: () => saveViya({ overwrite: true, useActive }) }, "Overwrite"));
+  } else if (res.exists) {
+    ask(`${file.name} already exists in ${ref.label}${res.connection ? ` (${res.connection})` : ""}. Replace it?`,
+      h("button", { class: "s2-btn", onclick: () => saveViya({ overwrite: true, useActive }) }, "Replace it"));
+  }
 }
 
 // Opening replaces the editor; ask first if there are unsaved changes.
 function confirmDiscard(then, label = "Discard and open") {
   if (!isDirty() || !view.state.doc.toString().trim()) return then();
   filePanel.hidden = false;
+  filePanel.classList.remove("dialog");
   filePanel.replaceChildren(h("div", { class: "row" }, h("span", { class: "warn" }, `Discard unsaved changes in ${file.name ?? "the editor"}?`),
     h("button", { class: "s2-btn", onclick: then }, label),
     h("button", { class: "s2-btn ghost", onclick: hideFilePanel }, "Back")));
@@ -1936,7 +2033,7 @@ function newFile() {
   // In the Workspace, New opens a tab (this one keeps its text).
   if (tabbed()) { S2.openView("sql:new", { database: state.database }); return; }
   confirmDiscard(() => {
-    file.name = null; file.path = null; file.external = false; file.folder = null;
+    file.name = null; file.path = null; file.external = false; file.folder = null; file.version = null;
     setFile(null, "");
     hideFilePanel(); scheduleDraftSave();
   }, "Discard and start new");
@@ -1957,12 +2054,14 @@ function openServerFileHere(name) {
     try {
       const res = await S2.callTool("sql_editor_open_file", { name });
       file.folder = res.folder;
-      setFile(res.name, res.sql, { path: res.path });
+      setFile(res.name, res.sql, { path: res.path, version: res.version ?? null });
       rememberRecent(res.path, res.name);
       hideFilePanel(); scheduleDraftSave();
     } catch (e) {
-      S2.toast(`Couldn't open ${name}: ${cleanError(e).message}`, "err");
-      state.recent = state.recent.filter((r) => r.path !== name); renderHeader();
+      const msg = cleanError(e).message;
+      S2.toast(`Couldn't open ${viyaRef(name) ? fileTitle(name) : name}: ${msg}`, "err");
+      // A Viya file stays on Recent unless it's gone (not signed in / another connection is active).
+      if (!viyaRef(name) || /doesn't exist|not found/i.test(msg)) { state.recent = state.recent.filter((r) => r.path !== name); renderHeader(); }
     }
   });
 }
@@ -2007,7 +2106,8 @@ async function saveDraft() {
       database: state.database ?? (state.databases.length ? null : draft.restoredDb),
       anchor: sel.anchor, head: sel.head,
       file_name: file.name, file_path: file.path ?? null, file_external: Boolean(file.external),
-      saved_hash: file.name ? file.savedHash : null, continue_on_error: state.continueOnError,
+      saved_hash: file.name ? file.savedHash : null, file_version: file.name ? file.version ?? null : null,
+      continue_on_error: state.continueOnError,
       tab_id: tab.id, dirty: hasUnsaved(), language: state.language, sas: { ...state.sasOpts },
       origin: state.origin ? { workload: state.origin.workload, statement_id: state.origin.statement_id, statement_name: state.origin.statement_name ?? "" } : null,
     });
@@ -2048,8 +2148,10 @@ async function restoreDraft(d) {
   const f = d.file;
   if (!f?.name) { file.savedText = ""; file.savedHash = hashText(""); return; }
   file.name = f.name; file.path = f.path ?? null; file.external = Boolean(f.external);
-  file.savedText = null; file.savedHash = f.saved_hash ?? null;
+  file.savedText = null; file.savedHash = f.saved_hash ?? null; file.version = f.version ?? null;
   if (!file.path || file.external) return;
+  // A file on SAS Viya isn't re-read here (that may start a SAS session for every tab): Save checks its version.
+  if (viyaRef(file.path)) { loadViya(); return; }
   // Compare with the file as it is on disk now (without touching it).
   try {
     const res = await S2.callTool("sql_editor_open_file", { name: file.path, remember: false });

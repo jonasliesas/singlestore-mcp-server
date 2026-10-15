@@ -430,11 +430,14 @@ S2.dataTable = function (columns, rows, opts = {}) {
 // the files of one kind. Server side: files_browse (folders inside the
 // user's home folder and SINGLESTORE_MCP_FILE_ROOTS).
 //   S2.fileBrowser(container, { kind: "sql"|"notebook", mode: "open"|"save",
-//     start, name, onOpen(path), onSave(path, overwrite) -> {exists}, onClose, extra: [buttons] })
+//     start, name, onOpen(path, file), onSave(path, overwrite, listing) -> {exists}, onClose, extra: [buttons] })
+// Other places (the SQL Editor's SAS Content / SAS Server) pass their own
+//   list(path, showAll) -> listing (files_browse's shape), storageKey, showAll (an "All files" box),
+//   mkdir(parent, name) (a "New folder" button) and empty (text for an empty folder).
 S2.fileBrowser = function (box, opts) {
   const { h } = S2;
-  const key = `s2-browse-${opts.kind}`;
-  let listing = null, error = null;
+  const key = opts.storageKey ?? `s2-browse-${opts.kind}`;
+  let listing = null, error = null, allFiles = false, loading = false;
   let folder = opts.start || (() => { try { return localStorage.getItem(key); } catch { return null; } })() || null;
   const filter = h("input", { class: "s2-input", type: "search", placeholder: "Filter…", "aria-label": "Filter", oninput: () => draw() });
   const nameInput = opts.mode === "save"
@@ -446,24 +449,47 @@ S2.fileBrowser = function (box, opts) {
   const sep = () => (listing?.path?.includes("\\") ? "\\" : "/");
 
   async function go(path) {
+    loading = true;
+    draw();
     try {
-      listing = await S2.callTool("files_browse", { path, kind: opts.kind });
+      listing = opts.list ? await opts.list(path, allFiles) : await S2.callTool("files_browse", { path, kind: opts.kind });
       folder = listing.path; error = null;
       try { localStorage.setItem(key, folder); } catch {}
     } catch (e) {
       error = String(e?.message ?? e).replace(/^Error executing tool [\w-]+:\s*/, "");
       if (!listing && path) return go(null);  // remembered folder gone: start at the SQL folder
     }
+    loading = false;
     filter.value = "";
     draw();
+  }
+  function newFolder() {
+    const input = h("input", { class: "s2-input", placeholder: "Folder name", spellcheck: false, "aria-label": "New folder name",
+      onkeydown: (e) => { if (e.key === "Enter") create(); if (e.key === "Escape") message.replaceChildren(); } });
+    async function create() {
+      const name = input.value.trim();
+      if (!name || !listing) return;
+      message.replaceChildren(h("span", { class: "s2-spinner" }), ` Creating ${name}…`);
+      try {
+        const res = await opts.mkdir(listing.path, name);
+        message.replaceChildren();
+        go(res?.path ?? listing.path);
+      } catch (e) {
+        message.replaceChildren(h("span", { class: "warn" }, `Couldn't create the folder: ${String(e?.message ?? e).replace(/^Error executing tool [\w-]+:\s*/, "")}`));
+      }
+    }
+    message.replaceChildren(input, h("button", { class: "s2-btn", onclick: create }, "Create folder"),
+      h("button", { class: "s2-btn ghost", onclick: () => message.replaceChildren() }, "Cancel"));
+    input.focus();
   }
   async function save(overwrite) {
     let name = nameInput.value.trim();
     if (!name) return;
-    const full = /^([a-zA-Z]:[\/]|[\/])/.test(name) ? name : `${listing.path}${sep()}${name}`;
+    const base = listing.path.endsWith(sep()) ? listing.path : `${listing.path}${sep()}`;
+    const full = /^([a-zA-Z]:[\/]|[\/])/.test(name) ? name : `${base}${name}`;
     message.replaceChildren(h("span", { class: "s2-spinner" }), " Saving…");
     try {
-      const res = await opts.onSave(full, overwrite);
+      const res = await opts.onSave(full, overwrite, listing);
       if (res?.exists) {
         message.replaceChildren(h("span", { class: "warn" }, `${name} already exists here.`),
           h("button", { class: "s2-btn", onclick: () => save(true) }, "Replace it"),
@@ -474,6 +500,10 @@ S2.fileBrowser = function (box, opts) {
     }
   }
   function draw() {
+    // replaceChildren() detaches the filter and drops its focus: remember it (and the caret) and put it back,
+    // so typing in the filter doesn't jump to the file name.
+    const filterFocused = document.activeElement === filter;
+    const caret = filterFocused ? filter.selectionStart : null;
     const q = filter.value.trim().toLowerCase();
     const match = (n) => !q || n.toLowerCase().includes(q);
     const items = [];
@@ -481,20 +511,28 @@ S2.fileBrowser = function (box, opts) {
     for (const f of listing?.folders ?? []) if (match(f.name)) items.push(h("button", { class: "item", onclick: () => go(f.path) }, h("span", { class: "n" }, `📁 ${f.name}`), h("span", { class: "m" }, "")));
     for (const f of listing?.files ?? []) if (match(f.name)) items.push(h("button", { class: "item",
       title: f.path,
-      onclick: () => (opts.mode === "open" ? opts.onOpen(f.path) : (nameInput.value = f.name, nameInput.focus())),
+      onclick: () => (opts.mode === "open" ? opts.onOpen(f.path, f) : (nameInput.value = f.name, nameInput.focus())),
       ondblclick: () => (opts.mode === "save" ? save(false) : null) },
-      h("span", { class: "n" }, `${opts.kind === "notebook" ? "📓" : "📄"} ${f.name}`), h("span", { class: "m" }, `${S2.fmt.bytes(f.size)} · ${ago(f.modified)}`)));
-    if (!items.length) items.push(h("div", { class: "item m" }, error ?? (listing ? (q ? "Nothing matches" : `No ${opts.kind === "notebook" ? ".ipynb" : ".sql"} files or folders here`) : "Loading…")));
+      h("span", { class: "n" }, `${opts.kind === "notebook" ? "📓" : "📄"} ${f.name}`), h("span", { class: "m" }, [f.size != null ? S2.fmt.bytes(f.size) : null, f.modified ? ago(f.modified) : null].filter(Boolean).join(" · "))));
+    const empty = opts.empty ?? `No ${opts.kind === "notebook" ? ".ipynb" : ".sql"} files or folders here`;
+    if (!items.length) items.push(h("div", { class: "item m" }, error ?? (listing ? (q ? "Nothing matches" : allFiles ? "No files or folders here" : empty) : "Loading…")));
     const shortcuts = (listing?.shortcuts ?? []).map((s) => h("button", { class: `s2-btn ghost${s.path === listing?.path ? " primary" : ""}`, title: s.path, onclick: () => go(s.path) }, s.label));
     box.replaceChildren(...[
       h("div", { class: "row" }, h("strong", {}, opts.mode === "open" ? "Open" : "Save as"), ...shortcuts, ...(opts.mode === "open" ? opts.extra ?? [] : []), h("span", { class: "s2-spacer" }),
         h("button", { class: "s2-btn ghost", onclick: () => opts.onClose?.() }, opts.mode === "open" ? "Close" : "Cancel")),
-      h("div", { class: "row" }, h("span", { class: "s2-muted", title: listing?.path ?? "", style: { fontFamily: "var(--s2-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "60%" } }, listing?.path ?? "…"), filter),
+      h("div", { class: "row" }, h("span", { class: "s2-muted", title: listing?.path ?? "", style: { fontFamily: "var(--s2-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "60%" } }, listing?.path ?? "…"), filter,
+        loading && listing ? h("span", { class: "s2-spinner", title: "Loading…" }) : null,
+        opts.showAll ? h("label", { class: "s2-small", title: "Show every file, not only .sql and .sas" },
+          h("input", { type: "checkbox", checked: allFiles, onchange: (e) => { allFiles = e.target.checked; go(listing?.path ?? folder); } }), " All files") : null,
+        opts.mkdir && listing ? h("button", { class: "s2-btn ghost", title: "Create a folder here", onclick: newFolder }, "New folder") : null),
       h("div", { class: "list" }, ...items),
       nameInput ? h("div", { class: "row" }, nameInput, h("button", { class: "s2-btn primary", onclick: () => save(false) }, "Save"), ...(opts.mode === "save" ? opts.extra ?? [] : [])) : null,
       error && listing ? h("div", { class: "row" }, h("span", { class: "warn" }, error)) : null,
       message].filter(Boolean));
-    if (nameInput && document.activeElement !== filter) { nameInput.focus(); }
+    if (filterFocused) {
+      filter.focus();
+      try { filter.setSelectionRange(caret, caret); } catch {}
+    } else if (nameInput && !box.contains(document.activeElement)) nameInput.focus();
   }
   draw();
   go(folder);

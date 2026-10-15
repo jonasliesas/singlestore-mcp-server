@@ -16,7 +16,8 @@ other's writes; writes are atomic (temp file + replace).
 - ``draft.json``: the single draft of the editor before it had tabs; moved
   into the first tab once (and left in place, unused, as a backup).
 - ``history.json``: statements the user ran (newest last), capped.
-- ``recent.json``: SQL files recently opened or saved, newest first.
+- ``recent.json``: SQL files recently opened or saved, newest first (local paths, or SAS Viya file refs
+  ``sas-content://...`` / ``sas-server://...``).
 """
 
 from __future__ import annotations
@@ -385,15 +386,23 @@ def remember_file(path: str | Path, name: str) -> None:
         pass
 
 
+def _is_viya_ref(path: str) -> bool:
+    return path.startswith(("sas-content://", "sas-server://"))
+
+
 def recent_files() -> list[dict[str, Any]]:
-    """Recent files that still exist, newest first."""
+    """Recent files that still exist, newest first. Files on SAS Viya (``sas-content://`` / ``sas-server://``
+    refs) are kept without a check (that would be a round trip to Viya each time)."""
     out = []
     try:
         recent = _read("recent.json", [])
     except OSError:  # in use right now: the list is optional
         recent = []
     for r in recent if isinstance(recent, list) else []:
-        if isinstance(r, dict) and r.get("path"):
+        if isinstance(r, dict) and isinstance(r.get("path"), str) and _is_viya_ref(r["path"]):
+            out.append({"path": r["path"], "name": r.get("name") or r["path"].rsplit("/", 1)[-1], "t": r.get("t"),
+                        "location": "content" if r["path"].startswith("sas-content://") else "server"})
+        elif isinstance(r, dict) and r.get("path"):
             try:
                 if Path(r["path"]).is_file():
                     out.append({"path": r["path"], "name": r.get("name") or Path(r["path"]).name, "t": r.get("t")})

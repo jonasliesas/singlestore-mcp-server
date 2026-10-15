@@ -60,6 +60,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .s2-btn.danger { color: var(--s2-err); }
 .s2-btn.ghost { border-color: transparent; background: transparent; }
 .s2-btn.ghost:hover:not(:disabled) { background: var(--s2-bg-2); }
+/* A ghost button marked as the current choice (a file browser's current folder or location). */
+.s2-btn.ghost.primary, .s2-btn.ghost.primary:hover:not(:disabled) { background: var(--s2-info-bg); color: var(--s2-info); filter: none; }
 
 .s2-input {
   border: 1px solid var(--s2-border); background: var(--s2-bg);

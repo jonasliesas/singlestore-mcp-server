@@ -265,10 +265,123 @@ class TestApplyGate:
         assert not p["confirm"]["typed"]
 
     def test_not_allowed_without_privilege(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Without the privilege the preview still works (for a script) but says so; apply refuses."""
         monkeypatch.setattr(adm, "load_context", lambda: ctx(me={"user": "bob", "host": "%"},
                                                                my_grants=["GRANT USAGE ON *.* TO 'bob'@'%'"]))
+        monkeypatch.setattr(adm.db, "execute", lambda *a, **k: pytest.fail("must not run anything"))
+        p = adm.plan({"action": "create_user", "user": "zz_test_u"})
+        assert p["allowed"]["ok"] is False and "CREATE USER" in p["allowed"]["reason"]
+        assert p["statements"] == ["CREATE USER 'zz_test_u'@'%' IDENTIFIED BY '********';"]
         with pytest.raises(adm.ChangeError, match="CREATE USER"):
-            adm.plan({"action": "create_user", "user": "zz_test_u"})
+            adm.apply({"action": "create_user", "user": "zz_test_u"}, confirm=True, password="x" * 12)
+
+
+# ============================================================================= SQL script for a DBA (offline)
+
+BASKET = [
+    {"action": "grant", "grantee_type": "role", "role": "zz_test_r", "privileges": ["SELECT"], "database": "SASDP"},
+    {"action": "drop_group", "group": "nobody"},
+    {"action": "create_role", "role": "zz_test_r"},
+    {"action": "create_user", "user": "zz_test_u", "default_pool": "zz_test_p"},
+    {"action": "create_pool", "pool": "zz_test_p", "settings": {"MEMORY_PERCENTAGE": 10}},
+    {"action": "grant_role", "role": "zz_test_r", "group": "analysts"},
+]
+
+
+@pytest.fixture
+def offline(monkeypatch: pytest.MonkeyPatch):
+    """A fake cluster; any statement execution fails the test (scripts never run anything)."""
+    monkeypatch.setattr(adm, "load_context", lambda: ctx())
+    monkeypatch.setattr(adm.db, "execute", lambda *a, **k: pytest.fail("a script must not run anything"))
+    monkeypatch.setattr(adm, "_connection_label", lambda: "Test cluster (s2.example:3306)")
+    return monkeypatch
+
+
+class TestScript:
+    def test_header_order_and_placeholder(self, offline: pytest.MonkeyPatch) -> None:
+        out = adm.script(BASKET)
+        text = out["script"]
+        sql = [line for line in text.splitlines() if line and not line.startswith("--")]
+        assert sql == [
+            "CREATE RESOURCE POOL `zz_test_p` WITH MEMORY_PERCENTAGE = 10;",
+            "CREATE ROLE 'zz_test_r';",
+            "CREATE USER 'zz_test_u'@'%' IDENTIFIED BY '<set password>' WITH DEFAULT RESOURCE POOL = zz_test_p;",
+            "GRANT SELECT ON `SASDP`.* TO ROLE 'zz_test_r';",
+            "GRANT ROLE 'zz_test_r' TO 'analysts';",
+            "DROP GROUP 'nobody';",
+        ]
+        head = text.split("\n\n")[0]
+        assert "Nothing has been run" in head and "Connection: Test cluster (s2.example:3306)" in head
+        assert "Prepared by: admin@%" in head and "Changes (6):" in head
+        assert "--   3. Create user: CREATE USER 'zz_test_u'@'%' IDENTIFIED BY '<set password>'" in head
+        assert "-- WARNING: Host '%' lets the user connect from any host." in text
+        assert "-- WARNING: Replace '<set password>'" in text
+        assert out["count"] == 6 and out["statements"] == 6
+        assert [i["index"] for i in out["items"]] == [4, 2, 3, 0, 5, 1]
+        assert out["file_name"].startswith("security-") and out["file_name"].endswith("-6-changes.sql")
+
+    def test_keep_order(self, offline: pytest.MonkeyPatch) -> None:
+        acts = [{"action": "revoke_group", "group": "analysts", "user": "bob"}, {"action": "create_role", "role": "zz_test_r"}]
+        assert [i["action"] for i in adm.script(acts)["items"]] == ["create_role", "revoke_group"]
+        kept = adm.script(acts, keep_order=True)
+        assert [i["action"] for i in kept["items"]] == ["revoke_group", "create_role"]
+        assert "as listed by the author" in kept["script"]
+
+    def test_never_a_password(self, offline: pytest.MonkeyPatch) -> None:
+        pw = "Zz9-" + secrets.token_hex(8)
+        out = adm.script([{"action": "create_user", "user": "zz_test_u", "password": pw}])
+        assert pw not in repr(out) and "********" not in out["script"]
+        assert "IDENTIFIED BY '<set password>'" in out["script"]
+        assert out["file_name"].endswith("-create-user-zz_test_u.sql")
+        p = adm.plan({"action": "create_user", "user": "zz_test_u", "password": pw},
+                     pending=[{"action": "create_role", "role": "zz_test_r", "password": pw}])
+        assert pw not in repr(p)
+
+    def test_same_statements_as_run(self, offline: pytest.MonkeyPatch) -> None:
+        for a in ({"action": "grant", "user": "bob", "privileges": ["SELECT", "insert"], "database": "SASDP", "with_grant_option": True},
+                  {"action": "revoke_all", "grantee_type": "user", "user": "bob"},
+                  {"action": "alter_pool", "pool": "etl", "settings": {"MAX_CONCURRENCY": 0}}):
+            p = adm.plan(a)
+            s = adm.script([a])
+            assert s["items"][0]["statements"] == p["statements"]
+            assert all(f"-- WARNING: {w}" in s["script"] for w in p["warnings"])
+
+    def test_without_change_privileges(self, offline: pytest.MonkeyPatch) -> None:
+        offline.setattr(adm, "load_context", lambda: ctx(me={"user": "bob", "host": "%"}, my_grants=["GRANT USAGE ON *.* TO 'bob'@'%'"]))
+        out = adm.script([{"action": "create_role", "role": "zz_test_r"}, {"action": "create_user", "user": "zz_test_u"}])
+        assert "CREATE ROLE 'zz_test_r';" in out["script"]
+        assert "-- NOTE: bob@% can't run all of this" in out["script"] and "CREATE USER privilege" in out["script"]
+        assert not out["items"][0]["allowed"]["ok"]
+
+    def test_validates_names_and_blockers(self, offline: pytest.MonkeyPatch) -> None:
+        with pytest.raises(adm.ChangeError, match=r"Change 2 \(Create role\).*already exists"):
+            adm.script([{"action": "create_group", "group": "zz_test_g"}, {"action": "create_role", "role": "reader"}])
+        with pytest.raises(adm.ChangeError, match="control characters"):
+            adm.script([{"action": "create_role", "role": "bad\nname"}])
+        with pytest.raises(adm.ChangeError, match="Pool names"):
+            adm.script([{"action": "create_pool", "pool": "1; DROP"}])
+        with pytest.raises(adm.ChangeError, match="No user"):
+            adm.script([{"action": "drop_user", "user": "ghost"}])
+        with pytest.raises(adm.ChangeError, match="already exists"):  # the same create twice in one script
+            adm.script([{"action": "create_role", "role": "zz_test_r"}, {"action": "create_role", "role": "zz_test_r"}])
+        with pytest.raises(adm.ChangeError, match="at least one"):
+            adm.script([])
+
+    def test_basket_dependencies(self, offline: pytest.MonkeyPatch) -> None:
+        grant = {"action": "grant", "grantee_type": "role", "role": "zz_test_r", "privileges": ["SELECT"], "database": "SASDP"}
+        with pytest.raises(adm.ChangeError, match="No role zz_test_r"):
+            adm.plan(grant)
+        p = adm.plan(grant, pending=[{"action": "create_role", "role": "zz_test_r"}])
+        assert p["needs_script"] and p["statements"] == ["GRANT SELECT ON `SASDP`.* TO ROLE 'zz_test_r';"]
+        assert not adm.plan({"action": "create_role", "role": "zz_test_x"}, pending=[{"action": "create_role", "role": "zz_test_r"}])["needs_script"]
+        # A user created, put in a group and dropped in one script: safe order, each checked after the earlier ones.
+        out = adm.script([{"action": "drop_user", "user": "zz_test_u"}, {"action": "create_user", "user": "zz_test_u"},
+                          {"action": "grant_group", "group": "nobody", "user": "zz_test_u"}])
+        assert [i["action"] for i in out["items"]] == ["create_user", "grant_group", "drop_user"]
+        # Lock-out checks see the earlier changes: with ann dropped, admin revoking its own rights leaves no admin.
+        with pytest.raises(adm.ChangeError, match="blocked"):
+            adm.script([{"action": "drop_user", "user": "ann", "host": "10.0.0.%"},
+                        {"action": "revoke_all", "grantee_type": "user", "user": "admin"}], keep_order=True)
 
 
 # ============================================================================= cluster: zz_test_ objects only

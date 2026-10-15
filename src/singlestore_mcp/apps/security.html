@@ -86,6 +86,17 @@
   .sc-res-list .error { color: var(--s2-err); }
   .sc-steps { display: flex; gap: 6px; align-items: flex-start; margin: 4px 0 10px; }
   .sc-steps pre { flex: 1; margin: 0; }
+  /* SQL script for a DBA: the actions in the preview and the script basket */
+  .sc-script { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--s2-border); }
+  .sc-save { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
+  .sc-save .s2-input { width: 340px; font-family: var(--s2-mono); }
+  .sc-basket { border: 1px solid var(--s2-border); border-radius: var(--s2-radius-sm, 6px); background: var(--s2-bg-2); padding: 10px 14px; margin: 4px 0 12px; }
+  .sc-basket h2 { font-size: var(--font-text-md-size, 14px); font-weight: var(--font-weight-semibold, 600); margin: 0; }
+  .sc-basket ol { margin: 8px 0; padding-left: 22px; font-size: var(--s2-fs-xs); }
+  .sc-basket li { margin: 2px 0; }
+  .sc-basket li .lbl { font-family: var(--s2-mono); }
+  .sc-basket li .s2-btn { padding: 0 6px; font-size: 11px; margin-left: 4px; }
+  .sc-basket pre { max-height: 320px; overflow: auto; margin: 6px 0 0; }
 </style>
 </head>
 <body>
@@ -119,6 +130,8 @@ const state = {
   audit: null,
   // v2: what the connected user may change (security_admin_capabilities)
   cap: null, capErr: null,
+  // SQL script basket: changes collected to hand over as one .sql script (kept for this browser session)
+  basket: [], keepOrder: false, basketScript: null, basketErr: null, basketBusy: false,
 };
 const ukey = (u) => `${u.user}@${u.host}`;
 const qid = (s) => `'${String(s).replace(/\\/g, "\\\\").replace(/'/g, "''")}'`;
@@ -173,8 +186,9 @@ function render() {
   const kids = [
     h("div", { class: "s2-header" },
       h("div", {}, h("h1", { class: "s2-title" }, "Security"),
-        h("div", { class: "s2-subtitle" }, `${me ? `Connected as ${me.user}@${me.host} · ` : ""}${canChange()
-          ? "changes show the exact SQL first and run only after you confirm"
+        h("div", { class: "s2-subtitle" }, `${me ? `Connected as ${me.user}@${me.host} · ` : ""}${canRun()
+          ? "changes show the exact SQL first and run only after you confirm, or go into a SQL script"
+          : canChange() ? "you can't run changes here: preview them and make a SQL script for a DBA"
           : "read-only: nothing is granted or changed from here; copy the SQL shown and run it yourself"}`)),
       h("span", { class: "s2-spacer" }),
       h("button", { class: "s2-btn", disabled: state.loading[t], onclick: () => { if (t === "users") state.detail = {}; load(t); } },
@@ -186,18 +200,19 @@ function render() {
       tab("roles", "Roles & groups", state.roles ? state.roles.roles.length : null),
       tab("pools", "Resource pools", queued, queued > 0),
       tab("audit", "Audit log", null)),
-    chgEl,
+    stickyEl,
     state.errors[t] ? h("div", { class: "s2-error", style: { marginBottom: "8px" } }, String(state.errors[t].message ?? state.errors[t])) : null,
     ...(state[t] ? { users: usersTab, roles: rolesTab, pools: poolsTab, audit: auditTab }[t]() :
       state.errors[t] ? [] : [h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Loading…")]),
   ].filter(Boolean);
-  // The change panel stays in place (re-rendering around it), so typing in it survives the 5 s pool refresh.
-  if (chgEl.parentNode !== root) { root.replaceChildren(...kids); return; }
-  const i = kids.indexOf(chgEl);
-  while (chgEl.previousSibling) chgEl.previousSibling.remove();
-  while (chgEl.nextSibling) chgEl.nextSibling.remove();
-  chgEl.before(...kids.slice(0, i));
-  chgEl.after(...kids.slice(i + 1));
+  // The change panel and the script basket stay in place (re-rendering around them), so typing in them survives
+  // the 5 s pool refresh.
+  if (stickyEl.parentNode !== root) { root.replaceChildren(...kids); return; }
+  const i = kids.indexOf(stickyEl);
+  while (stickyEl.previousSibling) stickyEl.previousSibling.remove();
+  while (stickyEl.nextSibling) stickyEl.nextSibling.remove();
+  stickyEl.before(...kids.slice(0, i));
+  stickyEl.after(...kids.slice(i + 1));
 }
 
 // ---------------------------------------------------------------- Users tab
@@ -633,11 +648,16 @@ const POOL_LABELS = { MEMORY_PERCENTAGE: "Memory %", QUERY_MEMORY_PERCENTAGE: "P
   MAX_QUEUE_DEPTH: "Max queue depth" };
 
 const chgEl = h("div", { id: "chg" });
-let chg = null;        // { action, plan, planErr, busy, result, runErr, typed, ack, tables }
+const basketEl = h("div", { id: "sc-basket" });
+const stickyEl = h("div", {}, chgEl, basketEl);
+let chg = null;        // { action, plan, planErr, busy, result, runErr, typed, ack, tables, scriptErr }
 let pwInput = null;    // the only place a password exists on this page
 
 const anyCap = () => Object.values(CAP_OF).some((k) => state.cap?.[k]?.ok);
-function canChange() { return Boolean(state.cap) && anyCap(); }
+// The change buttons show whenever the capabilities are known: without the privileges a change can still be
+// previewed and written to a SQL script for a DBA (Run is then off, with the reason).
+function canChange() { return Boolean(state.cap); }
+function canRun() { return Boolean(state.cap) && anyCap(); }
 
 async function loadCap() {
   try { state.cap = await S2.callTool("security_admin_capabilities", {}); state.capErr = null; }
@@ -651,15 +671,18 @@ function capNotice() {
   if (state.capErr) return h("div", { class: "sc-notice warn" }, `Couldn't check what you may change, so changes are off: ${state.capErr.message ?? state.capErr}`);
   if (!state.cap || anyCap()) return null;
   const reasons = [...new Set(Object.values(CAP_OF).map((k) => state.cap[k]?.reason).filter(Boolean))];
-  return h("div", { class: "sc-notice" }, `Read-only for ${state.cap.me.user}@${state.cap.me.host}: ${reasons.join(" ")}`);
+  return h("div", { class: "sc-notice" }, `${state.cap.me.user}@${state.cap.me.host} can't run changes: ${reasons.join(" ")} `
+    + "You can still preview a change and make a SQL script of it (Copy SQL, Open in SQL Editor, Save as .sql, Add to script) for a DBA to run.");
 }
 
-// A change button: hidden when the user can't change anything, disabled (with the reason) when it lacks this privilege.
+// A change button: hidden until the capabilities are known. Without the privilege for this kind of change it still
+// opens the panel (preview and SQL script); Run is then off with the reason.
 function actBtn(label, action, opts = {}) {
   if (!canChange()) return null;
   const c = state.cap[CAP_OF[action.action]];
-  return h("button", { class: `s2-btn ${opts.cls ?? ""}`, disabled: !c?.ok, title: c?.ok ? `${TITLES[action.action]}: preview the SQL, then confirm` : c?.reason,
-    "data-act": action.action, onclick: (e) => { e.stopPropagation(); openChange(action); } }, label);
+  return h("button", { class: `s2-btn ${opts.cls ?? ""}`, title: c?.ok ? `${TITLES[action.action]}: preview the SQL, then confirm or make a SQL script`
+    : `${TITLES[action.action]}: preview the SQL and make a SQL script for a DBA (${c?.reason ?? "you can't run it"})`,
+    "data-act": action.action, "data-can-run": String(Boolean(c?.ok)), onclick: (e) => { e.stopPropagation(); openChange(action); } }, label);
 }
 
 // "*.*" / "db.*" / "db.t" (+ scope) -> { level, database, table } for a prefilled grant/revoke.
@@ -673,7 +696,9 @@ function levelOf(object, scope) {
 function openChange(action) {
   const a = structuredClone(action);
   if (a.privileges) a.privileges = a.privileges.map((p) => p.toUpperCase()).filter((p) => (state.cap?.privileges ?? []).includes(p));
-  chg = { action: a, plan: null, planErr: null, busy: false, result: null, runErr: null, typed: "", ack: false, tables: [], fixedUser: a.user != null };
+  chg = { action: a, plan: null, planErr: null, busy: false, result: null, runErr: null, typed: "", ack: false, tables: [], fixedUser: a.user != null,
+    scriptErr: null, scriptBusy: false };
+  if (save?.where === "chg") save = null;
   pwInput = a.action === "create_user" ? h("input", { class: "s2-input", type: "password", autocomplete: "new-password", "aria-label": "Password",
     spellcheck: "false", oninput: () => updateRun() }) : null;
   if (a.database && a.level === "table") loadChgTables();
@@ -684,6 +709,7 @@ function openChange(action) {
 }
 
 function closeChange() {
+  if (save?.where === "chg") save = null;
   if (pwInput) pwInput.value = "";
   pwInput = null;
   chg = null;
@@ -694,7 +720,8 @@ function closeChange() {
 
 function setField(key, value) {
   chg.action[key] = value;
-  chg.plan = chg.planErr = chg.result = chg.runErr = null;
+  chg.plan = chg.planErr = chg.result = chg.runErr = chg.scriptErr = null;
+  if (save?.where === "chg") save = null;
   chg.typed = ""; chg.ack = false;
   renderChange();
 }
@@ -737,19 +764,26 @@ function selectF(key, label, options, onchange) {
 function userF(label = "User") {
   const a = chg.action;
   const cur = a.user != null ? JSON.stringify([a.user, a.host ?? "%"]) : "";
-  const users = state.cap?.pick.users ?? [];
+  const users = [...(state.cap?.pick.users ?? []), ...madeInScript("create_user")
+    .filter((m) => !(state.cap?.pick.users ?? []).some((u) => u.user === m.user && u.host === (m.host ?? "%")))
+    .map((m) => ({ user: m.user, host: m.host ?? "%", script: true }))];
   return fld(label, h("select", { class: "s2-input", "aria-label": label, onchange: (e) => {
     const [u, hst] = e.target.value ? JSON.parse(e.target.value) : [null, null];
     chg.action.user = u; chg.action.host = hst; setField("user", u);
   } }, h("option", { value: "" }, "Pick a user"), users.map((u) => {
     const v = JSON.stringify([u.user, u.host]);
-    return h("option", { value: v, selected: v === cur }, `${u.user}@${u.host}${u.me ? " (you)" : u.admin ? " (admin)" : ""}`);
+    return h("option", { value: v, selected: v === cur }, `${u.user}@${u.host}${u.me ? " (you)" : u.admin ? " (admin)" : u.script ? " (in script)" : ""}`);
   })));
 }
-const roleF = () => selectF("role", "Role", [["", "Pick a role"], ...(state.cap?.pick.roles ?? []).map((r) => [r, r])]);
-const groupF = () => selectF("group", "Group", [["", "Pick a group"], ...(state.cap?.pick.groups ?? []).map((g) => [g, g])]);
+// Roles, groups, pools and users that a change in the script basket creates can be picked too ("in script").
+const madeInScript = (kind) => state.basket.filter((i) => i.action.action === kind).map((i) => i.action);
+const withScript = (names, kind, key) => [...names.map((n) => [n, n]),
+  ...madeInScript(kind).map((a) => a[key]).filter((n) => n && !names.includes(n)).map((n) => [n, `${n} (in script)`])];
+const roleF = () => selectF("role", "Role", [["", "Pick a role"], ...withScript(state.cap?.pick.roles ?? [], "create_role", "role")]);
+const groupF = () => selectF("group", "Group", [["", "Pick a group"], ...withScript(state.cap?.pick.groups ?? [], "create_group", "group")]);
 const poolF = (key = "pool", label = "Resource pool", builtins = true) => selectF(key, label, [["", "Pick a pool"],
-  ...(state.cap?.pick.pools ?? []).filter((p) => builtins || !p.builtin).map((p) => [p.pool, p.pool + (p.builtin ? " (built in)" : "")])]);
+  ...(state.cap?.pick.pools ?? []).filter((p) => builtins || !p.builtin).map((p) => [p.pool, p.pool + (p.builtin ? " (built in)" : "")]),
+  ...madeInScript("create_pool").map((a) => a.pool).filter((n) => n && !(state.cap?.pick.pools ?? []).some((p) => p.pool === n)).map((n) => [n, `${n} (in script)`])]);
 function granteeF() {
   return [selectF("grantee_type", "Grantee", [["user", "User"], ["role", "Role"]]), chg.action.grantee_type === "role" ? roleF() : userF()];
 }
@@ -824,7 +858,9 @@ function formFields() {
 async function previewChange() {
   chg.busy = true; chg.plan = chg.planErr = chg.result = chg.runErr = null; chg.typed = ""; chg.ack = false;
   renderChange();
-  try { chg.plan = await S2.callTool("security_change_plan", { action: payload() }); }
+  const args = { action: payload() };
+  if (state.basket.length) args.pending = state.basket.map((i) => i.action);
+  try { chg.plan = await S2.callTool("security_change_plan", args); }
   catch (e) { if (chg) chg.planErr = e; }
   if (!chg) return;
   chg.busy = false;
@@ -835,6 +871,7 @@ async function previewChange() {
 let runBtn = null;
 function ready() {
   if (!chg?.plan || chg.plan.blockers.length || chg.busy || chg.result?.ok) return false;
+  if (chg.plan.allowed?.ok === false || chg.plan.needs_script) return false;
   if (pwInput && !pwInput.value) return false;
   return chg.plan.confirm.typed ? chg.typed.trim() === chg.plan.confirm.phrase : chg.ack;
 }
@@ -870,6 +907,7 @@ function renderChange() {
   runBtn = h("button", { class: `s2-btn ${danger ? "danger" : "primary"}`, disabled: true, onclick: runChange },
     chg.busy && p ? h("span", { class: "s2-spinner" }) : null, chg.result?.ok ? "Done" : "Run");
   const stmtText = (p?.statements ?? []).join("\n");
+  const runnable = Boolean(p) && p.allowed?.ok !== false && !p.needs_script;
   chgEl.replaceChildren(h("div", { class: `sc-chg${danger ? " danger" : ""}`, role: "dialog", "aria-label": TITLES[a.action] },
     h("div", { class: "sc-bar" }, h("h2", {}, TITLES[a.action]), h("span", { class: "s2-spacer" }),
       h("button", { class: "s2-btn ghost", onclick: closeChange, title: "Close (Esc)" }, chg.result?.ok ? "Close" : "Cancel")),
@@ -880,11 +918,13 @@ function renderChange() {
       h("span", { class: "s2-small s2-faint" }, "Nothing runs until you confirm the exact statements.")),
     chg.planErr ? S2.errorBox(chg.planErr) : null,
     p ? [
-      h("div", { class: "sc-steps sc-stmts" }, h("pre", { class: "s2-pre", "aria-label": "Statements to run" }, stmtText || "(no statements)"),
-        h("button", { class: "s2-btn", onclick: () => S2.copy(stmtText, "Statements copied") }, "Copy")),
+      h("div", { class: "sc-steps sc-stmts" }, h("pre", { class: "s2-pre", "aria-label": "Statements to run" }, stmtText || "(no statements)")),
       p.blockers.map((b) => h("div", { class: "s2-error", style: { marginBottom: "6px" } }, b)),
       p.warnings.map((w) => h("div", { class: "sc-notice warn" }, w)),
-      !p.blockers.length && !chg.result?.ok ? h("div", { class: "sc-confirm" },
+      !p.blockers.length && !chg.result?.ok && !runnable ? h("div", { class: "sc-notice", "aria-label": "Run is off" },
+        p.needs_script ? "Run is off: this change needs objects that changes in the script create first. Add it to the script."
+          : `Run is off for ${state.cap?.me ? `${state.cap.me.user}@${state.cap.me.host}` : "you"}: ${p.allowed?.reason ?? ""} Make a SQL script of it below for someone who can run it.`) : null,
+      !p.blockers.length && !chg.result?.ok && runnable ? h("div", { class: "sc-confirm" },
         p.confirm.typed
           ? [h("span", { class: "s2-small" }, `Type `, h("strong", { class: "s2-mono" }, p.confirm.phrase), ` to confirm (${p.confirm.reasons.join("; ")}):`),
             h("input", { class: "s2-input", "aria-label": "Type the name to confirm", value: chg.typed, spellcheck: "false",
@@ -893,6 +933,7 @@ function renderChange() {
               onchange: (e) => { chg.ack = e.target.checked; updateRun(); } }), `I've checked the statement${p.statements.length === 1 ? "" : "s"} above: run ${p.statements.length === 1 ? "it" : "them"}`),
         pwInput && !pwInput.value ? h("span", { class: "s2-small s2-faint" }, "Enter the password first.") : null,
         runBtn) : null,
+      !p.blockers.length && !chg.result?.ok ? scriptBar("chg") : null,
     ] : null,
     chg.runErr ? S2.errorBox(chg.runErr) : null,
     chg.result ? h("ul", { class: "sc-res-list", "aria-label": "Result" }, chg.result.results.map((r) =>
@@ -903,6 +944,177 @@ function renderChange() {
 window.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && chg && !chg.busy) { e.preventDefault(); closeChange(); }
 }, true);
+
+// ---------------------------------------------------------------- SQL script for a DBA (nothing runs)
+// Instead of Run: the same statements as a reviewable .sql script, built by security_change_script (read-only, no
+// change privileges needed). Copy SQL / Open in SQL Editor / Save as .sql for the change in the panel or for the
+// script basket (several changes collected with "Add to script"). Never sends a password: payload() drops it and
+// CREATE USER gets the placeholder '<set password>' on the server.
+const BASKET_KEY = "s2-security-script-basket";
+let basketSeq = 0;
+let save = null;  // { where: "chg" | "basket", name, sql, exists, busy, err }
+
+function storeBasket() {
+  try { sessionStorage.setItem(BASKET_KEY, JSON.stringify({ items: state.basket, keepOrder: state.keepOrder })); } catch { /* no storage here */ }
+}
+function restoreBasket() {
+  try {
+    const d = JSON.parse(sessionStorage.getItem(BASKET_KEY) || "null");
+    if (d && Array.isArray(d.items)) {
+      state.basket = d.items.filter((i) => i?.action?.action && TITLES[i.action.action]).map((i) => {
+        const action = { ...i.action };
+        delete action.password;
+        return { id: ++basketSeq, action, label: String(i.label ?? TITLES[action.action]) };
+      });
+      state.keepOrder = Boolean(d.keepOrder);
+    }
+  } catch { /* no storage, or nothing kept */ }
+}
+
+const basketActions = () => state.basket.map((i) => i.action);
+
+async function scriptOf(where) {
+  const args = where === "chg" ? { actions: [payload()] } : { actions: basketActions(), keep_order: state.keepOrder };
+  return S2.callTool("security_change_script", args);
+}
+
+function setScriptErr(where, e) {
+  if (where === "chg") { if (chg) { chg.scriptErr = e; renderChange(); } }
+  else { state.basketErr = e; renderBasket(); }
+}
+
+async function scriptAction(where, what) {
+  setScriptErr(where, null);
+  let s;
+  try { s = await scriptOf(where); } catch (e) { setScriptErr(where, e); return; }
+  if (what === "copy") S2.copy(s.script, `SQL script copied (${s.count} change${s.count === 1 ? "" : "s"}; nothing ran)`);
+  else if (what === "open") await openScriptInEditor(s.script, where);
+  else if (what === "save") { save = { where, name: s.file_name, sql: s.script, exists: false, busy: false, err: null }; where === "chg" ? renderChange() : renderBasket(); }
+  else if (what === "show") { state.basketScript = s.script; renderBasket(); }
+}
+
+// A new SQL Editor tab holding the script; it is not run (the hand-off has no "run").
+async function openScriptInEditor(sql, where) {
+  if (S2.embedded()) {
+    S2.openView("sql:new", { sql });
+    S2.toast("Script opened in a new SQL Editor tab: nothing ran", "ok");
+    return;
+  }
+  try {
+    const t = await S2.callTool("sql_editor_tab_new", {});
+    await S2.callTool("sql_editor_save_draft", { tab_id: t.tab.id, sql, dirty: true, anchor: 0, head: 0 });
+    await S2.openAppInBrowser("sql_editor", { view: "sql" });
+  } catch (e) { setScriptErr(where, e); }
+}
+
+async function saveScript(overwrite) {
+  if (!save || save.busy) return;
+  const where = save.where;
+  save.busy = true; save.err = null;
+  where === "chg" ? renderChange() : renderBasket();
+  try {
+    const r = await S2.callTool("sql_editor_save_file", { name: save.name, sql: save.sql, overwrite: Boolean(overwrite) });
+    if (r.exists && !r.saved) { save.exists = true; save.busy = false; }
+    else { S2.toast(`Saved ${r.name} in ${r.folder ?? "the SQL folder"}`, "ok"); save = null; }
+  } catch (e) { if (save) { save.err = e; save.busy = false; } }
+  where === "chg" ? renderChange() : renderBasket();
+}
+
+function saveForm(where) {
+  if (save?.where !== where) return null;
+  const input = h("input", { class: "s2-input", value: save.name, spellcheck: "false", "aria-label": "Script file name",
+    oninput: (e) => { save.name = e.target.value; save.exists = false; } });
+  return h("div", { class: "sc-save" },
+    h("span", { class: "s2-small" }, "Save in the SQL folder as"), input,
+    save.exists ? [h("span", { class: "s2-small", style: { color: "var(--s2-warn)" } }, "exists:"),
+      h("button", { class: "s2-btn danger", disabled: save.busy, onclick: () => saveScript(true) }, "Overwrite")]
+      : h("button", { class: "s2-btn primary", disabled: save.busy, onclick: () => saveScript(false) }, save.busy ? h("span", { class: "s2-spinner" }) : null, "Save"),
+    h("button", { class: "s2-btn ghost", onclick: () => { const w = save.where; save = null; w === "chg" ? renderChange() : renderBasket(); } }, "Cancel"),
+    save.err ? S2.errorBox(save.err) : null);
+}
+
+function scriptButtons(where) {
+  return [
+    h("button", { class: "s2-btn", onclick: () => scriptAction(where, "copy"), title: "Copy the statements as a commented SQL script (nothing runs)" }, "Copy SQL"),
+    h("button", { class: "s2-btn", onclick: () => scriptAction(where, "open"), title: "Open the script in a new SQL Editor tab (it isn't run)" }, "Open in SQL Editor"),
+    h("button", { class: "s2-btn", onclick: () => scriptAction(where, "save"), title: "Save the script as a .sql file in the SQL folder" }, "Save as .sql…"),
+  ];
+}
+
+// In the change panel, next to Run.
+function scriptBar(where) {
+  const inBasket = state.basket.some((i) => JSON.stringify(i.action) === JSON.stringify(payload()));
+  return [
+    h("div", { class: "sc-script", role: "group", "aria-label": "SQL script" },
+      h("span", { class: "s2-small s2-muted" }, "Or as a SQL script for a DBA (nothing runs):"),
+      scriptButtons(where),
+      h("button", { class: "s2-btn", disabled: inBasket || chg?.scriptBusy, onclick: addToScript,
+        title: "Collect this change in the script basket below, to hand over several changes as one script" },
+        inBasket ? "In the script" : `Add to script${state.basket.length ? ` (${state.basket.length})` : ""}`),
+      chg?.action.action === "create_user" ? h("span", { class: "s2-small s2-faint" }, "The script has '<set password>' instead of a password: the password field is never used for it.") : null),
+    saveForm(where),
+    chg?.scriptErr ? S2.errorBox(chg.scriptErr) : null,
+  ];
+}
+
+async function addToScript() {
+  if (!chg?.plan) return;
+  const action = payload();
+  chg.scriptBusy = true; chg.scriptErr = null;
+  renderChange();
+  try {
+    // Checked together with what's already in the basket (names, order, objects created earlier in the script).
+    await S2.callTool("security_change_script", { actions: [...basketActions(), action], keep_order: state.keepOrder });
+    const first = (chg.plan.statements[0] ?? "").replace("IDENTIFIED BY '********'", "IDENTIFIED BY '<set password>'");
+    state.basket.push({ id: ++basketSeq, action, label: `${chg.plan.title}: ${first}` });
+    state.basketScript = null; state.basketErr = null;
+    storeBasket();
+    S2.toast(`Added to the script (${state.basket.length} change${state.basket.length === 1 ? "" : "s"})`, "ok");
+  } catch (e) { if (chg) chg.scriptErr = e; }
+  if (chg) chg.scriptBusy = false;
+  renderChange();
+  renderBasket();
+  reportContext();
+}
+
+function moveItem(i, d) {
+  const j = i + d;
+  if (j < 0 || j >= state.basket.length) return;
+  [state.basket[i], state.basket[j]] = [state.basket[j], state.basket[i]];
+  basketChanged();
+}
+function removeItem(i) { state.basket.splice(i, 1); basketChanged(); }
+function basketChanged() {
+  state.basketScript = null; state.basketErr = null;
+  if (save?.where === "basket") save = null;
+  storeBasket();
+  renderBasket();
+  if (chg) renderChange();
+  reportContext();
+}
+
+function renderBasket() {
+  const b = state.basket;
+  if (!b.length) { basketEl.replaceChildren(); return; }
+  basketEl.replaceChildren(h("div", { class: "sc-basket", role: "region", "aria-label": "Script basket" },
+    h("div", { class: "sc-bar" }, h("h2", {}, `SQL script (${b.length} change${b.length === 1 ? "" : "s"})`),
+      h("span", { class: "s2-small s2-faint" }, "Collected with \"Add to script\"; nothing runs from here. Each change is checked again when the script is made."),
+      h("span", { class: "s2-spacer" }),
+      h("label", { class: "sc-auto s2-small", title: "Off: creates, then grants and other changes, then revokes, then drops (safe order)" },
+        h("input", { type: "checkbox", checked: state.keepOrder, onchange: (e) => { state.keepOrder = e.target.checked; basketChanged(); } }), "Keep my order")),
+    h("ol", {}, b.map((it, i) => h("li", {}, h("span", { class: "lbl" }, it.label),
+      h("button", { class: "s2-btn ghost", disabled: i === 0, title: "Move up", "aria-label": `Move change ${i + 1} up`, onclick: () => moveItem(i, -1) }, "↑"),
+      h("button", { class: "s2-btn ghost", disabled: i === b.length - 1, title: "Move down", "aria-label": `Move change ${i + 1} down`, onclick: () => moveItem(i, 1) }, "↓"),
+      h("button", { class: "s2-btn ghost", title: "Remove from the script", "aria-label": `Remove change ${i + 1}`, onclick: () => removeItem(i) }, "✕")))),
+    h("div", { class: "sc-bar" }, scriptButtons("basket"),
+      h("button", { class: "s2-btn ghost", onclick: () => (state.basketScript ? (state.basketScript = null, renderBasket()) : scriptAction("basket", "show")) },
+        state.basketScript ? "Hide script" : "Show script"),
+      h("span", { class: "s2-spacer" }),
+      h("button", { class: "s2-btn ghost", onclick: () => { state.basket = []; basketChanged(); } }, "Clear")),
+    saveForm("basket"),
+    state.basketErr ? S2.errorBox(state.basketErr) : null,
+    state.basketScript ? h("pre", { class: "s2-pre", "aria-label": "Script" }, state.basketScript) : null));
+}
 
 // ---------------------------------------------------------------- Audit log tab
 function stepsBlock(lines) {
@@ -961,6 +1173,7 @@ function reportContext() {
     if (chg.plan) parts.push(`Previewed statements (not run unless the user confirms in the panel):\n${chg.plan.statements.join("\n")}`);
     if (chg.result) parts.push(`Result: ${chg.result.ok ? "done" : "failed"}.`);
   }
+  if (state.basket.length) parts.push(`SQL script basket (not run; for a DBA): ${state.basket.map((i, n) => `${n + 1}. ${i.label}`).join("; ")}.`);
   S2.updateModelContext(parts.join("\n"));
 }
 
@@ -994,6 +1207,8 @@ window.addEventListener("s2:connection-changed", () => {
 window.addEventListener("s2:set-sql", (e) => { if (e.detail?.tab && LOADERS[e.detail.tab]) setTab(e.detail.tab); });
 
 let started = false;
+restoreBasket();
+renderBasket();
 S2.onDisplayModeChange = () => render();
 await S2.connect({
   name: "singlestore-security",

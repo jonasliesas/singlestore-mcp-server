@@ -10,6 +10,23 @@ Cluster Monitor Queries/Disk/Bottomless/IO tabs; Query History usage, grouping, 
 hand-off; pytest + Playwright test suite.
 
 ## Next small items
+- ~~**SQL Editor: open and save files on SAS Viya**~~ – built 2026-10-15 (uncommitted, for Jonas to test): Open /
+  Save as get a location bar – This computer / SAS Content / SAS Server. `viya_files.py`: refs
+  `sas-content://<connection>/<path>` and `sas-server://<connection>/<path>` (kept like a local path in tabs,
+  drafts and Recent); SAS Content via `/folders/folders/@item?path=`, `…/members`, `/folders/rootFolders`,
+  `@myFolder` + `/folders/ancestors`, sizes via one `/files/files?filter=in(id,…)`; create `POST
+  /files/files?parentFolderUri=` (`filename*=UTF-8''…`), update `PUT …/content` with `If-Match` and the file's own
+  media type; SAS Server via the Compute API's file endpoints in the reused session
+  (`/compute/sessions/{id}/files/~fs~…` properties / `members` / `content`, `~~` = home; lockdown paths from the
+  session's autoexec lines; PUT needs `If-Match` on an existing file, 412 when stale). Save sends the ETag the tab
+  opened (`file_version` in the draft) → `conflict` / `exists` / `connection_mismatch` asked in the editor.
+  Tools: `viya_files_browse`, `viya_files_mkdir`, `viya_files_connection`; `sql_editor_open_file` /
+  `_save_file` take refs (+ `expected_version`, `use_active`). `S2.fileBrowser` got `list` / `showAll` / `mkdir`
+  hooks; fixed invisible "current" shortcut buttons (`.s2-btn.ghost.primary`). Tests: `tests/test_viya_files.py`
+  (offline, fake Viya), `tests/test_viya_files_sas.py` and `tests/ui/test_viya_files_ui.py` (`--sas`; own test
+  folder `My Folder/zz_test_sqleditor_<random>`, deleted; server files in the test session's `/tmp`, session
+  ended). Ideas: Save to SAS Content from the Notebook; open a Viya file straight from the Security script basket;
+  a delete/rename in the browser; per-tab Viya connection.
 - ~~Run the offline test subset in GitHub Actions on every push~~ – added after 0.9.0 (`.github/workflows/tests.yml`, Windows + Linux).
 - ~~Move the SingleStore password out of `~/.claude.json` env into the OS credential store~~ – done after
   0.9.0: `python -m singlestore_mcp.move_password`; tests use the saved connection.
@@ -109,6 +126,15 @@ What's left / ideas:
   `tests/ui/test_security_ui.py`), to be tested by the owner. Not yet: SET PASSWORD / ALTER USER password,
   account lock/unlock and lockout settings, column-level grants, `REQUIRE SSL`, model-visible change tools
   (deliberately app-only so passwords never go through the chat).
+- ~~**Security: SQL script instead of Run**~~ – built 2026-10-15 (uncommitted, for Jonas to test): under each
+  preview Copy SQL / Open in SQL Editor (new tab, not run) / Save as .sql, and a script basket ("Add to script",
+  reorder, remove, Keep my order; sessionStorage). App-only read-only tool `security_change_script`
+  (`security_admin.script`): same plan builder as Run, safe order, header, `-- WARNING:` comments,
+  `'<set password>'` placeholder (never a password), works without the change privileges (`plan` no longer
+  refuses: it returns `allowed`; `apply` still does). `security_change_plan(pending=…)` lets a change use objects
+  the basket creates (`needs_script`). Tests: `TestScript` in `tests/test_security_admin.py`, UI
+  `test_security_script_basket_opens_in_sql_editor`. Later: open a saved script straight from the basket's Save
+  result; send the script to a SAS Viya folder once the SQL Editor's Viya file tools land.
 - ~~Cluster health panel (`MV_EVENTS`, partition/replication status)~~ – done 2026-10-14: Cluster Monitor
   **Health** tab (`cluster_monitor_health`, `apps/cluster_ops.py`).
 - ~~Persisted metrics history in SQLite (CPU/memory/disk/queue over 24 h–7 d)~~ – done 2026-10-14:

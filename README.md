@@ -234,6 +234,40 @@ left switches between its views:
   `.sql` files you opened or saved; one click opens one. Files that no longer
   exist are left out.
 
+**Files on SAS Viya**
+
+The Open / Save as panel has three locations at the top: **This computer** (the
+above), **SAS Content** and **SAS Server**. Both Viya locations use the active SAS
+Viya connection (Connections → SAS Viya, or the Viya picker in a SAS tab).
+
+- **SAS Content** – the Folders and Files services, as in SAS Studio's *Content*
+  tree: starts in **My Folder**, shortcuts **Public** and **All folders** (the
+  root folders you can see).
+- **SAS Server** – the SAS Compute server's file system, as in SAS Studio's *SAS
+  Server* tree, through the Workspace's own SAS session (the Compute API's file
+  endpoints, so nothing runs as SAS code): starts in the compute context's
+  lockdown path (e.g. a landing zone), shortcuts **Home** and **Root (/)**. The
+  first use starts the SAS session (~30 s).
+- Folders, `.sql` / `.sas` files with size and modified time; **All files** shows
+  every file; **New folder** (Save as) creates one; **Connections…** goes to the
+  sign-in.
+- A file opened from Viya opens in a tab like a local one (`.sas` → PROC SQL,
+  `.sql` → SingleStore SQL) and the tab remembers where it came from (connection,
+  location and path), also after a restart; **Save** writes it back there and
+  **Recent** lists it (*name (SAS Content)*).
+- **Save** sends the version you opened (the file's ETag): if someone saved a
+  newer version on Viya meanwhile (e.g. in SAS Studio), nothing is overwritten –
+  the editor asks: **Overwrite** / **Save as…** / **Cancel**. Save as onto an
+  existing file asks **Replace it**. A SAS Content file keeps its media type (a
+  SAS Studio program stays a SAS program); a new `.sas` file is saved as one.
+- If the active SAS Viya connection changes, a tab with a file from another
+  connection shows *⚠ on Viya &lt;name&gt;*, and Save asks whether to save it to
+  the same path on the active connection instead.
+- Errors say what to do: not signed in → sign in under Connections; no
+  permission; folder or file not found; changed on the server.
+- Restored tabs don't re-read their Viya file (that could start a SAS session for
+  every tab); Save's version check catches a newer version.
+
 **Tabs**
 
 - In the Workspace the editor has tabs, like the notebooks: **＋** (or
@@ -629,7 +663,7 @@ the exact `jwks_endpoint`, `jwks_username_field` and user the cluster needs.
 | **Schema Explorer** `schema_explorer(database?, table?)` | Databases (with a bottomless / local icon) → tables with row counts and sizes; per table the columns, DDL (shard / sort keys), a row preview and its **Distribution** (data skew over partitions and leaves); **Check skew** for a whole database. **Ask Claude**, **Query in grid** and **Analyze…** (refresh statistics, with confirmation). |
 | **Pipeline Monitor** `pipeline_monitor(database?)` | Every pipeline's state, source → table, progress (files loaded / Kafka lag), latest batches and errors. Start / Stop (with confirmation), Test, error details, **Ask Claude**, auto-refresh. |
 | **Cluster Monitor** `cluster_monitor()` | Tabs **Overview** (per node SingleStore CPU against its core limit, memory and disk, beside a 15-minute CPU chart), **Health** (node and partition state, cluster events, license, problems explained), **Queries** (running now, plus every statement that ran in the last 60 s), **Disk**, **Bottomless**, **IO**, **History** (CPU, memory, disk, queue and connections over 1 h / 24 h / 7 d) and **Backups**. Refreshes every 5 s. |
-| **Security** `security(tab?)` | Users with risk flags, effective privileges with the reason for each, "who can access …", resource pools and the workload manager queue, audit log settings. Changes (users, grants, roles, groups, pools) only in the view, each previewed and confirmed. See [Security](#security). |
+| **Security** `security(tab?)` | Users with risk flags, effective privileges with the reason for each, "who can access …", resource pools and the workload manager queue, audit log settings. Changes (users, grants, roles, groups, pools) only in the view, each previewed and confirmed, or written to a SQL script for a DBA. See [Security](#security). |
 | **Config** `cluster_config(search?, changed_only?)` | Every engine variable per node, with the documented default; filter on changed from default / differs between nodes. See [Config](#config). |
 | **Clean up** `cleanup_work_tables()` | Finds the work tables SAS jobs leave behind (`_dm…` Data Management, `_flw…` flow, `SASTMP…` / `_tmp…` temp tables) in every non-system database: rows, size, created, created by, age, last use and dependent views. Select tables, confirm, and they're dropped one at a time, with a dry-run mode and a log. The **🧹 Clean up** button in the Schema Explorer's header. |
 | **Query History** `query_history(min_seconds=1, hours?, tab?)` | Every finished query the cluster traced: when, how long, user, database, rows, success / error, and a probable **Source** (SAS CAS, SAS in-database). Filter on runtime (1 s and up), period, user, database, status, type, source and text; sort by time, duration or rows. Repeated statements are grouped; statements only in the plan cache can be added. Select a query for its full SQL and **Get tuning recommendations** (plan tree, statistics, SAS EP card). Tabs **Queries**, **Trends**, **Usage** and **Advisor**. Its own **History** item in the workspace rail. |
@@ -1274,10 +1308,39 @@ would leave no admin (a user with `CREATE USER` or `SUPER` and the grant option
 on `*.*`). Warned: removing your own or another admin's rights, open
 connections of a dropped user (`DROP USER` doesn't close them), privileges
 that aren't granted directly, pools that are a user's default (SingleStore
-refuses to drop those), CPU limits summing over 100 %. Buttons are hidden when
-you can't change anything and disabled (with the reason) when you lack the
-privilege for one kind of change (`CREATE USER`, the grant option, `ALTER USER`,
-`CREATE POOL` / `DROP POOL`, per the SingleStore permissions matrix).
+refuses to drop those), CPU limits summing over 100 %. When you lack the
+privilege for a kind of change (`CREATE USER`, the grant option, `ALTER USER`,
+`CREATE POOL` / `DROP POOL`, per the SingleStore permissions matrix) the
+buttons still open the preview, but **Run** is off with the reason: you can
+make a SQL script of the change instead (below).
+
+**SQL script instead of Run** – for customers where a DBA reviews and runs
+security changes. Under every preview, next to Run:
+
+- **Copy SQL**, **Open in SQL Editor** (a new editor tab with the script; it
+  isn't run) and **Save as .sql…** (into the SQL folder, suggested name
+  `security-<date>-<time>-<what>.sql`; an existing file is only replaced after
+  **Overwrite**).
+- **Add to script** collects the change in the **SQL script** basket under the
+  panel: reorder (↑ ↓), remove (✕), **Show script**, then Copy SQL / Open in
+  SQL Editor / Save as .sql… for all of them at once. The basket lasts for the
+  browser session (also a page reload). A change can use what earlier changes
+  in the basket create (e.g. grant a new role to a new group): the pickers list
+  those objects "(in script)", and such a change can only go into the script.
+
+The script has a header (connection name and host, the connected user, date and
+time, one line per change), the statements in a safe order (creates – pools,
+roles, groups, users – then grants and other changes, then revokes, then drops;
+**Keep my order** turns that off) and each change's warnings as `-- WARNING:`
+comments. The statements are the ones the preview shows and Run would execute,
+built by the same plan builder from the cluster as it is now, with each change
+checked as if the earlier ones had run (names, existing objects, lock-out / last
+admin). Making a script runs nothing and needs none of the change privileges
+(the header notes which privileges whoever runs it needs). **No password is
+ever in a script**: `CREATE USER` gets `IDENTIFIED BY '<set password>'` and a
+`-- WARNING:` to replace it (the password field is never sent for a script).
+SingleStore 9.0 also accepts `CREATE USER` without `IDENTIFIED BY`, but that
+makes a user without a password, so it isn't used.
 
 The password is sent once, as a bound parameter of `CREATE USER`, and is never
 shown, logged, returned or stored (not in the plan, the model context or the
@@ -1506,6 +1569,7 @@ The manual steps below do the same by hand.
 |---|---|
 | SQL Editor: autocomplete, run SQL, results, history, CSV export | ✅ |
 | SQL files: Open / Save / Save as, file browser | ✅ |
+| SQL files on SAS Viya (SAS Content, SAS Server) | ✅ with a signed-in SAS Viya connection |
 | Notebook: SQL, Python and text cells, charts, `%sql` / `%%sql`, `.ipynb` files, tabs | ✅ |
 | Notebook Python environment and the **Packages** panel | ✅ (installed with `uv`) |
 | Schema Explorer, Pipeline Monitor (incl. Start / Stop / Test), Cluster Monitor, Query Grid | ✅ |

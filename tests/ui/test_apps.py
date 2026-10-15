@@ -143,6 +143,22 @@ def test_sql_editor_select_ticked_columns(workspace) -> None:
     _no_problems(page, errors, "SQL editor column picking")
 
 
+def test_sql_editor_save_as_filter_keeps_focus(workspace) -> None:
+    """Typing in Save as's filter keeps the cursor there (it used to jump to the file name after one character)."""
+    page, errors, ws = workspace
+    sql = find_frame(page, "SQL Editor")
+    sql.locator(".sq-filebtns").get_by_role("button", name="Save as", exact=True).click()
+    flt = sql.get_by_label("Filter", exact=True)
+    expect(flt).to_be_visible(timeout=20_000)
+    flt.click()
+    flt.press_sequentially("abc", delay=80)
+    assert flt.input_value() == "abc", f"filter holds {flt.input_value()!r}"
+    assert wait_js(sql, "document.activeElement?.getAttribute('aria-label') === 'Filter'", 3), "focus left the filter"
+    assert "abc" not in sql.get_by_label("File name").input_value(), "typing went into the file name"
+    sql.get_by_role("button", name="Cancel", exact=True).first.click()
+    _no_problems(page, errors, "SQL editor Save as filter")
+
+
 def test_sql_editor_streams_a_big_result(workspace) -> None:
     """LIMIT 100000: the first rows show before the rest has been read (the ROADMAP's "fetches all rows before
     showing any"), the total appears when loading ends, scrolling loads more rows into the grid, and Export CSV

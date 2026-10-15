@@ -154,8 +154,9 @@ def _send(url: str, method: str, data: bytes | None, hdrs: dict[str, str], timeo
 
 def request(method: str, url: str, *, body: Any = None, accept: str = "application/json",
             content_type: str = "application/json", timeout: float = 60, headers: dict[str, str] | None = None,
-            auth: bool = True) -> tuple[int, Any, dict[str, str]]:
-    """One HTTP request to Viya on a kept-alive connection: (status, parsed JSON or text, headers)."""
+            auth: bool = True, raw: bool = False) -> tuple[int, Any, dict[str, str]]:
+    """One HTTP request to Viya on a kept-alive connection: (status, parsed JSON or text, headers).
+    ``raw``: a successful (2xx) answer's body as bytes, as it came (file contents)."""
     s = sas_viya.settings()
     data = None
     hdrs = {"Accept": accept, **(headers or {})}
@@ -171,7 +172,7 @@ def request(method: str, url: str, *, body: Any = None, accept: str = "applicati
     last: Exception | None = None
     for direct in routes:
         try:
-            status, rh, raw = _send(url, method, data, hdrs, timeout, direct, s["ssl_verify"])
+            status, rh, body_bytes = _send(url, method, data, hdrs, timeout, direct, s["ssl_verify"])
         except (OSError, http.client.HTTPException, EOFError) as exc:
             _drop(url)
             last = exc
@@ -183,12 +184,14 @@ def request(method: str, url: str, *, body: Any = None, accept: str = "applicati
         raise SasError(f"Couldn't reach SAS Viya at {s['url']}: {last}") from last
     if status == 401 and auth:
         raise sas_viya.NeedsSignIn("SAS Viya refused the sign-in (401): sign in again in the Connections window.")
+    if raw and 200 <= status < 300:
+        return status, body_bytes, rh
     if "json" in rh.get("content-type", ""):
         try:
-            return status, json.loads(raw or b"null"), rh
+            return status, json.loads(body_bytes or b"null"), rh
         except ValueError:
             pass
-    return status, raw.decode("utf-8", "replace"), rh
+    return status, body_bytes.decode("utf-8", "replace"), rh
 
 
 def _viya_error(status: int, body: Any, what: str) -> SasError:

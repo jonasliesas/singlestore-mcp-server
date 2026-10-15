@@ -341,3 +341,40 @@ class McpSession:
 def _short(args: Any) -> str:
     s = json.dumps(args, ensure_ascii=False, default=str) if args else ""
     return s if len(s) < 200 else s[:200] + "…"
+
+
+# ----------------------------------------------------------------------------- SAS Viya test files
+
+VIYA_TEST_PREFIX = "zz_test_sqleditor_"
+
+
+def delete_viya_test_folder(home: Path, path: str) -> None:
+    """Delete a SQL Editor test folder in SAS Content and the files in it, with the test server's SAS Viya
+    connection (its sas.json and sign-in), from this process. Only ever a folder named ``zz_test_sqleditor_…``
+    that holds files only; nothing is read."""
+    from singlestore_mcp import viya_files as vf
+
+    assert path.rstrip("/").rsplit("/", 1)[-1].startswith(VIYA_TEST_PREFIX), path
+    old = os.environ.get("SINGLESTORE_MCP_HOME")
+    os.environ["SINGLESTORE_MCP_HOME"] = str(home)
+    try:
+        try:
+            folder = vf._folder(path)
+        except LookupError:
+            return
+        for m in vf._members(folder["id"]):
+            assert vf._is_file(m), f"unexpected item in the test folder: {m.get('name')}"
+            status, body, _ = vf._http("DELETE", m["uri"])
+            assert status in (200, 204), body
+        status, body, _ = vf._http("DELETE", f"/folders/folders/{folder['id']}")
+        assert status in (200, 204), body
+        try:
+            vf._folder(path)
+        except LookupError:
+            return
+        raise AssertionError(f"test folder {path} still there")
+    finally:
+        if old is None:
+            os.environ.pop("SINGLESTORE_MCP_HOME", None)
+        else:
+            os.environ["SINGLESTORE_MCP_HOME"] = old

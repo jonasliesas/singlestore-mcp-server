@@ -21,7 +21,7 @@ from typing import Any
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, ToolAnnotations
 
-from .. import assistant, fileio, result_stream
+from .. import assistant, fileio, result_stream, sas_viya, viya_files
 from .. import sql_editor_state as editor_state
 from ..db import db
 from ._core import APP_ONLY, apps, head_hash, jsonable_rows, page_parts, register_app, tool_result, with_browser_link
@@ -450,11 +450,21 @@ def sql_editor_files() -> CallToolResult:
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
 def sql_editor_open_file(name: str, remember: bool = True) -> CallToolResult:
-    """Read one .sql file from the SQL Editor's folder.
+    """Read one .sql file from the SQL Editor's folder, or a file on SAS Viya.
 
+    ``name``: a local file (relative to the SQL folder, or absolute), or a SAS Viya file ref
+    (``sas-content://<connection>/<path>`` or ``sas-server://<connection>/<path>``, see viya_files_browse);
+    a Viya file's result has its ``version`` (ETag), which sql_editor_save_file checks before overwriting.
     ``remember`` puts it on the Recent list (false when the editor only
     re-reads its open file to compare it with the restored draft).
     """
+    if viya_files.is_ref(name):
+        res = viya_files.read(name)
+        if remember:
+            editor_state.remember_file(res["ref"], res["name"])
+        data = {"name": res["name"], "path": res["ref"], "sql": res["text"], "folder": None, "version": res["version"],
+                "location": res["location"], "connection": res["connection"], "display": res["display"]}
+        return tool_result(f"Opened {res['display']}", data)
     path = _sql_path(name)
     if not path.is_file():
         raise LookupError(f"{_relative(path)} doesn't exist in {sql_dir()}.")
@@ -471,12 +481,26 @@ def sql_editor_open_file(name: str, remember: bool = True) -> CallToolResult:
 
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
-def sql_editor_save_file(name: str, sql: str, overwrite: bool = False) -> CallToolResult:
-    """Save the editor's SQL as a .sql file in the SQL Editor's folder.
+def sql_editor_save_file(name: str, sql: str, overwrite: bool = False, expected_version: str | None = None,
+                         use_active: bool = False) -> CallToolResult:
+    """Save the editor's SQL as a .sql file in the SQL Editor's folder, or to a file on SAS Viya.
 
     An existing file is only replaced with ``overwrite``; otherwise the result
     says ``exists`` so the app can ask first.
+
+    SAS Viya files (``name`` a ``sas-content://`` / ``sas-server://`` ref): ``expected_version`` is the version
+    (ETag) the editor opened; when the file on Viya is newer the result says ``conflict`` (nothing written) and
+    the app asks before saving with ``overwrite``. A ref of another SAS Viya connection than the active one
+    answers ``connection_mismatch``; ``use_active`` saves it to the same path on the active connection.
     """
+    if viya_files.is_ref(name):
+        res = viya_files.write(name, sql, expected=expected_version, overwrite=overwrite, use_active=use_active)
+        if res.get("saved"):
+            editor_state.remember_file(res["ref"], res["name"])
+            return tool_result(f"Saved {res['display']}", {**res, "path": res["ref"], "folder": None, "exists": False})
+        what = ("is on another SAS Viya connection" if res.get("connection_mismatch")
+                else "changed on SAS Viya since it was opened" if res.get("conflict") else "already exists")
+        return tool_result(f"{name} {what}; nothing saved.", {**res, "path": res.get("ref", name)})
     path = _sql_path(name)
     if len(sql.encode("utf-8")) > _MAX_FILE_BYTES:
         raise ValueError(f"The SQL is larger than {_MAX_FILE_BYTES // 1_000_000} MB.")
@@ -491,6 +515,37 @@ def sql_editor_save_file(name: str, sql: str, overwrite: bool = False) -> CallTo
         f"Saved {_relative(path)}",
         {"name": _relative(path), "saved": True, "exists": False, "folder": str(sql_dir()), "path": str(path)},
     )
+
+
+# ---------------------------------------------------------------- SAS Viya files
+# Open / Save as also reach SAS Viya (the active SAS Viya connection): "SAS Content" (Folders / Files
+# services) and "SAS Server" (the file system of the Workspace's Compute session). See
+# singlestore_mcp.viya_files; opening and saving go through sql_editor_open_file / _save_file with a ref.
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def viya_files_browse(location: str, path: str | None = None, show_all: bool = False) -> CallToolResult:
+    """List a folder on SAS Viya for the SQL Editor's Open / Save as: subfolders and .sql / .sas files
+    (``show_all``: every file) with size and modified time.
+
+    ``location``: "content" (SAS Content; starts in My Folder, shortcuts Public and all folders) or "server" (the
+    SAS Compute server's file system, in the Workspace's SAS session; starts in the first lockdown path, else the
+    session's home). Each file has ``ref``, the name sql_editor_open_file / _save_file take.
+    """
+    data = viya_files.browse(location, path, show_all)
+    return tool_result(f"{len(data['folders'])} folder(s), {len(data['files'])} file(s) in {data['label']} {data['path']}", data)
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
+def viya_files_mkdir(location: str, parent: str, name: str) -> CallToolResult:
+    """Create a folder ``name`` in ``parent`` on SAS Viya ("content" or "server"), for Save as."""
+    data = viya_files.mkdir(location, parent, name)
+    return tool_result(f"Created {data['path']}", data)
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def viya_files_connection() -> CallToolResult:
+    """The active SAS Viya connection (files on Viya belong to one), without signing in or starting a session."""
+    name = sas_viya.active_name()
+    return tool_result(f"Active SAS Viya connection: {name}" if name else "No SAS Viya connection", {"active": name})
 
 
 # ---------------------------------------------------------------- editor state
@@ -517,6 +572,7 @@ def sql_editor_save_draft(
     file_path: str | None = None,
     file_external: bool = False,
     saved_hash: str | None = None,
+    file_version: str | None = None,
     continue_on_error: bool = False,
     tab_id: str | None = None,
     dirty: bool = False,
@@ -525,6 +581,9 @@ def sql_editor_save_draft(
     sas: dict[str, Any] | None = None,
 ) -> CallToolResult:
     """Autosave one SQL Editor tab's text, database and cursor (never writes the open .sql file itself).
+
+    ``file_version``: for a file on SAS Viya, the version (ETag) the editor opened or last saved, so Save after
+    a restart still notices a newer version on the server.
 
     ``saved_hash`` is the editor's hash of the open file's last saved text, so a
     restored draft knows whether it has unsaved changes; ``dirty`` says so for
@@ -535,6 +594,8 @@ def sql_editor_save_draft(
     ``closed`` in the result: the tab was closed (elsewhere) and the text wasn't kept.
     """
     file = {"name": file_name, "path": file_path, "external": file_external, "saved_hash": saved_hash} if file_name else None
+    if file and file_version and viya_files.is_ref(file_path):
+        file["version"] = str(file_version)[:200]
     draft = editor_state.save_draft({"sql": sql, "database": database, "cursor": {"anchor": anchor, "head": head},
                                      "file": file, "continue_on_error": continue_on_error, "dirty": dirty,
                                      "language": language, "origin": editor_state.clean_origin(origin),
