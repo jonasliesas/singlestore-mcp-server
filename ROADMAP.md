@@ -1,202 +1,76 @@
 # Roadmap
 
-Agreed with the owner; confirm the order before starting a new release.
-Last updated 2026-10-14 (0.10.1 released).
+Agreed with the owner; confirm scope and order before starting a round. Details of what was built are in the
+README and the git log; this file keeps what's next.
+Last updated 2026-10-16 (latest release 0.10.1; one commit since).
 
-## 0.9.0 (released 2026-10-14)
-SQL Editor tabs, autosave, history and SELECT builder; Schema Explorer bottomless info and Analyze;
-Cluster Monitor Queries/Disk/Bottomless/IO tabs; Query History usage, grouping, plan tree, SAS EP card
-(jobs and VA/CAS); Security and Config views (read-only); Workload Claude chat and SQL Editor ↔ Workload
-hand-off; pytest + Playwright test suite.
+## Released
+- **0.9.0** (2026-10-14) – Workload, SQL Editor tabs/history/SELECT builder, Security and Config views (read-only),
+  Cluster Monitor and Query History extensions, pytest + Playwright suite.
+- **0.10.0** (2026-10-14) – SAS in the Workspace (Viya REST client, SAS/CAS sources, Run as PROC SQL / FedSQL /
+  CAS, pushdown verdict), several Viya connections, Security changes from the GUI, Cluster Monitor Health /
+  History / Backups, SAS EP tuning, table skew, streaming results, ~3× faster start-up, crash back-off, safe
+  state files on Windows, password moved out of Claude's config, GitHub Actions.
+- **0.10.1** (2026-10-14) – SAS autocomplete fetches columns itself (case-insensitive), SAS session no longer
+  restarted on a missing table, Viya connection retries, SAS tests opt-in (`--sas`).
 
-## Next small items
-- ~~**SQL Editor: open and save files on SAS Viya**~~ – built 2026-10-15 (uncommitted, for Jonas to test): Open /
-  Save as get a location bar – This computer / SAS Content / SAS Server. `viya_files.py`: refs
-  `sas-content://<connection>/<path>` and `sas-server://<connection>/<path>` (kept like a local path in tabs,
-  drafts and Recent); SAS Content via `/folders/folders/@item?path=`, `…/members`, `/folders/rootFolders`,
-  `@myFolder` + `/folders/ancestors`, sizes via one `/files/files?filter=in(id,…)`; create `POST
-  /files/files?parentFolderUri=` (`filename*=UTF-8''…`), update `PUT …/content` with `If-Match` and the file's own
-  media type; SAS Server via the Compute API's file endpoints in the reused session
-  (`/compute/sessions/{id}/files/~fs~…` properties / `members` / `content`, `~~` = home; lockdown paths from the
-  session's autoexec lines; PUT needs `If-Match` on an existing file, 412 when stale). Save sends the ETag the tab
-  opened (`file_version` in the draft) → `conflict` / `exists` / `connection_mismatch` asked in the editor.
-  Tools: `viya_files_browse`, `viya_files_mkdir`, `viya_files_connection`; `sql_editor_open_file` /
-  `_save_file` take refs (+ `expected_version`, `use_active`). `S2.fileBrowser` got `list` / `showAll` / `mkdir`
-  hooks; fixed invisible "current" shortcut buttons (`.s2-btn.ghost.primary`). Tests: `tests/test_viya_files.py`
-  (offline, fake Viya), `tests/test_viya_files_sas.py` and `tests/ui/test_viya_files_ui.py` (`--sas`; own test
-  folder `My Folder/zz_test_sqleditor_<random>`, deleted; server files in the test session's `/tmp`, session
-  ended). Ideas: Save to SAS Content from the Notebook; open a Viya file straight from the Security script basket;
-  a delete/rename in the browser; per-tab Viya connection.
-- ~~Run the offline test subset in GitHub Actions on every push~~ – added after 0.9.0 (`.github/workflows/tests.yml`, Windows + Linux).
-- ~~Move the SingleStore password out of `~/.claude.json` env into the OS credential store~~ – done after
-  0.9.0: `python -m singlestore_mcp.move_password`; tests use the saved connection.
-- ~~Workload runs end a little before the set duration~~ – fixed 2026-10-14: a run lasts start + duration
-  (or until Stop), rates are over that window; `compare_runs` puts old saved runs (no `"timing": 2`) over
-  their set duration too. Offline tests with a fake clock and connection (`TestRunTiming`).
-- ~~Supervisor restarts in a tight loop when the server code has a syntax/import error~~ – fixed 2026-10-14:
-  back-off 1/2/5/10/20/30 s (reset after 60 s of running), the error's traceback tail in the log and in an
-  immediate tool error, `restart_server` retries at once and reports the new error (`tests/test_supervisor.py`).
-- ~~SAS Viya sign-in "lost" after signing in in Connections~~ – fixed 2026-10-14 (uncommitted, for Jonas to
-  test). Cause: the SAS Viya form rendered (empty, usable) before `sas_viya_state` answered – it can take
-  seconds while it renews / imports a token over the network, and the app's tool calls queue behind it –
-  and **Sign in saved the form first**, so a click in that window saved an empty address and startup code;
-  saving another address deleted the token. Fix: no implicit save on Sign in, the list only renders once
-  loaded (and its state reads no network), an empty address never blanks a saved one, a token is only
-  dropped when the address changes to another non-empty one, `sas.json` is read/written with `fileio` (an
-  unreadable file raises instead of reading as "no Viya"). Tests: `tests/test_sas_viya.py`,
-  `tests/ui/test_connections_ui.py`.
-- ~~Several SAS Viya connections, one active (Jonas: same setup as SingleStore)~~ – done 2026-10-14
-  (uncommitted): `sas_viya.py` keeps a list in `sas.json` (old file migrated, its token kept; empty address →
-  empty list), token per connection (`sas-viya:<name>#token`), Connections → SAS Viya connections with
-  + New / Edit / Delete / Use / Sign in / Sign out / Test; Use resets the Workspace's SAS sessions; new
-  kernels use the active one (token command names the connection); the Schema Explorer's SAS / CAS sources
-  and the SQL Editor (⚙, and next to the library picker with ≥ 2 connections) show and switch it.
-  Ideas: a Test for the form before saving; per-tab Viya connection in the SQL Editor.
+## Since 0.10.1 (committed, not released – collecting for 0.11.0)
+- Security: **SQL script instead of Run** – Copy / Open in SQL Editor / Save as .sql, script basket, password
+  placeholder, works without change privileges.
+- SQL Editor: **open and save files on SAS Viya** – SAS Content and SAS Server (Compute file system), version
+  check before overwriting, tabs remember their Viya file.
+- Open / Save as as a **large dialog**; typing in its filter no longer jumps to the file name.
 
-## SAS in the Workspace (next big feature – agreed design)
-**Status (2026-10-14, uncommitted, for Jonas to test):** built per the design below – `sas_rest.py` (Viya REST
-client: one kept-alive Compute session with startup code, Compute data API, one CAS session), `sas_sql.py`
-(wrapping, write checks, sastrace / FedSQL plan parsing, verdicts), `apps/sas_workspace.py` (app tools),
-Schema Explorer sources SingleStore / SAS libraries / CAS, SQL Editor "Run as" with Result / Log / Pushdown
-tabs, ⚙ PROC SQL options, Ctrl+Shift+L, "looks wrong" check, badges in editor / results / history, .sas
-files, Connections → SAS Viya: CAS server + startup code. Tests: `tests/test_sas_sql.py` (offline),
-`tests/test_sas_workspace.py` (`sas`), `tests/ui/test_sas_ui.py` (`ui` + `sas`).
-What's left / ideas:
-- The SQL Editor's own tree follows the tab's language (it doesn't switch the language); the Schema
-  Explorer's **Query in SQL Editor** does set it. Revisit if a click in the tree should switch it too.
-- FedSQL (Compute) pushdown: the verdict comes from the `_method` plan; the SQL text FedSQL sends isn't in
-  the log, so no "Find in Query History" there. A trace option for that is still to find.
-- "Find in Query History": the History view's list only has queries ≥ 1 s, so short pushed-down queries
-  are found in the plan cache (shown in a toast) but may not be listed in the view.
-- No Stop for a long SAS run yet (jobs time out after 15 min); one SAS session serves all tabs, one run at
-  a time.
-- ~~Autocomplete has columns only for tables expanded in the tree~~ – done 2026-10-14 (uncommitted, for Jonas to
-  test): SAS tabs fetch the columns of tables the SQL names by themselves (`lib.table.`, aliases, tables named in
-  the statement, unqualified names; quoted / name-literal names; one-level names against the tab's library /
-  caslib), in the background (debounced 350 ms, one `sas_lookup_columns` call for all unknown tables of the
-  statement, ≤ 8, Compute tables in parallel), cached per Viya connection + library + table, "doesn't exist"
-  remembered 60 s; dropped on a new SAS session / other Viya connection / ↻ / Restart SAS session.
-  `apps/vendor/sas-complete.js` (detection + cache), tests `tests/test_sas_complete.py` (offline, node),
-  `test_lookup_columns_for_autocomplete` (`sas`), UI `test_sql_editor_sas_autocomplete_fetches_columns`.
-  Found on the way: every Compute 404 names the session in its `path:` detail, so a missing table was taken for
-  "session ended" and restarted the SAS session (~35 s, startup code again) – `sas_rest.session_gone` now checks
-  the error code / message.
-- An "S2" libname from the active SingleStore connection (as notebooks get) isn't assigned in the
-  Workspace session; use the startup code.
-- Agreed design (kept for reference):
-- **Schema Explorer** gets three sources: SingleStore, SAS libnames (Viya Compute), SAS caslibs (CAS).
-  Libnames = what the compute context assigns + optional startup code run when the session starts
-  (e.g. `%include` of the libname files), configured in Connections. SAS/ACCESS libnames
-  (engine SSTORE) show their SingleStore database and link to it.
-- **SQL Editor language choice:** SingleStore SQL / PROC SQL (libnames) / FedSQL (libnames) /
-  FedSQL in CAS (caslibs), with result grid, SAS log tab and autocomplete from SAS metadata.
-  - The user writes only the SQL; the editor wraps it (`proc sql; … quit;`, `proc fedsql; … quit;`,
-    CAS `fedSql.execDirect`). Same statement splitting / Ctrl+Enter / Run all as SingleStore SQL.
-    The generated SAS code is shown in the log tab with Copy.
-  - Text starting with `proc` / `data` / `%` runs as plain SAS code, unwrapped.
-  - PROC SQL options (outobs, noexec, feedback) via a small settings menu.
-  - "Run as" selector next to the database picker (which then lists databases / librefs / caslibs);
-    colour badges (S2 blue, PROC SQL / FedSQL orange, CAS purple, SAS for unwrapped code) in editor,
-    log and history. Set automatically from the schema tree and by file type (.sas → PROC SQL,
-    .sql → SingleStore), saved with draft/file and history; never guessed from the SQL text, but warn
-    when it looks wrong (e.g. `s2.cars` while SingleStore is selected). Ctrl+Shift+L cycles.
-- **Writes** allowed with confirmation, except no confirmation for the SAS WORK library; shared caslibs
-  get an extra warning.
-- **Show pushdown:** sastrace / sql_ip_trace; show the SQL sent to SingleStore and mark clearly whether
-  it was pushed down fully, partly, or pulled into SAS.
-- Reuse `sas_viya.py` (OAuth token, sas.json, compute context); the server needs its own Viya REST
-  client (Compute + CAS) – today SAS code only runs via saspy in the notebook kernel.
-- SAS 9 libnames via SAS/CONNECT: a later round.
+## Next round (proposed 2026-10-16 – waiting for Jonas's go)
+1. **SS / S2 badges for CAS caslibs** – `SingleStore` type (SpeedyStore: live pushdown, no in-memory copy) →
+   **SS**, purple; `singlestore_standard` (standard data connector, loads into CAS memory) → **S2**, grey-blue
+   outline; tooltip with the SingleStore database. SAS/ACCESS libnames in Compute keep S2.
+2. **Automatic S2 libname** from the active SingleStore connection in the Workspace's SAS session (as notebooks
+   get): assigned at session start, reassigned when the active connection changes, startup code runs after it.
+   Password from the credential store, sent with `nosource` (never in log/history); alternative `authdomain=`
+   (needs a Viya admin). Entra/JWT: refresh before the token expires. Engine/TLS options as on Zeus.
+3. **"Show code" for a library or caslib** – the `LIBNAME` / `caslib … datasource=(…)` statement (and
+   `table.addCaslib`) rebuilt from the session's metadata, passwords/tokens as placeholders; Copy / Open in SQL
+   Editor (plain SAS, not run). Marked "reconstructed from the current settings".
 
-## Later (0.10.0 candidates)
-- **Audit log** – researched 2026-10-14 (README, Security → Audit log): the log is CSV files per node in
-  `auditlogsdir`, no SQL view; this cluster has `auditlog_level = OFF` and runs on the Kubernetes Operator
-  (FS pipelines unsupported, the app user has no FILE READ), so it can't be read from the server without
-  infrastructure changes. Done: a read-only **Audit log** tab with the settings and the admin steps.
-  Design for a real Audit view, once an admin decides: (1) set `auditlog_level = ADMIN-ONLY` (or
-  `LOGINS-ONLY`) and `auditlog_retention_period` in the MemsqlCluster `spec.globalVariables` (rolling
-  restart); (2) ship each pod's `auditlogsdir` with a log collector (Fluent Bit) into a table, e.g.
-  `audit.auditlog(entry_id, ts, node, node_type, thread_id, user, db, correlation_id, query_hash, query,
-  status, kind)`; (3) the Audit tab reads that table: filter by user, time, statement type (LOGIN / DDL /
-  GRANT / DML), with the completion records (`C`) joined for success/failure. Shared infrastructure:
-  give the admin the settings, don't change them.
-- ~~**Security view v2:** GUI for changes (GRANT/REVOKE, roles, groups, resource pools) with preview and
-  explicit confirmation~~ – built 2026-10-14 (`security_admin.py`, tools `security_admin_capabilities`,
-  `security_change_plan`, `security_change_apply`; tests `tests/test_security_admin.py`,
-  `tests/ui/test_security_ui.py`), to be tested by the owner. Not yet: SET PASSWORD / ALTER USER password,
-  account lock/unlock and lockout settings, column-level grants, `REQUIRE SSL`, model-visible change tools
-  (deliberately app-only so passwords never go through the chat).
-- ~~**Security: SQL script instead of Run**~~ – built 2026-10-15 (uncommitted, for Jonas to test): under each
-  preview Copy SQL / Open in SQL Editor (new tab, not run) / Save as .sql, and a script basket ("Add to script",
-  reorder, remove, Keep my order; sessionStorage). App-only read-only tool `security_change_script`
-  (`security_admin.script`): same plan builder as Run, safe order, header, `-- WARNING:` comments,
-  `'<set password>'` placeholder (never a password), works without the change privileges (`plan` no longer
-  refuses: it returns `allowed`; `apply` still does). `security_change_plan(pending=…)` lets a change use objects
-  the basket creates (`needs_script`). Tests: `TestScript` in `tests/test_security_admin.py`, UI
-  `test_security_script_basket_opens_in_sql_editor`. Later: open a saved script straight from the basket's Save
-  result; send the script to a SAS Viya folder once the SQL Editor's Viya file tools land.
-- ~~Cluster health panel (`MV_EVENTS`, partition/replication status)~~ – done 2026-10-14: Cluster Monitor
-  **Health** tab (`cluster_monitor_health`, `apps/cluster_ops.py`).
-- ~~Persisted metrics history in SQLite (CPU/memory/disk/queue over 24 h–7 d)~~ – done 2026-10-14:
-  `metrics_store.py` (sampler, `metrics.db`, 24 h raw + 10-min rows, 7 days) and the **History** tab.
-  Later: memory/disk alerts on trends (e.g. "disk full in N days"), CSV export of the history.
-- ~~Per-table skew in Schema Explorer~~ – built 2026-10-14 (uncommitted, for Jonas to test): a table's
-  **Distribution** tab and **Check skew** on a database (`schema_explorer_skew`; TABLE_STATISTICS master
-  partitions + COLUMNAR_SEGMENTS, on demand only): skew %, largest partitions, per leaf, shard key and advice
-  with docs links. Tests: `tests/test_skew.py`, `tests/test_streaming_skew.py`, UI `test_schema_explorer_distribution`.
-  Idea: a "reshard simulation" for a candidate key (the docs' `PARTITION_ID()` query) – it scans the table,
-  so only on an explicit click.
-  ~~Backup overview~~ – done 2026-10-14: **Backups** tab
-  (`MV_BACKUP_HISTORY` / `MV_BACKUP_STATUS`, read-only). The demo cluster has no backups in its history
-  (and its license expired 2024-11-14; the Health tab shows it).
-- Multi-user Workspace on a server with login – **on hold** until Jonas has a decision that the app will be used
-  at that scale. A design proposal exists locally (`docs/MULTI_USER_DESIGN.md`, not committed).
-- ~~Performance: `cluster_monitor_data` ~1.3 s, ~1.1 MB pages~~ – done 2026-10-14 (`perf/startup.py`):
-  `cluster_monitor_data` reuses an earlier counter sample (~0.16 s; only the first call in 5 min still
-  waits 1 s for a CPU baseline); view pages come without the shared head (13–120 KB instead of ~0.45 MB;
-  SQL Editor / Notebook ~0.65 MB, the CodeMirror bundle); DB connections open while the server loads;
-  `restart_server` hands over to a pre-loaded standby (restart → Workspace usable ~2.3 s, was ~7 s).
-- Startup, still open: the first `s2.connect` in a process compiles singlestoredb's Fusion SQL grammars
-  (~0.9 s CPU, even with Fusion off – upstream issue to raise); CodeMirror (0.5 MB) is still sent once for the
-  SQL Editor and once for the Notebook; the Cluster view's first open waits 1 s for its CPU baseline.
-- Raise the fixed ~5.2 s wait with the SAS EP owners – analysed after 0.9.0 (README, SAS EP): a +5.0 s step
-  before the EP sends its first SQL, no CPU or queueing in SingleStore, concurrent calls share one wait, and most
-  EP calls are fast and untraced (the "77 %" is of traced calls only). Questions for them are in the README;
-  hypotheses (DNS timeout / EP cold start / serialized step) still to verify with their EP logs.
-- ~~SAS EP card: time breakdown, plateau / shared-wait / small-calls flags, failed generated statement, sourced
-  tips; EP overview in the Usage tab~~ – done after 0.9.0 (`sas_ep.py`, `tests/test_sas_ep.py`).
-- SAS EP follow-ups: once the trace threshold is lowered for a while, re-check the warm/cold split with the fast
-  calls; the `_hello_world` health check fails daily because its output table exists (tell its owner).
+## Backlog
+**Security**
+- Password change (`SET PASSWORD` / `ALTER USER … IDENTIFIED BY`) – masked field, placeholder in scripts.
+- Account lock / unlock, and unlock after a failed-login lockout – check which forms 9.0 supports.
+- Column-level grants – check 9.0 support; else a view with the allowed columns + grant.
+- `REQUIRE SSL` / `REQUIRE NONE` per user – check 9.0 syntax.
+- Audit view – needs an admin: `auditlog_level` (e.g. ADMIN-ONLY) in the Operator's `spec.globalVariables`, the
+  node log files shipped (Fluent Bit) into a table; then an Audit tab with filters. Today: guidance tab only.
+
+**SAS in the Workspace**
+- Stop button for long SAS runs (now cut off after 15 min); one SAS session serves all tabs, one run at a time.
+- FedSQL (Compute) pushdown shows only the verdict – find a trace that gives the SQL text.
+- "Find in Query History" for short pushed-down queries (the History list only has queries ≥ 1 s).
+- SAS 9 libnames via SAS/CONNECT.
+- Ideas: SQL Editor tree click switches the language; per-tab Viya connection; delete/rename in the Viya file
+  browser; save from the Notebook / the Security basket straight to SAS Content.
+
+**Workspace / performance**
+- Notebook Open / Save as: same large dialog as the SQL Editor.
+- CodeMirror (0.5 MB) is sent twice (SQL Editor and Notebook).
+- Cluster view's first open waits 1 s for a CPU baseline.
+- singlestoredb compiles its Fusion SQL grammars on every start (~0.9 s CPU) – raise upstream.
+- Metrics history: trend alerts (e.g. "disk full in N days"), CSV export.
+- Skew: "reshard simulation" for a candidate shard key (scans the table – explicit click only).
+
+**SAS EP (with the SAS EP owners)**
+- The fixed ~5 s wait before the EP's first SQL (no CPU or queueing in SingleStore; concurrent calls share one
+  wait). Questions and hypotheses (DNS timeout / EP cold start / serialized step) are in the README.
+- Re-check warm/cold split after lowering the trace threshold for a while; the daily `_hello_world` check fails
+  because its output table exists (tell its owner).
+
+## On hold
+- **Multi-user Workspace** on a server with login – until Jonas decides the app will be used at that scale.
+  Design proposal locally in `docs/MULTI_USER_DESIGN.md` (not committed).
 
 ## Known small issues
-- ~~`LIMIT 100000` in the SQL Editor fetches all rows before showing any~~ – fixed 2026-10-14 (uncommitted):
-  reads stream (`result_stream.py`, `db.stream`): first 1,000 rows at once, the rest loads on the server (cap
-  100,000 rows / ~128 MB per result, 384 MB in all), pages on scroll, total when done, Stop = KILL QUERY;
-  Export CSV / sort load all rows first. `query_grid` stops reading at max_rows (it read every row before).
-  Not streamed yet: writes (`sql_editor_execute`) and SAS runs (1,000 rows as before).
 - Long single Python calls in a notebook can't be interrupted on Windows.
 - SAS notebook tests passed without the SAS secrets opt-in (unexplained).
-- ~~Two UI tests are flaky (about 1 run in 3): `test_sql_editor_tabs` and `test_sql_editor_and_workload_round_trip`~~
-  – cause found 2026-10-14: on Windows `os.replace` fails (PermissionError) while the target or the new temp
-  file is open – a concurrent read of the same JSON (the tests poll it while the app saves), the other server
-  process, or Defender scanning (measured: ~1 in 20 replaces in %TEMP% with nobody else, almost all of them
-  with a reader polling) – and a read during a replace could fail and be taken for "file missing": for the SQL
-  Editor's tabs.json that started a fresh tab list (all tabs lost). Fixed for the SQL Editor state
-  (`fileio.py`: retried replace and read, unreadable ≠ missing, in-process reads under the writer's lock);
-  the workload test now waits for the app's Save to finish before it reads the store.
-  The same fix now covers workloads, saved connections, alerts and notebook saves (an unreadable
-  workloads.json / connections.json used to read as empty, so the next save could drop every workload or
-  connection).
-- ~~Under the load of the full suite, `tests/ui/test_sas_ep_ui.py` and `tests/ui/test_sas_ui.py::test_sql_editor_run_as_proc_sql`
-  failed once~~ – fixed 2026-10-14 (uncommitted). PROC SQL: the failing step was the SAS library list – the
-  screenshot of that run shows "Couldn't reach SAS Viya … UNEXPECTED_EOF_WHILE_READING" in the tree, a dropped
-  connection on a fresh HTTPS connection, which `sas_rest` retried only on a reused one. Now a dropped connection
-  (SSL EOF / reset / remote closed – not refused or unknown host) is tried twice more (0.5 s, 1.5 s) when nothing
-  was sent yet or the request is idempotent; a POST that may have arrived is never repeated (offline tests with a
-  local dropping server). The test warms the SAS session through MCP in a fixture, waits 180 s for the tree and
-  stops at once with the tree's error; its autosave sleep became a poll. EP card: the Playwright error came from a
-  fixed 30 s step (list, then the tuning button, which stays disabled until the run's full SQL loads); each step now
-  waits for its own condition (list idle with SAS EP rows, button enabled, card or error) with 120–180 s. Not
-  reproduced with a 12-core CPU load (2 runs, 3–4 min each but green); after the fix single runs of
-  both tests were green (the 3× full-folder / 10× repeat runs were stopped as too slow). Also seen once in a baseline run: `test_cluster_monitor_ui` (no `.cm-node` within 10 s after going
-  back to Overview) – not looked into.
+- `tests/ui/test_cluster_monitor_ui.py` failed once (no `.cm-node` within 10 s after going back to Overview).
+- Mixing `tests/` and `tests/ui/` files in one pytest call fails with "fixture 'ui' not found" – run them separately.
+- Writes (`sql_editor_execute`) and SAS runs aren't streamed (1,000 rows).
