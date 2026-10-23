@@ -14,6 +14,11 @@ A result nobody asked about for ``IDLE_SECONDS`` is dropped too.
 Stop: KILL QUERY on the statement's connection, sent only after checking on
 PROCESSLIST that this connection still runs this very statement (connection
 ids are per aggregator), plus closing the stream.
+
+Writes the user confirmed (``write=True``) stream the same way, so a statement
+that returns rows (or a big DML result) pages like a SELECT; it's never sent a
+second time and has no row limit set on the session (``affected`` holds the
+affected-rows count).
 """
 
 from __future__ import annotations
@@ -49,8 +54,10 @@ def row_bytes(row: dict[str, Any]) -> int:
 
 
 class Stream:
-    def __init__(self, stream_id: str, sql: str, database: str | None, max_rows: int) -> None:
+    def __init__(self, stream_id: str, sql: str, database: str | None, max_rows: int, write: bool = False) -> None:
         self.id = stream_id
+        self.write = write
+        self.affected: int | None = None     # writes: rows affected
         self.sql = sql
         self.database = database
         self.max_rows = max_rows
@@ -74,8 +81,9 @@ class Stream:
     def _run(self) -> None:
         from .apps._core import jsonable_rows  # here: the apps package imports this module
 
-        gen = db.stream(self.sql, self.database, max_rows=self.max_rows + 1, chunk=CHUNK,
-                        on_connection=self._set_conn)
+        extra: dict[str, Any] = {"write": True, "on_rowcount": self._set_rowcount} if self.write else {}
+        gen = db.stream(self.sql, self.database, max_rows=None if self.write else self.max_rows + 1, chunk=CHUNK,
+                        on_connection=self._set_conn, **extra)
         try:
             for columns, rows in gen:
                 with self.cond:
@@ -122,6 +130,9 @@ class Stream:
     def _set_conn(self, conn_id: int) -> None:
         self.conn_id = conn_id
 
+    def _set_rowcount(self, n: int | None) -> None:
+        self.affected = n if isinstance(n, int) and n >= 0 else None
+
     def _ms(self) -> float:
         return round((time.perf_counter() - self.started) * 1000, 1)
 
@@ -151,6 +162,7 @@ class Stream:
                 "elapsed_ms": self.total_ms if self.done else self._ms(),
                 "max_rows": self.max_rows,
                 "bytes": self.bytes,
+                "affected_rows": self.affected,
             }
 
     def page(self, offset: int, limit: int) -> list[dict[str, Any]]:
@@ -213,14 +225,15 @@ def new_id() -> str:
 
 
 def start(sql: str, database: str | None, stream_id: str | None = None, max_rows: int = MAX_ROWS,
-          replaces: str | None = None, on_finish: Callable[[Stream], None] | None = None) -> Stream:
-    """Start reading ``sql`` in the background. ``replaces``: the tab's previous result, stopped and dropped."""
+          replaces: str | None = None, on_finish: Callable[[Stream], None] | None = None, write: bool = False) -> Stream:
+    """Start reading ``sql`` in the background. ``replaces``: the tab's previous result, stopped and dropped.
+    ``write``: a confirmed write (sent once, no session row limit)."""
     stream_id = stream_id or new_id()
     if not _ID.match(stream_id):
         raise ValueError("stream_id: 6-64 letters, digits, - or _")
     if replaces:
         drop(replaces)
-    s = Stream(stream_id, sql, database, max(1, min(int(max_rows), MAX_ROWS)))
+    s = Stream(stream_id, sql, database, max(1, min(int(max_rows), MAX_ROWS)), write=write)
     s.on_finish = on_finish
     with _lock:
         old = _streams.pop(stream_id, None)

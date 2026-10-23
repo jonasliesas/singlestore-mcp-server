@@ -7,6 +7,9 @@ running queries and connections in SQLite, for the Cluster Monitor's History tab
   memory, and process-list counts): one cluster round trip. It starts ``SINGLESTORE_MCP_METRICS_DELAY`` s
   (default 20) after the server, so it never slows start-up, and runs in its own thread, so tool calls
   never wait for it.
+- The same thread keeps the Cluster Monitor's CPU/disk counter baseline fresh: one counters read
+  ``BASELINE_DELAY_S`` after start, and again when the other process took the stored sample and this one's
+  baseline is getting old (> 4 min). So opening the Cluster view doesn't wait a second for a baseline.
 - Stored in ``~/.singlestore-mcp/metrics.db`` (``SINGLESTORE_MCP_HOME``), keyed by cluster (host:port of the
   active connection, as the query history). Two server processes (Claude's and the desktop Workspace) share
   the file: a process skips its sample when the other one already sampled the same cluster in this interval.
@@ -31,6 +34,7 @@ MARKER = "/* s2-metrics */"
 COARSE_S = 600            # older samples are folded into 10-minute rows
 RAW_KEEP_S = 86400        # raw samples are kept for 24 h
 _COMPACT_EVERY_S = 3600
+BASELINE_DELAY_S = 8      # the Cluster Monitor's CPU baseline is taken this long after start (see _loop)
 _OFF = ("0", "false", "no", "off")
 
 _lock = threading.Lock()
@@ -170,6 +174,72 @@ def read(conn: sqlite3.Connection, source: str, range_s: int, now: float, bucket
             "stored": {"first_t": span[0], "last_t": span[1], "rows": span[2]}}
 
 
+# ------------------------------------------------------------------ trends (for the trend alerts)
+
+TREND_WINDOW_S = 86400    # fit over the last 24 h of samples
+TREND_MIN_SPAN_S = 6 * 3600
+TREND_MIN_POINTS = 10
+TREND_MIN_R2 = 0.5        # only a steady climb counts, not a spike
+
+
+def _fit(points: list[tuple[float, float]]) -> tuple[float, float] | None:
+    """Least-squares slope (per second) and R² of (t, y), or None if there are too few or flat points."""
+    n = len(points)
+    if n < 2:
+        return None
+    mt = sum(t for t, _ in points) / n
+    my = sum(y for _, y in points) / n
+    stt = sum((t - mt) ** 2 for t, _ in points)
+    syy = sum((y - my) ** 2 for _, y in points)
+    if stt <= 0 or syy <= 0:
+        return None
+    slope = sum((t - mt) * (y - my) for t, y in points) / stt
+    r2 = (slope * slope * stt) / syy
+    return slope, r2
+
+
+def trends(conn: sqlite3.Connection, source: str, now: float, window_s: int = TREND_WINDOW_S) -> list[dict[str, Any]]:
+    """Per node: how fast disk use and memory grew over ``window_s`` (linear fit of the stored samples) and, when they
+    climb steadily, in how many days the disk is full / memory reaches max_memory at that rate. Local SQLite only."""
+    rows = conn.execute(
+        "SELECT node_id, t, host, mem_b, mem_max_b, disk_used_b, disk_total_b FROM metrics"
+        " WHERE source = ? AND t >= ? ORDER BY node_id, t", (source, int(now - window_s))).fetchall()
+    by_node: dict[int, list[sqlite3.Row]] = {}
+    for r in rows:
+        by_node.setdefault(r["node_id"], []).append(r)
+    out = []
+    for node_id, rs in by_node.items():
+        node: dict[str, Any] = {"node_id": node_id, "host": rs[-1]["host"]}
+        for kind, used_col, cap_col in (("disk", "disk_used_b", "disk_total_b"), ("memory", "mem_b", "mem_max_b")):
+            pts = [(float(r["t"]), float(r[used_col])) for r in rs if r[used_col] is not None]
+            caps = [r[cap_col] for r in rs if r[cap_col]]
+            if len(pts) < TREND_MIN_POINTS or pts[-1][0] - pts[0][0] < TREND_MIN_SPAN_S or not caps:
+                continue
+            fit = _fit(pts)
+            cap, used = float(caps[-1]), pts[-1][1]
+            info: dict[str, Any] = {"used_b": used, "cap_b": cap, "span_s": int(pts[-1][0] - pts[0][0]), "points": len(pts),
+                                    "per_day_b": None, "r2": None, "days_left": None}
+            if fit:
+                slope, r2 = fit
+                info["per_day_b"], info["r2"] = slope * 86400, round(r2, 2)
+                if slope > 0 and r2 >= TREND_MIN_R2 and cap > used:
+                    info["days_left"] = round((cap - used) / slope / 86400, 1)
+            node[kind] = info
+        if "disk" in node or "memory" in node:
+            out.append(node)
+    return out
+
+
+def current_trends(window_s: int = TREND_WINDOW_S) -> list[dict[str, Any]]:
+    """``trends`` of the active cluster from metrics.db (no cluster query)."""
+    source = _source()
+    conn = connect()
+    try:
+        return trends(conn, source, time.time(), window_s)
+    finally:
+        conn.close()
+
+
 # ------------------------------------------------------------------ sampling
 
 def _q(sql: str, params: tuple[Any, ...] | None = None) -> list[dict[str, Any]]:
@@ -272,13 +342,31 @@ def status() -> dict[str, Any]:
 
 # ------------------------------------------------------------------ the background thread
 
+def _prime_baseline() -> None:
+    """Keep this process's Cluster Monitor CPU/disk baseline fresh (one round trip, only when it is old), so the
+    monitor's first open doesn't wait a second for one."""
+    from .apps import cluster_monitor as cm
+
+    try:
+        cm.prime_baseline()
+    except Exception as exc:  # noqa: BLE001 - a convenience; never take the sampler down
+        _status["last_error"] = f"baseline: {str(exc)[:280]}"
+
+
 def _loop() -> None:
     cfg = settings()
-    if _stop.wait(cfg["delay_s"]):  # let the server start first
+    # A first counter baseline a little after start (the Workspace's own start-up calls are done by then), then the
+    # first stored sample after the full delay.
+    early = min(BASELINE_DELAY_S, cfg["delay_s"])
+    if _stop.wait(early):
+        return
+    _prime_baseline()
+    if _stop.wait(cfg["delay_s"] - early):  # let the server start first
         return
     while not _stop.is_set():
         try:
-            sample_once()
+            if sample_once().get("skipped"):
+                _prime_baseline()  # the other process stored this interval's sample; this one still needs a baseline
         except Exception as exc:  # noqa: BLE001 - the sampler must never take the server down
             _status["last_error"] = str(exc)[:300]
         _stop.wait(settings()["interval_s"])

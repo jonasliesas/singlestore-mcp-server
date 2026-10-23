@@ -141,6 +141,32 @@ def test_interrupt_python_cell(cluster: McpSession, kernel) -> None:
     assert "KeyboardInterrupt" in json.dumps(p), json.dumps(p)[:400]
 
 
+def test_interrupt_sleeping_python_cell(cluster: McpSession, kernel) -> None:
+    """A single long call: on Windows, time.sleep only noticed the interrupt when it returned (the kernel's interrupt
+    didn't set CPython's SIGINT event); the notebook's kernel start-up code now does."""
+    d = cluster.ok("notebook_run", {"notebook_id": NID, "cell_type": "python", "source": "import time\ntime.sleep(60)"})
+    time.sleep(1.5)
+    p, secs = _interrupt(cluster, d["run_id"])
+    assert secs is not None and secs < 5, f"time.sleep cell took {secs} s to stop after interrupt (limit 5 s)"
+    assert "KeyboardInterrupt" in json.dumps(p), json.dumps(p)[:400]
+
+
+def test_restart_stops_a_cell_interrupt_cannot(cluster: McpSession, kernel) -> None:
+    """A wait the interrupt can't reach on Windows (a lock / an Event): Restart kernel ends the cell instead of queueing
+    behind it (the bridge gives the cell up a moment after the restart's interrupt)."""
+    _ok(kernel("python", "zz_before = 1; print('set')"), "set")
+    d = cluster.ok("notebook_run", {"notebook_id": NID, "cell_type": "python", "source": "import threading\nthreading.Event().wait(120)"})
+    time.sleep(1.5)
+    t0 = time.perf_counter()
+    cluster.ok("notebook_kernel_control", {"notebook_id": NID, "action": "restart"})
+    p, _ = cluster.wait_until("notebook_poll", {"run_id": d["run_id"], "after": 0}, lambda x: isinstance(x, dict) and x.get("done"), 30, 0.3)
+    assert isinstance(p, dict) and p.get("done"), f"the cell didn't end after Restart: {p}"
+    st = _wait_state(cluster, NID, ("idle", "error", "dead"))
+    assert st.get("state") == "idle", st
+    assert time.perf_counter() - t0 < 30
+    _ok(kernel("python", "print('zz_before' in globals())"), "False")
+
+
 def test_interrupt_sql_cell(cluster: McpSession, kernel) -> None:
     _ok(kernel("sql", "SELECT 1 AS warm", database=DB))  # connection open: the next query blocks in a socket read
     d = cluster.ok("notebook_run", {"notebook_id": NID, "cell_type": "sql", "source": "SELECT SLEEP(20) AS s", "database": DB})

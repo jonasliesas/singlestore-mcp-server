@@ -125,7 +125,30 @@ window.addEventListener("message", (ev) => {
   else if (msg?.type === "s2-set-sql") window.dispatchEvent(new CustomEvent("s2:set-sql", { detail: msg }));
   else if (msg?.type === "s2-connection-changed") window.dispatchEvent(new CustomEvent("s2:connection-changed", { detail: msg }));
   else if (msg?.type === "s2-sas-connection-changed") window.dispatchEvent(new CustomEvent("s2:sas-connection-changed", { detail: msg }));
+  else if (msg?.type === "s2-files-changed") window.dispatchEvent(new CustomEvent("s2:files-changed", { detail: msg.change }));
 });
+
+// A file or folder was renamed or deleted in a file browser: {from, to (null when deleted), folder, version,
+// old_version (a renamed SAS Viya file's new and old version)}, where from / to are what an editor keeps as its
+// file's path (a local path, or a SAS Viya ref). This view hears it at once
+// ("s2:files-changed"); in the Workspace the other views hear it through the workspace.
+S2.filesChanged = (change) => {
+  window.dispatchEvent(new CustomEvent("s2:files-changed", { detail: change }));
+  if (S2.embedded()) window.parent.postMessage({ type: "s2-files-changed", change }, "*");
+};
+// Where `path` is after the change: the new path, "" when it was deleted, undefined when the change doesn't touch it
+// (a folder's change applies to the files below it). Local Windows paths compare case-insensitively.
+S2.movedPath = (path, change) => {
+  if (!path || !change?.from) return undefined;
+  const local = !/^sas-(content|server):\/\//.test(change.from);
+  const win = local && /^([a-zA-Z]:[\\/]|\\\\)/.test(change.from);
+  const norm = (p) => { let x = String(p); if (local) x = x.replace(/[\\/]+$/, ""); return win ? x.replace(/\//g, "\\").toLowerCase() : x; };
+  const p = norm(path), o = norm(change.from);
+  if (p === o) return change.to || "";
+  const sep = win ? "\\" : "/";
+  if (change.folder && p.startsWith(o + sep)) return change.to ? change.to.replace(/[\\/]+$/, "") + String(path).slice(o.length) : "";
+  return undefined;
+};
 
 // Header button; null when the host doesn't offer fullscreen.
 S2.fullscreenButton = function () {
@@ -357,6 +380,41 @@ S2.confirmInline = function (anchor, message, confirmLabel = "Confirm") {
 
 S2.errorBox = (err) => S2.h("div", { class: "s2-error" }, err?.message ?? String(err));
 
+// The Workspace's SAS session (sas_prewarm), for the SAS views' header: "SAS session: starting… / ready / not
+// signed in / unreachable". ``watch.refresh()`` asks the server (``getArgs()``: {connection, start}) and, while the
+// session is starting, asks again every 2.5 s; ``onChange(status)`` redraws.
+const SAS_SESSION = {
+  starting: ["info", "starting…"], ready: ["ok", "ready"], idle: ["plain", "starts with the first run"],
+  off: ["plain", "starts with the first run"], not_signed_in: ["warn", "not signed in"],
+  unreachable: ["warn", "SAS Viya unreachable"], error: ["err", "couldn't start"],
+};
+S2.sasSessionBadge = function (st) {
+  if (!st?.state) return null;
+  const [kind, text] = SAS_SESSION[st.state] ?? ["plain", st.state];
+  const secs = (ms) => `${Math.round(ms / 1000)} s`;
+  const title = st.state === "ready"
+    ? `The SAS session${st.connection ? ` on ${st.connection}` : ""} is running${st.ms ? ` (started in the background in ${secs(st.ms)})` : ""}`
+      + `${st.startup_errors ? `; the startup code had ${st.startup_errors} error(s)` : ""}.`
+    : st.state === "starting" ? "Starting the SAS session in the background (SingleStore library and startup code included): the first run waits for it, not for a new one."
+    : st.note || (st.state === "idle" || st.state === "off" ? "No SAS session yet: the first SAS run starts one." : "");
+  return S2.h("span", { class: `s2-badge ${kind} s2-sas-session`, "data-state": st.state, title }, `SAS session: ${text}`);
+};
+S2.sasSessionWatch = function (getArgs, onChange) {
+  let timer = null, seq = 0;
+  const watch = { status: null };
+  watch.refresh = async function () {
+    clearTimeout(timer); timer = null;
+    const mine = ++seq;
+    let st = null;
+    try { st = await S2.callTool("sas_prewarm", getArgs()); } catch { st = null; }
+    if (mine !== seq) return;
+    watch.status = st;
+    onChange(st);
+    if (st?.state === "starting") timer = setTimeout(() => watch.refresh(), 2500);
+  };
+  return watch;
+};
+
 S2.isNumericColumn = function (rows, col) {
   let seen = 0;
   for (const row of rows) {
@@ -425,17 +483,22 @@ S2.dataTable = function (columns, rows, opts = {}) {
   return wrap;
 };
 
-// File browser shared by the SQL Editor and the Notebook: folders to
+// File browser shared by the SQL Editor, the Notebook and the Security script basket: folders to
 // navigate, shortcuts (SQL folder, Documents, Desktop, Downloads, Home) and
 // the files of one kind. Server side: files_browse (folders inside the
 // user's home folder and SINGLESTORE_MCP_FILE_ROOTS).
 //   S2.fileBrowser(container, { kind: "sql"|"notebook", mode: "open"|"save",
 //     start, name, onOpen(path, file), onSave(path, overwrite, listing) -> {exists}, onClose, extra: [buttons] })
-// Other places (the SQL Editor's SAS Content / SAS Server) pass their own
+// Other places (SAS Content / SAS Server, see S2.fileLocations) pass their own
 //   list(path, showAll) -> listing (files_browse's shape), storageKey, showAll (an "All files" box),
 //   mkdir(parent, name) (a "New folder" button) and empty (text for an empty folder).
+// Rename / Delete (kind "sql" and "notebook", and SAS Viya listings, which say `manage`): one item at a time in
+// the folder shown, deleting a folder only when it's empty and after typing its name; files_rename / files_delete
+// or viya_files_rename / viya_files_delete. Afterwards S2.filesChanged tells the editors that have the file open
+// ({from, to, folder}; opts.onChanged(result) too). opts.manage = false turns it off.
 S2.fileBrowser = function (box, opts) {
   const { h } = S2;
+  box.classList.add("s2-fb");
   const key = opts.storageKey ?? `s2-browse-${opts.kind}`;
   let listing = null, error = null, allFiles = false, loading = false;
   let folder = opts.start || (() => { try { return localStorage.getItem(key); } catch { return null; } })() || null;
@@ -447,16 +510,28 @@ S2.fileBrowser = function (box, opts) {
   const message = h("div", { class: "row" });
   const ago = (t) => { const s = Date.now() / 1000 - t; return s < 90 ? "just now" : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 129600 ? `${Math.round(s / 3600)} h ago` : new Date(t * 1000).toLocaleDateString(); };
   const sep = () => (listing?.path?.includes("\\") ? "\\" : "/");
+  const errText = (e) => String(e?.message ?? e).replace(/^Error executing tool [\w-]+:\s*/, "");
+  const baseName = (p) => String(p ?? "").split(/[\\/]/).pop();
+  const warn = (text, ...buttons) => message.replaceChildren(h("span", { class: "warn" }, text), ...buttons,
+    h("button", { class: "s2-btn ghost", onclick: () => message.replaceChildren() }, buttons.length ? "Cancel" : "OK"));
+  const canManage = () => Boolean(listing) && (opts.manage ?? (opts.list ? listing.manage === true : ["sql", "notebook"].includes(opts.kind)));
 
+  // Only the latest navigation counts: a slower answer for a folder clicked earlier (e.g. My Folder, then a folder
+  // in it before My Folder had loaded) must not replace the list afterwards.
+  let navSeq = 0;
   async function go(path) {
+    const mine = ++navSeq;
     loading = true;
     draw();
     try {
-      listing = opts.list ? await opts.list(path, allFiles) : await S2.callTool("files_browse", { path, kind: opts.kind });
+      const res = opts.list ? await opts.list(path, allFiles) : await S2.callTool("files_browse", { path, kind: opts.kind });
+      if (mine !== navSeq) return;
+      listing = res;
       folder = listing.path; error = null;
       try { localStorage.setItem(key, folder); } catch {}
     } catch (e) {
-      error = String(e?.message ?? e).replace(/^Error executing tool [\w-]+:\s*/, "");
+      if (mine !== navSeq) return;
+      error = errText(e);
       if (!listing && path) return go(null);  // remembered folder gone: start at the SQL folder
     }
     loading = false;
@@ -475,11 +550,80 @@ S2.fileBrowser = function (box, opts) {
         message.replaceChildren();
         go(res?.path ?? listing.path);
       } catch (e) {
-        message.replaceChildren(h("span", { class: "warn" }, `Couldn't create the folder: ${String(e?.message ?? e).replace(/^Error executing tool [\w-]+:\s*/, "")}`));
+        message.replaceChildren(h("span", { class: "warn" }, `Couldn't create the folder: ${errText(e)}`));
       }
     }
     message.replaceChildren(input, h("button", { class: "s2-btn", onclick: create }, "Create folder"),
       h("button", { class: "s2-btn ghost", onclick: () => message.replaceChildren() }, "Cancel"));
+    input.focus();
+  }
+  // Rename / Delete: the tool of the listing's location; a file's listed modified time lets the server refuse a
+  // file changed since (conflict).
+  function manageCall(op, item, extra = {}) {
+    const viya = listing.location;
+    const args = viya ? { location: viya, path: item.path, ...extra } : { path: item.path, kind: opts.kind, ...extra };
+    if (!item.folder && item.modified) args.expected_modified = item.modified;
+    return S2.callTool(viya ? `viya_files_${op}` : `files_${op}`, args);
+  }
+  function refused(res, item, verb) {
+    const who = [res.modified_by && `by ${res.modified_by}`, res.modified && ago(res.modified)].filter(Boolean).join(", ");
+    if (res.exists) warn(`${baseName(res.new_path)} already exists here: pick another name.`);
+    else if (res.conflict) warn(`${item.name} changed since the list was read${who ? ` (${who})` : ""}: nothing ${verb}.`,
+      h("button", { class: "s2-btn", onclick: () => { message.replaceChildren(); go(listing.path); } }, "Refresh"));
+    else if (res.not_empty) warn(`${item.name} isn't empty: only empty folders can be deleted here.`);
+    else message.replaceChildren();
+  }
+  function changed(res, text) {
+    message.replaceChildren();
+    S2.toast(text, "ok");
+    S2.filesChanged({ from: res.from_ref, to: res.renamed ? res.to_ref : null, folder: Boolean(res.folder),
+      ...(res.version ? { version: res.version, old_version: res.old_version } : {}) });
+    opts.onChanged?.(res);
+    go(listing.path);
+  }
+  function startRename(item) {
+    const what = item.folder ? "folder" : "file";
+    const input = h("input", { class: "s2-input", value: item.name, spellcheck: false, "aria-label": `New name for ${item.name}`,
+      onkeydown: (e) => { if (e.key === "Enter") rename(); if (e.key === "Escape") message.replaceChildren(); } });
+    async function rename() {
+      const name = input.value.trim();
+      if (!name || name === item.name) { message.replaceChildren(); return; }
+      message.replaceChildren(h("span", { class: "s2-spinner" }), ` Renaming ${item.name}…`);
+      try {
+        const res = await manageCall("rename", item, { new_name: name });
+        if (res.renamed) changed(res, `Renamed ${item.name} to ${baseName(res.new_path)}`);
+        else refused(res, item, "renamed");
+      } catch (e) { warn(`Couldn't rename ${item.name}: ${errText(e)}`); }
+    }
+    message.replaceChildren(h("span", { class: "s2-small" }, `Rename ${what} ${item.name} to`), input,
+      h("button", { class: "s2-btn primary", onclick: rename }, "Rename"),
+      h("button", { class: "s2-btn ghost", onclick: () => message.replaceChildren() }, "Cancel"));
+    input.focus();
+    const dot = item.folder ? -1 : item.name.lastIndexOf(".");
+    try { input.setSelectionRange(0, dot > 0 ? dot : item.name.length); } catch {}
+  }
+  function startDelete(item) {
+    async function remove() {
+      message.replaceChildren(h("span", { class: "s2-spinner" }), ` Deleting ${item.name}…`);
+      try {
+        const res = await manageCall("delete", item);
+        if (res.deleted) changed(res, `Deleted ${item.name}`);
+        else refused(res, item, "deleted");
+      } catch (e) { warn(`Couldn't delete ${item.name}: ${errText(e)}`); }
+    }
+    const where = listing.label ? ` from ${listing.label}` : "";
+    if (!item.folder) {
+      const btn = h("button", { class: "s2-btn danger", onclick: remove }, "Delete");
+      warn(`Delete ${item.name}${where}? This can't be undone.`, btn);
+      btn.focus();
+      return;
+    }
+    // A folder: type its name to confirm (and it must be empty).
+    const btn = h("button", { class: "s2-btn danger", disabled: true, onclick: remove }, "Delete folder");
+    const input = h("input", { class: "s2-input", spellcheck: false, placeholder: item.name, "aria-label": `Type ${item.name} to confirm`,
+      oninput: () => { btn.disabled = input.value !== item.name; },
+      onkeydown: (e) => { if (e.key === "Enter" && input.value === item.name) remove(); if (e.key === "Escape") message.replaceChildren(); } });
+    warn(`Delete the empty folder ${item.name}${where}? Type its name to confirm:`, input, btn);
     input.focus();
   }
   async function save(overwrite) {
@@ -496,8 +640,15 @@ S2.fileBrowser = function (box, opts) {
           h("button", { class: "s2-btn ghost", onclick: () => message.replaceChildren() }, "Pick another name"));
       } else message.replaceChildren();
     } catch (e) {
-      message.replaceChildren(h("span", { class: "warn" }, `Couldn't save: ${String(e?.message ?? e).replace(/^Error executing tool [\w-]+:\s*/, "")}`));
+      message.replaceChildren(h("span", { class: "warn" }, `Couldn't save: ${errText(e)}`));
     }
+  }
+  function row(btn, item) {
+    if (!canManage()) return btn;
+    return h("div", { class: "s2-fb-row" }, btn, h("span", { class: "s2-fb-acts" },
+      h("button", { class: "s2-btn ghost", title: `Rename ${item.name}`, "aria-label": `Rename ${item.name}`, onclick: () => startRename(item) }, "Rename"),
+      h("button", { class: "s2-btn ghost danger", title: item.folder ? `Delete ${item.name} (only an empty folder)` : `Delete ${item.name}`,
+        "aria-label": `Delete ${item.name}`, onclick: () => startDelete(item) }, "Delete")));
   }
   function draw() {
     // replaceChildren() detaches the filter and drops its focus: remember it (and the caret) and put it back,
@@ -508,12 +659,12 @@ S2.fileBrowser = function (box, opts) {
     const match = (n) => !q || n.toLowerCase().includes(q);
     const items = [];
     if (listing?.parent) items.push(h("button", { class: "item", onclick: () => go(listing.parent) }, h("span", { class: "n" }, "↑ .."), h("span", { class: "m" }, "up")));
-    for (const f of listing?.folders ?? []) if (match(f.name)) items.push(h("button", { class: "item", onclick: () => go(f.path) }, h("span", { class: "n" }, `📁 ${f.name}`), h("span", { class: "m" }, "")));
-    for (const f of listing?.files ?? []) if (match(f.name)) items.push(h("button", { class: "item",
+    for (const f of listing?.folders ?? []) if (match(f.name)) items.push(row(h("button", { class: "item", onclick: () => go(f.path) }, h("span", { class: "n" }, `📁 ${f.name}`), h("span", { class: "m" }, "")), { ...f, folder: true }));
+    for (const f of listing?.files ?? []) if (match(f.name)) items.push(row(h("button", { class: "item",
       title: f.path,
       onclick: () => (opts.mode === "open" ? opts.onOpen(f.path, f) : (nameInput.value = f.name, nameInput.focus())),
       ondblclick: () => (opts.mode === "save" ? save(false) : null) },
-      h("span", { class: "n" }, `${opts.kind === "notebook" ? "📓" : "📄"} ${f.name}`), h("span", { class: "m" }, [f.size != null ? S2.fmt.bytes(f.size) : null, f.modified ? ago(f.modified) : null].filter(Boolean).join(" · "))));
+      h("span", { class: "n" }, `${opts.kind === "notebook" ? "📓" : "📄"} ${f.name}`), h("span", { class: "m" }, [f.size != null ? S2.fmt.bytes(f.size) : null, f.modified ? ago(f.modified) : null].filter(Boolean).join(" · "))), f));
     const empty = opts.empty ?? `No ${opts.kind === "notebook" ? ".ipynb" : ".sql"} files or folders here`;
     if (!items.length) items.push(h("div", { class: "item m" }, error ?? (listing ? (q ? "Nothing matches" : allFiles ? "No files or folders here" : empty) : "Loading…")));
     const shortcuts = (listing?.shortcuts ?? []).map((s) => h("button", { class: `s2-btn ghost${s.path === listing?.path ? " primary" : ""}`, title: s.path, onclick: () => go(s.path) }, s.label));
@@ -522,7 +673,7 @@ S2.fileBrowser = function (box, opts) {
         h("button", { class: "s2-btn ghost", onclick: () => opts.onClose?.() }, opts.mode === "open" ? "Close" : "Cancel")),
       h("div", { class: "row" }, h("span", { class: "s2-muted", title: listing?.path ?? "", style: { fontFamily: "var(--s2-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "60%" } }, listing?.path ?? "…"), filter,
         loading && listing ? h("span", { class: "s2-spinner", title: "Loading…" }) : null,
-        opts.showAll ? h("label", { class: "s2-small", title: "Show every file, not only .sql and .sas" },
+        opts.showAll ? h("label", { class: "s2-small", title: "Show every file, not only the ones this editor opens" },
           h("input", { type: "checkbox", checked: allFiles, onchange: (e) => { allFiles = e.target.checked; go(listing?.path ?? folder); } }), " All files") : null,
         opts.mkdir && listing ? h("button", { class: "s2-btn ghost", title: "Create a folder here", onclick: newFolder }, "New folder") : null),
       h("div", { class: "list" }, ...items),
@@ -536,4 +687,55 @@ S2.fileBrowser = function (box, opts) {
   }
   draw();
   go(folder);
+};
+
+// Where a file lives: this computer, SAS Content or the SAS server (the active SAS Viya connection).
+S2.FILE_LOCATIONS = [
+  { id: "local", label: "This computer", title: "Files on this computer (the SQL folder and your user folder)" },
+  { id: "content", label: "SAS Content", title: "SAS Content on the active SAS Viya connection: My Folder, Public and other folders you can see" },
+  { id: "server", label: "SAS Server", title: "The SAS Compute server's file system (as in SAS Studio's SAS Server), through the Workspace's SAS session" },
+];
+// "content" / "server" for a SAS Viya file ref, else null; refPath: the path inside the location.
+S2.viyaLocation = (p) => (/^sas-content:\/\//.test(p ?? "") ? "content" : /^sas-server:\/\//.test(p ?? "") ? "server" : null);
+S2.refPath = (p) => String(p ?? "").replace(/^sas-(content|server):\/\/[^/]*/, "");
+
+// Open / Save as with a location bar (This computer / SAS Content / SAS Server) above S2.fileBrowser, as in the SQL
+// Editor. A file on Viya is named by its ref (sas-content://<connection>/<path>).
+//   S2.fileLocations(container, { kind: "sql"|"notebook", mode: "open"|"save", name, start (path or ref of the open
+//     file), onOpen(pathOrRef, file), onSave(pathOrRef, overwrite, location) -> {exists}, onClose, onChanged,
+//     extra(location) -> [buttons] })
+S2.fileLocations = function (box, opts) {
+  const { h } = S2;
+  const key = `s2-file-loc-${opts.kind}`;
+  const dirOf = (p) => (p ? p.replace(/[\\/][^\\/]*$/, "") : null);
+  const remembered = () => { try { return localStorage.getItem(key); } catch { return null; } };
+  const startLoc = S2.viyaLocation(opts.start) ?? (opts.start ? "local" : null) ?? remembered() ?? "local";
+  function show(loc) {
+    if (!S2.FILE_LOCATIONS.some((l) => l.id === loc)) loc = "local";
+    try { localStorage.setItem(key, loc); } catch {}
+    const browser = h("div", { class: "s2-fb-browser" });
+    const bar = h("div", { class: "row s2-fb-locs", role: "tablist", "aria-label": "Location" },
+      S2.FILE_LOCATIONS.map((l) => h("button", { class: `s2-btn ghost${l.id === loc ? " primary" : ""}`, role: "tab", "aria-selected": String(l.id === loc),
+        title: l.title, onclick: () => show(l.id) }, l.label)));
+    box.replaceChildren(bar, browser);
+    const extra = opts.extra?.(loc) ?? [];
+    const common = { kind: opts.kind, mode: opts.mode, name: opts.name, onClose: opts.onClose, onChanged: opts.onChanged };
+    if (loc === "local") {
+      S2.fileBrowser(browser, { ...common, start: S2.viyaLocation(opts.start) ? null : dirOf(opts.start),
+        onOpen: (path, f) => opts.onOpen(path, f), onSave: (path, overwrite) => opts.onSave(path, overwrite, "local"), extra });
+      return;
+    }
+    const exts = opts.kind === "notebook" ? ".ipynb" : ".sql or .sas";
+    S2.fileBrowser(browser, {
+      ...common, storageKey: `s2-browse-viya-${loc}${opts.kind === "sql" ? "" : `-${opts.kind}`}`,
+      start: S2.viyaLocation(opts.start) === loc ? dirOf(S2.refPath(opts.start)) : null,
+      showAll: true, empty: `No ${exts} files or folders here`,
+      list: (path, all) => S2.callTool("viya_files_browse", { location: loc, path, show_all: all, kind: opts.kind }),
+      mkdir: opts.mode === "save" ? (parent, name) => S2.callTool("viya_files_mkdir", { location: loc, parent, name }) : null,
+      onOpen: (path, f) => opts.onOpen(f?.ref ?? path, f),
+      onSave: (path, overwrite, listing) => opts.onSave(listing.ref_prefix + path, overwrite, loc),
+      extra: [...extra, ...(S2.embedded() ? [h("button", { class: "s2-btn ghost", title: "Sign in to SAS Viya or switch the active SAS Viya connection", onclick: () => S2.openView("connections") }, "Connections…")] : [])],
+    });
+  }
+  show(startLoc);
 };

@@ -7,7 +7,9 @@ Rules (each on/off, thresholds editable in the Alerts view, stored in ``~/.singl
 - failed pipeline batches, new pipeline errors and pipelines in the Error state
   (PIPELINES_BATCHES_SUMMARY, PIPELINES_ERRORS, PIPELINES);
 - node memory over X% of max_memory, disk over X% (MV_SYSINFO_MEM / MV_SYSINFO_DISK, as the Cluster Monitor);
-- a node that isn't online (MV_NODES).
+- a node that isn't online (MV_NODES);
+- trends from the Cluster Monitor's History (``metrics_store``, local SQLite, no cluster query): a disk that fills,
+  or memory that reaches max_memory, within N days at the rate it climbed steadily over the last 24 h.
 
 Every check runs a few queries in parallel (tagged ``/* s2-alerts */`` and left out of everything they watch).
 An alert has a stable key, so a long-running query or a full disk is *one* alert with first / last seen and a
@@ -43,8 +45,12 @@ DEFAULT_RULES: dict[str, dict[str, Any]] = {
     "memory": {"enabled": True, "percent": 85, "label": "Node memory above (% of max_memory)", "unit": "%"},
     "disk": {"enabled": True, "percent": 90, "label": "Disk usage above", "unit": "%"},
     "node_offline": {"enabled": True, "label": "Node not online"},
+    # Trends from the Cluster Monitor's History (metrics.db, local): a steady climb over the last 24 h.
+    "disk_trend": {"enabled": True, "days": 14, "label": "Disk projected full within (growth over the last 24 h)", "unit": "days"},
+    "memory_trend": {"enabled": True, "days": 3, "label": "Memory projected to reach max_memory within (last 24 h)", "unit": "days"},
 }
 DEFAULT_SETTINGS = {"interval_s": 60, "notify": False}
+_RULE_FIELDS = ("enabled", "seconds", "percent", "days")
 
 _lock = threading.RLock()
 _state: dict[str, Any] = {}
@@ -86,7 +92,7 @@ def _load() -> None:
     state = _fresh()
     for name, rule in (data.get("rules") or {}).items():
         if name in state["rules"] and isinstance(rule, dict):
-            state["rules"][name].update({k: v for k, v in rule.items() if k in ("enabled", "seconds", "percent")})
+            state["rules"][name].update({k: v for k, v in rule.items() if k in _RULE_FIELDS})
     state["settings"].update({k: v for k, v in (data.get("settings") or {}).items() if k in DEFAULT_SETTINGS})
     state["alerts"] = [a for a in data.get("alerts") or [] if isinstance(a, dict) and a.get("key")]
     state["watermarks"] = data.get("watermarks") or {}
@@ -98,7 +104,7 @@ def _save() -> None:
     global _mtime
     _state["alerts"] = _state["alerts"][-MAX_ALERTS:]
     path = _file()
-    rules = {k: {f: v for f, v in r.items() if f in ("enabled", "seconds", "percent")} for k, r in _state["rules"].items()}
+    rules = {k: {f: v for f, v in r.items() if f in _RULE_FIELDS} for k, r in _state["rules"].items()}
     fileio.write_text(path, json.dumps({**_state, "rules": rules}, indent=1, default=str))
     _mtime = path.stat().st_mtime
 
@@ -140,6 +146,8 @@ def update_rules(rules: dict[str, Any] | None = None, settings: dict[str, Any] |
                 rule["seconds"] = max(1, int(float(change["seconds"])))
             if "percent" in change and "percent" in rule:
                 rule["percent"] = max(1, min(100, int(float(change["percent"]))))
+            if "days" in change and "days" in rule:
+                rule["days"] = max(1, min(365, int(float(change["days"]))))
         for key, value in (settings or {}).items():
             if key == "interval_s":
                 _state["settings"]["interval_s"] = max(15, min(3600, int(float(value))))
@@ -375,6 +383,39 @@ def _check_nodes(rules: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _gb(b: float) -> str:
+    return f"{b / 1024 ** 3:.1f} GB" if b < 100 * 1024 ** 3 else f"{b / 1024 ** 3:.0f} GB"
+
+
+def check_trends(disk_rule: dict[str, Any] | None, mem_rule: dict[str, Any] | None,
+                 trends: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """Disk / memory climbing steadily (Cluster Monitor History, metrics.db): full / at max_memory within the rule's days.
+    No cluster query; nothing is found while the history has less than 6 h of samples (or the sampler is off)."""
+    from . import metrics_store
+
+    if trends is None:
+        trends = metrics_store.current_trends()
+    out = []
+    for node in trends:
+        name = node.get("host") or node["node_id"]
+        for kind, rule, what, cap_word in (("disk", disk_rule, "Disk", "full"), ("memory", mem_rule, "Memory", "at max_memory")):
+            t = node.get(kind)
+            if not rule or not t or t.get("days_left") is None or t["days_left"] > rule["days"]:
+                continue
+            days = t["days_left"]
+            when = f"{days * 24:.0f} h" if days < 2 else f"{days:.0f} days"
+            out.append({
+                "key": f"{kind}_trend:{node['node_id']}", "kind": f"{kind}_trend", "continuing": True,
+                "severity": "critical" if days <= min(2, rule["days"] / 3) else "warning",
+                "title": f"{what} on {name} {cap_word} in ~{when} at the current rate",
+                "detail": (f"Grew {_gb(t['per_day_b'])}/day over the last {t['span_s'] / 3600:.0f} h (steady climb, fit R² {t['r2']}); "
+                           f"{_gb(t['used_b'])} of {_gb(t['cap_b'])} {'used' if kind == 'disk' else 'max_memory in use'}. "
+                           "From the Cluster Monitor's History (one sample a minute)."),
+                "days_left": days, "node_id": node["node_id"],
+            })
+    return out
+
+
 def check_once() -> dict[str, Any]:
     """Run every enabled rule once and record the findings. Never raises."""
     started = time.time()
@@ -398,6 +439,8 @@ def check_once() -> dict[str, Any]:
         tasks.append(("pipeline", lambda: _check_pipelines(mark)))
     if on["memory"] or on["disk"] or on["node_offline"]:
         tasks.append(("nodes", lambda: _check_nodes(rules)))
+    if on["disk_trend"] or on["memory_trend"]:
+        tasks.append(("trends", lambda: check_trends(on["disk_trend"], on["memory_trend"])))
 
     def guarded(name: str, fn: Any) -> Any:
         def run() -> tuple[str, Any, str | None]:
@@ -412,11 +455,14 @@ def check_once() -> dict[str, Any]:
     history_store.safe_sync()
     found = [f for _, items, _ in results for f in items]
     errors = [e for _, _, e in results if e]
-    if errors and len(errors) == len(tasks):
+    # Every cluster check failed (the trend check is local: it doesn't say whether the cluster answers).
+    cluster_tasks = [n for n, _ in tasks if n != "trends"]
+    if cluster_tasks and len([1 for n, _, e in results if e and n != "trends"]) == len(cluster_tasks):
         found.append({"key": "checks-failing", "kind": "check_error", "severity": "critical",
                       "title": "Alert checks can't reach the cluster", "detail": "; ".join(errors)[:600], "continuing": True})
     checked = {"long_running" if on["long_running"] else "", "pipeline_state" if on["pipeline"] else "",
                "memory" if on["memory"] else "", "disk" if on["disk"] else "", "node_offline" if on["node_offline"] else "",
+               "disk_trend" if on["disk_trend"] else "", "memory_trend" if on["memory_trend"] else "",
                "check_error"} - {""}
     # A continuing kind whose check itself failed wasn't really "not found": don't end those alerts.
     failed_tasks = {n for n, _, e in results if e}
@@ -426,6 +472,8 @@ def check_once() -> dict[str, Any]:
         checked.discard("pipeline_state")
     if "nodes" in failed_tasks:
         checked -= {"memory", "disk", "node_offline"}
+    if "trends" in failed_tasks:
+        checked -= {"disk_trend", "memory_trend"}
     with _lock:
         _load()
         stored = _state["watermarks"].get(source) or {}

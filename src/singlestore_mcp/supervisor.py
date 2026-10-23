@@ -20,6 +20,10 @@ before) in well under a second. A standby that finds the installed packages
 changed since it loaded them declines, and a fresh child is started instead.
 SINGLESTORE_MCP_NO_STANDBY=1 turns the standby off.
 
+The supervisor also holds a browser-view slot (``browser_address``) for its
+whole life and hands its number to every server it starts, so they all listen
+on the same browser address and open browser tabs reconnect after a restart.
+
 A server that exits on its own (say this package has a syntax or import error)
 is started again after a back-off (1, 2, 5, 10, 20, then every 30 s; back to
 1 s once a server has run for a minute), not in a tight loop. The error is
@@ -394,7 +398,22 @@ class Supervisor:
     # ------------------------------------------------------------ main loop
     stdin_closed = False
 
+    @staticmethod
+    def _claim_browser_slot() -> None:
+        """Hold a browser-view slot for this supervisor's life, so every server it starts (restart_server, the
+        standby, a crash restart) listens on the same browser address and open tabs reconnect (browser_address)."""
+        try:
+            from . import browser_address
+
+            slot = browser_address.claim_slot()
+        except Exception as exc:  # noqa: BLE001 - browser links then just get a new address each start
+            _log(f"no browser-view slot: {exc!r}")
+            return
+        if slot is not None:
+            os.environ[browser_address.ENV_SLOT] = str(slot)
+
     def run(self) -> None:
+        self._claim_browser_slot()
         self.start_child()
         for raw in sys.stdin.buffer:
             try:

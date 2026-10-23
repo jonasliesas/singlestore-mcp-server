@@ -39,7 +39,7 @@ def _summary(st: dict[str, Any]) -> str:
 def alerts() -> CallToolResult:
     """Open the Alerts view: alerts the server raised while watching the SingleStore cluster in the background
     (queries running too long, slow or failed queries, failed pipeline batches / pipeline errors, node memory
-    and disk thresholds, nodes not online), with the rules to edit and acknowledge / clear buttons.
+    and disk thresholds, nodes not online, disk / memory projected full from the History trend), with the rules to edit and acknowledge / clear buttons.
 
     The result includes ``browser_url``: post it as a clickable link right under the app.
     """
@@ -68,7 +68,7 @@ def alerts_badge() -> CallToolResult:
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=LOCAL_WRITE)
 def alerts_update(rules: dict[str, Any] | None = None, settings: dict[str, Any] | None = None) -> CallToolResult:
-    """Change alert rules ({name: {enabled, seconds, percent}}) and settings ({interval_s, notify})."""
+    """Change alert rules ({name: {enabled, seconds, percent, days}}) and settings ({interval_s, notify})."""
     st = checker.update_rules(rules, settings)
     return tool_result("Alert rules saved.", st)
 

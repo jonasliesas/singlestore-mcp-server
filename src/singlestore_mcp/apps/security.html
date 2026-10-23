@@ -88,8 +88,8 @@
   .sc-steps pre { flex: 1; margin: 0; }
   /* SQL script for a DBA: the actions in the preview and the script basket */
   .sc-script { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--s2-border); }
-  .sc-save { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
-  .sc-save .s2-input { width: 340px; font-family: var(--s2-mono); }
+  .sc-save { margin-top: 6px; border: 1px solid var(--s2-border); border-radius: var(--s2-radius-sm, 6px); background: var(--s2-bg-2); padding: 8px 10px; }
+  .sc-save .s2-input { min-width: 200px; }
   .sc-basket { border: 1px solid var(--s2-border); border-radius: var(--s2-radius-sm, 6px); background: var(--s2-bg-2); padding: 10px 14px; margin: 4px 0 12px; }
   .sc-basket h2 { font-size: var(--font-text-md-size, 14px); font-weight: var(--font-weight-semibold, 600); margin: 0; }
   .sc-basket ol { margin: 8px 0; padding-left: 22px; font-size: var(--s2-fs-xs); }
@@ -112,8 +112,13 @@ const FLAGS = {
   grant_option: ["grant option", "warn", "Global privileges WITH GRANT OPTION: can pass them on to others"],
   any_host: ["host %", "warn", "Can connect from any host"],
   no_pw_expiry: ["no expiry", "plain", "PASSWORD_EXPIRATION is NULL: password_expiration_seconds isn't enabled, so the password never expires"],
-  locked: ["locked", "err", "ACCOUNT_STATUS = LOCKED (failed logins exceeded the limit)"],
+  locked: ["locked", "err", "ACCOUNT_STATUS = LOCKED (ACCOUNT LOCK, or too many failed logins)"],
   unused: ["unused", "warn", "No traced query in the local Query History store for the chosen number of days"],
+  require_ssl: ["TLS required", "plain", "REQUIRE SSL: this user can only log in over TLS"],
+};
+const DOCS = {
+  grant: "https://docs.singlestore.com/db/v9.0/reference/sql-reference/security-management-commands/grant/",
+  create_view: "https://docs.singlestore.com/db/v9.0/reference/sql-reference/data-definition-language-ddl/create-view/",
 };
 
 const state = {
@@ -160,6 +165,11 @@ async function load(tab, quiet) {
     state.loading[tab] = false;
     render();
     reportContext();
+  }
+  // After a change the details were dropped: read the open user's details again.
+  if (tab === "users" && state.openUser && !state.detail[state.openUser]) {
+    const u = state.users?.users?.find((x) => ukey(x) === state.openUser);
+    if (u) loadDetail(u);
   }
 }
 
@@ -290,9 +300,10 @@ function usersTable(list) {
     body.append(h("tr", { class: `row${open ? " open" : ""}`, onclick: () => toggleUser(u) },
       h("td", { class: "user", title: k }, u.user, h("span", { class: "s2-faint" }, `@${u.host}`), u.is_local ? h("span", { class: "s2-faint", title: "IS_LOCAL: local to the node, not a distributed user" }, " (local)") : null),
       h("td", {}, u.type),
-      h("td", { title: `EFFECTIVE_FAILED_LOGIN_ATTEMPTS ${u.failed_login_attempts ?? "?"} · EFFECTIVE_PASSWORD_LOCK_TIME ${u.password_lock_time ?? "?"} ms` },
+      h("td", { title: u.failed_login_attempts ? `Failed-login lockout: locked for ${u.password_lock_time} s after ${u.failed_login_attempts} failed logins`
+          : "No failed-login lockout (FAILED_LOGIN_ATTEMPTS = 0)" },
         h("span", { class: `s2-badge ${String(u.account_status).toUpperCase() === "LOCKED" ? "err" : "plain"}` }, u.account_status ?? "?"),
-        u.failed_login_attempts ? h("span", { class: "s2-faint" }, ` ${u.failed_login_attempts} failed`) : null),
+        u.failed_login_attempts ? h("span", { class: "s2-faint" }, ` lockout ${u.failed_login_attempts}×/${u.password_lock_time} s`) : null),
       h("td", { class: "num" }, String(u.connections)),
       h("td", {}, pwCell(u)),
       h("td", { class: u.default_pool ? "mono" : "null" }, u.default_pool ?? "–"),
@@ -311,12 +322,15 @@ async function toggleUser(u) {
   const k = ukey(u);
   state.openUser = state.openUser === k ? null : k;
   render();
-  if (state.openUser && !state.detail[k]) {
-    try { state.detail[k] = await S2.callTool("security_user_detail", { user: u.user, host: u.host }); delete state.detailErr[k]; }
-    catch (e) { state.detailErr[k] = e; }
-    render();
-    reportContext();
-  }
+  if (state.openUser && !state.detail[k]) await loadDetail(u);
+}
+
+async function loadDetail(u) {
+  const k = ukey(u);
+  try { state.detail[k] = await S2.callTool("security_user_detail", { user: u.user, host: u.host }); delete state.detailErr[k]; }
+  catch (e) { state.detailErr[k] = e; }
+  render();
+  reportContext();
 }
 
 function privLevel(obj) {
@@ -359,7 +373,8 @@ function userDetail(u) {
       h("div", { class: "s2-small" }, d.resource_pools.map((p) => h("span", { class: "sc-tag" }, `${p.privilege} ON ${p.pool}`)))] : null,
     h("h3", {}, "SHOW GRANTS (password hash hidden)"),
     grantsBlock(d.show_grants),
-    String(d.account_status).toUpperCase() === "LOCKED" ? [h("h3", {}, "Unlock (run it yourself)"),
+    accountBlock(d),
+    String(d.account_status).toUpperCase() === "LOCKED" && !canChange() ? [h("h3", {}, "Unlock (run it yourself)"),
       grantsBlock([`ALTER USER ${acct(d.user, d.host)} ACCOUNT UNLOCK`])] : null,
     Object.keys(d.errors ?? {}).length ? h("div", { class: "sc-notice warn", style: { marginTop: "8px" } },
       "Couldn't read: " + Object.entries(d.errors).map(([a, b]) => `${a} (${b})`).join("; ")) : null,
@@ -368,10 +383,39 @@ function userDetail(u) {
       actBtn("Add to group…", { action: "grant_group", user: d.user, host: d.host }),
       d.groups.map((g) => actBtn(`Remove from ${g}…`, { action: "revoke_group", user: d.user, host: d.host, group: g })),
       actBtn("Default pool…", { action: "set_default_pool", user: d.user, host: d.host, pool: d.default_pool ?? "" }),
+      actBtn("Grant columns (view)…", { action: "grant_view", grantee_type: "user", user: d.user, host: d.host }),
       actBtn("Revoke all…", { action: "revoke_all", grantee_type: "user", user: d.user, host: d.host }, { cls: "danger" }),
       actBtn("Drop user…", { action: "drop_user", user: d.user, host: d.host }, { cls: "danger" }),
       h("button", { class: "s2-btn", onclick: () => S2.sendPrompt(`Review the SingleStore privileges of ${d.grantee} (groups: ${d.groups.join(", ") || "none"}; roles: ${roles.join(", ") || "none"}). Use the user_privileges tool, point out anything risky or broader than needed, and suggest least-privilege GRANT/REVOKE statements I could run myself.`) },
         "Ask Claude to review")));
+}
+
+// Account: lock status, failed-login lockout, REQUIRE SSL, and the buttons that change them (and the password).
+function accountBlock(d) {
+  const isLocked = String(d.account_status).toUpperCase() === "LOCKED";
+  const jwt = String(d.type).toUpperCase() === "JWT";
+  const me = state.cap?.me && state.cap.me.user === d.user && state.cap.me.host === d.host;
+  const who = { user: d.user, host: d.host };
+  return [
+    h("h3", {}, "Account"),
+    h("div", { class: "sc-chain", "aria-label": "Account settings" },
+      h("span", { class: `s2-badge ${isLocked ? "err" : "plain"}`, title: "ACCOUNT_STATUS" }, d.account_status ?? "?"),
+      h("span", { class: "s2-badge plain", title: "REQUIRE SSL shows as 'SSL' in USER_PRIVILEGES and in SHOW GRANTS" },
+        d.require_ssl == null ? "REQUIRE ?" : d.require_ssl ? "REQUIRE SSL" : "REQUIRE NONE"),
+      h("span", { class: "s2-small" }, d.failed_login_attempts
+        ? `Failed-login lockout: after ${d.failed_login_attempts} failed logins, locked for ${d.password_lock_time} s`
+        : "No failed-login lockout"),
+      me && state.cap?.tls != null ? h("span", { class: `s2-small ${state.cap.tls ? "s2-faint" : ""}`, style: state.cap.tls ? null : { color: "var(--s2-warn)" } },
+        state.cap.tls ? "· this app's connection uses TLS" : "· this app's connection does NOT use TLS") : null),
+    h("div", { class: "sc-acts", style: { marginTop: "6px" } },
+      jwt ? null : actBtn(me ? "Change my password…" : "Change password…", { action: "change_password", ...who }),
+      isLocked ? actBtn("Unlock…", { action: "unlock_user", ...who }, { cls: "primary" })
+        : actBtn("Lock…", { action: "lock_user", ...who }, { cls: "danger" }),
+      actBtn("Failed-login lockout…", { action: "set_login_policy", ...who,
+        failed_login_attempts: d.failed_login_attempts ?? "", password_lock_time: d.password_lock_time ?? "" }),
+      d.require_ssl ? actBtn("Allow non-TLS logins…", { action: "set_require", ...who, require: "NONE" })
+        : actBtn("Require TLS (SSL)…", { action: "set_require", ...who, require: "SSL" })),
+  ];
 }
 
 function effectiveTable(d) {
@@ -419,6 +463,7 @@ function rolesTab() {
     canChange() ? h("div", { class: "sc-bar", style: { marginTop: "12px" } },
       actBtn("+ New role", { action: "create_role" }, { cls: "primary" }), actBtn("+ New group", { action: "create_group" }),
       actBtn("Grant privileges to a role…", { action: "grant", grantee_type: "role", level: "database" }),
+      actBtn("Grant columns (view)…", { action: "grant_view", grantee_type: "role" }),
       actBtn("Grant role to group…", { action: "grant_role" }), actBtn("Add user to group…", { action: "grant_group" })) : null,
     h("div", { class: "sc-section" }, h("h2", {}, "User → group → role → privileges"),
       h("span", { class: "s2-faint s2-small" }, "Privileges reach users only through groups; roles hold the privileges."),
@@ -636,13 +681,17 @@ const BUILTIN_POOLS = new Set(["default_pool", "system_auto", "system_optimizer_
 const CAP_OF = { create_user: "users", drop_user: "users", grant: "grants", revoke: "grants", revoke_all: "grants",
   create_role: "roles", drop_role: "roles", create_group: "roles", drop_group: "roles", grant_role: "roles", revoke_role: "roles",
   grant_group: "roles", revoke_group: "roles", create_pool: "create_pool", alter_pool: "alter_pool", drop_pool: "drop_pool",
-  set_default_pool: "alter_user", grant_pool: "pool_grants", revoke_pool: "pool_grants" };
+  set_default_pool: "alter_user", grant_pool: "pool_grants", revoke_pool: "pool_grants", change_password: "alter_user",
+  lock_user: "alter_user", unlock_user: "alter_user", set_login_policy: "alter_user", set_require: "alter_user", grant_view: "grants" };
+const PASSWORD_ACTIONS = new Set(["create_user", "change_password"]);
 const TITLES = { create_user: "Create user", drop_user: "Drop user", grant: "Grant privileges", revoke: "Revoke privileges",
   revoke_all: "Revoke all privileges", create_role: "Create role", drop_role: "Drop role", create_group: "Create group",
   drop_group: "Drop group", grant_role: "Grant role to group", revoke_role: "Revoke role from group", grant_group: "Add user to group",
   revoke_group: "Remove user from group", create_pool: "Create resource pool", alter_pool: "Change resource pool",
   drop_pool: "Drop resource pool", set_default_pool: "Set default resource pool", grant_pool: "Grant resource pool usage",
-  revoke_pool: "Revoke resource pool usage" };
+  revoke_pool: "Revoke resource pool usage", change_password: "Change password", lock_user: "Lock account",
+  unlock_user: "Unlock account", set_login_policy: "Failed-login lockout", set_require: "Require TLS (SSL)",
+  grant_view: "Grant columns (through a view)" };
 const POOL_LABELS = { MEMORY_PERCENTAGE: "Memory %", QUERY_MEMORY_PERCENTAGE: "Per-query memory %", QUERY_TIMEOUT: "Query timeout (s, ×5)",
   SOFT_CPU_LIMIT_PERCENTAGE: "Soft CPU limit %", HARD_CPU_LIMIT_PERCENTAGE: "Hard CPU limit %", MAX_CONCURRENCY: "Max concurrency (0 = no limit)",
   MAX_QUEUE_DEPTH: "Max queue depth" };
@@ -652,6 +701,7 @@ const basketEl = h("div", { id: "sc-basket" });
 const stickyEl = h("div", {}, chgEl, basketEl);
 let chg = null;        // { action, plan, planErr, busy, result, runErr, typed, ack, tables, scriptErr }
 let pwInput = null;    // the only place a password exists on this page
+let pwInput2 = null;   // "repeat the new password" (password change): typed twice, never stored either
 
 const anyCap = () => Object.values(CAP_OF).some((k) => state.cap?.[k]?.ok);
 // The change buttons show whenever the capabilities are known: without the privileges a change can still be
@@ -675,11 +725,17 @@ function capNotice() {
     + "You can still preview a change and make a SQL script of it (Copy SQL, Open in SQL Editor, Save as .sql, Add to script) for a DBA to run.");
 }
 
+// Your own password can always be changed (SET PASSWORD needs no privilege).
+const isMe = (a) => Boolean(state.cap?.me) && a.user === state.cap.me.user && (a.host ?? "%") === state.cap.me.host;
+function capFor(a) {
+  return a.action === "change_password" && isMe(a) ? { ok: true } : state.cap?.[CAP_OF[a.action]];
+}
+
 // A change button: hidden until the capabilities are known. Without the privilege for this kind of change it still
 // opens the panel (preview and SQL script); Run is then off with the reason.
 function actBtn(label, action, opts = {}) {
   if (!canChange()) return null;
-  const c = state.cap[CAP_OF[action.action]];
+  const c = capFor(action);
   return h("button", { class: `s2-btn ${opts.cls ?? ""}`, title: c?.ok ? `${TITLES[action.action]}: preview the SQL, then confirm or make a SQL script`
     : `${TITLES[action.action]}: preview the SQL and make a SQL script for a DBA (${c?.reason ?? "you can't run it"})`,
     "data-act": action.action, "data-can-run": String(Boolean(c?.ok)), onclick: (e) => { e.stopPropagation(); openChange(action); } }, label);
@@ -697,11 +753,16 @@ function openChange(action) {
   const a = structuredClone(action);
   if (a.privileges) a.privileges = a.privileges.map((p) => p.toUpperCase()).filter((p) => (state.cap?.privileges ?? []).includes(p));
   chg = { action: a, plan: null, planErr: null, busy: false, result: null, runErr: null, typed: "", ack: false, tables: [], fixedUser: a.user != null,
-    scriptErr: null, scriptBusy: false };
+    scriptErr: null, scriptBusy: false, columns: [], updateConn: false };
   if (save?.where === "chg") save = null;
-  pwInput = a.action === "create_user" ? h("input", { class: "s2-input", type: "password", autocomplete: "new-password", "aria-label": "Password",
-    spellcheck: "false", oninput: () => updateRun() }) : null;
-  if (a.database && a.level === "table") loadChgTables();
+  const pwField = (label) => h("input", { class: "s2-input", type: "password", autocomplete: "new-password", "aria-label": label,
+    spellcheck: "false", oninput: () => { updateRun(); updatePwHint(); } });
+  if (pwInput) pwInput.value = "";
+  if (pwInput2) pwInput2.value = "";
+  pwInput = PASSWORD_ACTIONS.has(a.action) ? pwField(a.action === "create_user" ? "Password" : "New password") : null;
+  pwInput2 = a.action === "change_password" ? pwField("Repeat the new password") : null;
+  if (a.database && (a.level === "table" || a.action === "grant_view")) loadChgTables();
+  if (a.action === "grant_view" && a.database && a.table) loadChgColumns();
   renderChange();
   render();
   chgEl.scrollIntoView({ block: "nearest" });
@@ -711,7 +772,8 @@ function openChange(action) {
 function closeChange() {
   if (save?.where === "chg") save = null;
   if (pwInput) pwInput.value = "";
-  pwInput = null;
+  if (pwInput2) pwInput2.value = "";
+  pwInput = pwInput2 = null;
   chg = null;
   chgEl.replaceChildren();
   render();
@@ -737,9 +799,21 @@ function payload() {
   }
   if (a.grantee_type === "role") { delete a.user; delete a.host; } else if (a.grantee_type === "user") delete a.role;
   if (a.settings) a.settings = Object.fromEntries(Object.entries(a.settings).filter(([, v]) => v !== "" && v != null).map(([k, v]) => [k, Number(v)]));
+  for (const k of ["failed_login_attempts", "password_lock_time"]) if (a[k] !== "" && a[k] != null) a[k] = Number(a[k]);
+  if (Array.isArray(a.columns) && !a.columns.length) delete a.columns;
   for (const [k, v] of Object.entries(a)) if (v === "" || v == null) delete a[k];
   delete a.password;
   return a;
+}
+
+async function loadChgColumns() {
+  chg.columns = [];
+  const { database, table } = chg.action;
+  if (!database || !table) return;
+  try {
+    const c = (await S2.callTool("security_columns", { database, table })).columns;
+    if (chg && chg.action.database === database && chg.action.table === table) { chg.columns = c; renderChange(); }
+  } catch { /* the column picker stays empty */ }
 }
 
 async function loadChgTables() {
@@ -830,12 +904,62 @@ function poolSettingFields(current) {
     });
 }
 
+const numF = (key, label, ph) => fld(label, h("input", { class: "s2-input", type: "number", min: "0", step: "1", value: chg.action[key] ?? "",
+  placeholder: ph ?? "", "aria-label": label, onchange: (e) => setField(key, e.target.value) }));
+const requireF = (optional) => selectF("require", "Require TLS (SSL)", [...(optional ? [["", "Not set (server default)"]] : []),
+  ["SSL", "REQUIRE SSL: only TLS logins"], ["NONE", "REQUIRE NONE: TLS optional"]]);
+const policyF = () => [numF("failed_login_attempts", "Failed logins before lockout", "0 = off"),
+  numF("password_lock_time", "Lock time after that (s)", "0 = off")];
+
+function columnPickF() {
+  const a = chg.action;
+  const picked = new Set(a.columns ?? []);
+  return h("div", { class: "sc-f wide" }, h("span", {}, `Columns (${picked.size} picked)`),
+    !a.table ? h("span", { class: "s2-faint" }, "Pick a table first.") : !chg.columns.length ? h("span", { class: "s2-faint" }, "Reading columns…") :
+    h("div", { class: "sc-privpick", role: "group", "aria-label": "Columns" }, chg.columns.map((c) => h("label", {},
+      h("input", { type: "checkbox", checked: picked.has(c), value: c, onchange: (e) => {
+        const s = new Set(chg.action.columns ?? []);
+        e.target.checked ? s.add(c) : s.delete(c);
+        setField("columns", chg.columns.filter((x) => s.has(x)));
+      } }), c))));
+}
+
+function viewFields() {
+  const a = chg.action;
+  return [
+    ...granteeF(),
+    selectF("database", "Database", [["", "Pick a database"], ...(state.cap?.pick.databases ?? []).map((d) => [d, d])], (v) => {
+      chg.action.table = ""; chg.action.columns = []; chg.columns = []; setField("database", v); loadChgTables();
+    }),
+    selectF("table", "Table", [["", chg.tables.length ? "Pick a table" : "…"], ...chg.tables.map((t) => [t, t])], (v) => {
+      chg.action.columns = []; chg.columns = [];
+      if (v && !chg.action.view) chg.action.view = `${v}_cols`.slice(0, 64);
+      setField("table", v); loadChgColumns();
+    }),
+    textF("view", "View name", "a new view in the same database"),
+    columnPickF(),
+    h("div", { class: "sc-f wide" }, h("div", { class: "sc-notice", "aria-label": "Column grants note" },
+      "SingleStore 9.0 has no column-level privileges: GRANT SELECT (col, …) ON a table is accepted but grants the WHOLE table "
+      + "(checked on 9.0.40). So this creates a view with the chosen columns and grants SELECT on the view (preview both statements). ",
+      h("button", { class: "s2-btn ghost sc-mini", title: DOCS.grant, onclick: () => openDocs(DOCS.grant) }, "GRANT docs"),
+      h("button", { class: "s2-btn ghost sc-mini", title: DOCS.create_view, onclick: () => openDocs(DOCS.create_view) }, "CREATE VIEW docs"))),
+  ];
+}
+
 function formFields() {
   const a = chg.action;
   const userFixed = () => fixed("User", `${a.user}@${a.host ?? "%"}`);
+  const userPick = () => (a.user != null && chg.fixedUser ? userFixed() : userF());
   switch (a.action) {
     case "create_user": return [textF("user", "User name"), textF("host", "Host", "% = any host"), fld("Password (never shown or stored)", pwInput),
-      poolF("default_pool", "Default resource pool (optional)")];
+      poolF("default_pool", "Default resource pool (optional)"), requireF(true), ...policyF()];
+    case "change_password": return [userPick(), fld("New password (never shown or stored)", pwInput), fld("Repeat it", pwInput2),
+      h("span", { class: "sc-f s2-small", "aria-live": "polite", id: "pw-hint" })];
+    case "lock_user": case "unlock_user": return [userPick()];
+    case "set_login_policy": return [userPick(), ...policyF(),
+      h("div", { class: "sc-f wide s2-small s2-faint" }, "Both above 0 turns the lockout on, both 0 turns it off (SingleStore refuses one without the other).")];
+    case "set_require": return [userPick(), requireF(false)];
+    case "grant_view": return viewFields();
     case "drop_user": return [userFixed()];
     case "grant": case "revoke": return privilegeFields();
     case "revoke_all": return [a.grantee_type === "role" ? fixed("Role", a.role) : userFixed()];
@@ -873,9 +997,17 @@ function ready() {
   if (!chg?.plan || chg.plan.blockers.length || chg.busy || chg.result?.ok) return false;
   if (chg.plan.allowed?.ok === false || chg.plan.needs_script) return false;
   if (pwInput && !pwInput.value) return false;
+  if (pwInput2 && pwInput2.value !== pwInput.value) return false;
   return chg.plan.confirm.typed ? chg.typed.trim() === chg.plan.confirm.phrase : chg.ack;
 }
 function updateRun() { if (runBtn) runBtn.disabled = !ready(); }
+// Says only whether the two fields match (and the length), never anything about the password itself.
+function updatePwHint() {
+  const el = chgEl.querySelector("#pw-hint");
+  if (!el || !pwInput2) return;
+  el.textContent = !pwInput.value ? "" : pwInput2.value !== pwInput.value ? "The two passwords don't match yet."
+    : pwInput.value.length < 8 ? "They match (shorter than 8 characters)." : "They match.";
+}
 
 async function runChange() {
   if (!ready()) return;
@@ -884,9 +1016,10 @@ async function runChange() {
   const args = { action: payload(), confirm: true };
   if (chg.plan.confirm.typed) args.typed_confirmation = chg.typed.trim();
   if (pwInput) args.password = pwInput.value;
+  if (chg.action.action === "change_password" && chg.updateConn && chg.plan.connection?.can_update) args.update_connection = true;
   try {
     chg.result = await S2.callTool("security_change_apply", args);
-    if (chg.result.ok && pwInput) pwInput.value = "";
+    if (chg.result.ok && pwInput) { pwInput.value = ""; if (pwInput2) pwInput2.value = ""; }
   } catch (e) { chg.runErr = e; }
   finally { delete args.password; }
   chg.busy = false;
@@ -933,12 +1066,28 @@ function renderChange() {
               onchange: (e) => { chg.ack = e.target.checked; updateRun(); } }), `I've checked the statement${p.statements.length === 1 ? "" : "s"} above: run ${p.statements.length === 1 ? "it" : "them"}`),
         pwInput && !pwInput.value ? h("span", { class: "s2-small s2-faint" }, "Enter the password first.") : null,
         runBtn) : null,
+      !p.blockers.length && !chg.result?.ok && runnable ? connectionBox(p) : null,
       !p.blockers.length && !chg.result?.ok ? scriptBar("chg") : null,
     ] : null,
     chg.runErr ? S2.errorBox(chg.runErr) : null,
     chg.result ? h("ul", { class: "sc-res-list", "aria-label": "Result" }, chg.result.results.map((r) =>
-      h("li", { class: r.status }, `${r.status}: ${r.statement}`, r.error ? ` – ${r.error}` : ""))) : null));
+      h("li", { class: r.status }, `${r.status}: ${r.statement}`, r.error ? ` – ${r.error}` : ""))) : null,
+    chg.result?.connection?.note ? h("div", { class: `sc-notice${chg.result.connection.updated ? "" : " warn"}`, "aria-label": "Saved connection" },
+      chg.result.connection.note) : null));
   updateRun();
+  updatePwHint();
+}
+
+// Changing your own password: the active saved connection signs in with it. Offer to store the new password for it
+// (the OS credential store) once the change has succeeded.
+function connectionBox(p) {
+  const c = p.connection;
+  if (!c || !c.uses_account) return null;
+  if (!c.can_update) return h("div", { class: "sc-notice warn" }, `After the change, the connection ${c.name ?? ""} needs the new password: ${c.reason ?? ""}`);
+  return h("label", { class: "sc-auto s2-small", style: { marginTop: "6px" } },
+    h("input", { type: "checkbox", "aria-label": "Also save the new password for the connection", checked: chg.updateConn,
+      onchange: (e) => { chg.updateConn = e.target.checked; } }),
+    `Also save the new password for the connection ${c.name} (OS credential store), after the change succeeded`);
 }
 
 window.addEventListener("keydown", (e) => {
@@ -1007,37 +1156,36 @@ async function openScriptInEditor(sql, where) {
   } catch (e) { setScriptErr(where, e); }
 }
 
-async function saveScript(overwrite) {
-  if (!save || save.busy) return;
-  const where = save.where;
-  save.busy = true; save.err = null;
-  where === "chg" ? renderChange() : renderBasket();
-  try {
-    const r = await S2.callTool("sql_editor_save_file", { name: save.name, sql: save.sql, overwrite: Boolean(overwrite) });
-    if (r.exists && !r.saved) { save.exists = true; save.busy = false; }
-    else { S2.toast(`Saved ${r.name} in ${r.folder ?? "the SQL folder"}`, "ok"); save = null; }
-  } catch (e) { if (save) { save.err = e; save.busy = false; } }
-  where === "chg" ? renderChange() : renderBasket();
+// Save as .sql: the file browser with its location bar (this computer, SAS Content, SAS Server), as the SQL Editor's
+// Save as. The browser element is kept while the change panel / basket re-render around it.
+async function saveScriptTo(path, overwrite) {
+  const r = await S2.callTool("sql_editor_save_file", { name: path, sql: save.sql, overwrite: Boolean(overwrite) });
+  if (r.exists || r.conflict) return { ...r, exists: true };  // the browser asks "Replace it?"
+  if (r.connection_mismatch) throw new Error(r.message);
+  S2.toast(`Saved ${r.display ?? `${r.name} in ${r.folder ?? "the SQL folder"}`}`, "ok");
+  closeSave();
+  return r;
+}
+function closeSave() {
+  const w = save?.where;
+  save = null;
+  if (w) w === "chg" ? renderChange() : renderBasket();
 }
 
 function saveForm(where) {
   if (save?.where !== where) return null;
-  const input = h("input", { class: "s2-input", value: save.name, spellcheck: "false", "aria-label": "Script file name",
-    oninput: (e) => { save.name = e.target.value; save.exists = false; } });
-  return h("div", { class: "sc-save" },
-    h("span", { class: "s2-small" }, "Save in the SQL folder as"), input,
-    save.exists ? [h("span", { class: "s2-small", style: { color: "var(--s2-warn)" } }, "exists:"),
-      h("button", { class: "s2-btn danger", disabled: save.busy, onclick: () => saveScript(true) }, "Overwrite")]
-      : h("button", { class: "s2-btn primary", disabled: save.busy, onclick: () => saveScript(false) }, save.busy ? h("span", { class: "s2-spinner" }) : null, "Save"),
-    h("button", { class: "s2-btn ghost", onclick: () => { const w = save.where; save = null; w === "chg" ? renderChange() : renderBasket(); } }, "Cancel"),
-    save.err ? S2.errorBox(save.err) : null);
+  if (!save.el) {
+    save.el = h("div", { class: "sc-save s2-files", role: "group", "aria-label": "Save the script as a .sql file" });
+    S2.fileLocations(save.el, { kind: "sql", mode: "save", name: save.name, onSave: saveScriptTo, onClose: closeSave });
+  }
+  return save.el;
 }
 
 function scriptButtons(where) {
   return [
     h("button", { class: "s2-btn", onclick: () => scriptAction(where, "copy"), title: "Copy the statements as a commented SQL script (nothing runs)" }, "Copy SQL"),
     h("button", { class: "s2-btn", onclick: () => scriptAction(where, "open"), title: "Open the script in a new SQL Editor tab (it isn't run)" }, "Open in SQL Editor"),
-    h("button", { class: "s2-btn", onclick: () => scriptAction(where, "save"), title: "Save the script as a .sql file in the SQL folder" }, "Save as .sql…"),
+    h("button", { class: "s2-btn", onclick: () => scriptAction(where, "save"), title: "Save the script as a .sql file: on this computer, in SAS Content or on the SAS server" }, "Save as .sql…"),
   ];
 }
 
@@ -1051,7 +1199,7 @@ function scriptBar(where) {
       h("button", { class: "s2-btn", disabled: inBasket || chg?.scriptBusy, onclick: addToScript,
         title: "Collect this change in the script basket below, to hand over several changes as one script" },
         inBasket ? "In the script" : `Add to script${state.basket.length ? ` (${state.basket.length})` : ""}`),
-      chg?.action.action === "create_user" ? h("span", { class: "s2-small s2-faint" }, "The script has '<set password>' instead of a password: the password field is never used for it.") : null),
+      PASSWORD_ACTIONS.has(chg?.action.action) ? h("span", { class: "s2-small s2-faint" }, "The script has '<set password>' instead of a password: the password field is never used for it.") : null),
     saveForm(where),
     chg?.scriptErr ? S2.errorBox(chg.scriptErr) : null,
   ];
@@ -1065,7 +1213,8 @@ async function addToScript() {
   try {
     // Checked together with what's already in the basket (names, order, objects created earlier in the script).
     await S2.callTool("security_change_script", { actions: [...basketActions(), action], keep_order: state.keepOrder });
-    const first = (chg.plan.statements[0] ?? "").replace("IDENTIFIED BY '********'", "IDENTIFIED BY '<set password>'");
+    const first = (chg.plan.statements[0] ?? "").replace("IDENTIFIED BY '********'", "IDENTIFIED BY '<set password>'")
+      .replace("PASSWORD('********')", "PASSWORD('<set password>')");
     state.basket.push({ id: ++basketSeq, action, label: `${chg.plan.title}: ${first}` });
     state.basketScript = null; state.basketErr = null;
     storeBasket();

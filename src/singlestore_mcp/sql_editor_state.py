@@ -247,11 +247,12 @@ def clean_origin(origin: Any) -> dict[str, str] | None:
 
 
 def clean_sas(sas: Any) -> dict[str, Any] | None:
-    """A tab's SAS settings: SAS library / caslib it runs in, PROC SQL options and Show pushdown."""
+    """A tab's SAS settings: SAS library / caslib it runs in, PROC SQL options, Show pushdown and the SAS Viya
+    connection it's pinned to (``connection``; none: the active one)."""
     if not isinstance(sas, dict):
         return None
     out: dict[str, Any] = {}
-    for key in ("library", "caslib"):
+    for key in ("library", "caslib", "connection"):
         v = sas.get(key)
         if isinstance(v, str) and v.strip():
             out[key] = v.strip()[:128]
@@ -409,3 +410,64 @@ def recent_files() -> list[dict[str, Any]]:
             except OSError:
                 continue
     return out
+
+
+# ---------------------------------------------------------------- files renamed or deleted (the file browser)
+def moved_path(path: str, old: str, new: str | None, folder: bool) -> str | None:
+    """Where ``path`` is after ``old`` was renamed to ``new`` (``""`` when it was deleted), or None when the change
+    doesn't touch it. A folder's change applies to every file below it. SAS Viya refs compare exactly; local paths
+    as the OS does (case-insensitive on Windows)."""
+    if not isinstance(path, str) or not path or not old:
+        return None
+    viya = _is_viya_ref(path) or _is_viya_ref(old)
+    norm = (lambda p: p) if viya else (lambda p: os.path.normcase(os.path.normpath(p)))
+    sep = "/" if viya else os.sep
+    p, o = norm(path), norm(old)
+    if p == o:
+        return new or ""
+    if folder and p.startswith(o.rstrip(sep) + sep):
+        return (new.rstrip("/\\") + path[len(old.rstrip("/\\")):]) if new else ""
+    return None
+
+
+def files_changed(old: str, new: str | None, *, folder: bool = False, name_of: Any = None,
+                  versions: tuple[str | None, str | None] | None = None) -> list[str]:
+    """Follow a rename (``new``) or delete (``new`` None) in every tab's draft and in the recent list: a renamed
+    file's tab keeps it open under the new path; a deleted file's tab keeps its text as unsaved (no file).
+    ``name_of(path)`` gives the display name of a new path; ``versions``: (old, new) version of a renamed SAS Viya
+    file (a rename changes it): a tab that had the old one gets the new one. Returns the ids of the tabs that changed."""
+    name_of = name_of or (lambda p: p.replace("\\", "/").rsplit("/", 1)[-1])
+    changed: list[str] = []
+    with _lock:
+        for t in _load_tabs()["tabs"]:
+            try:
+                draft = _valid_draft(_read(_draft_name(t["id"]), None))
+            except OSError:
+                continue
+            f = draft.get("file") if draft and isinstance(draft.get("file"), dict) else None
+            moved = moved_path(f.get("path") or "", old, new, folder) if f else None
+            if moved is None:
+                continue
+            if moved:
+                draft["file"] = {**f, "path": moved, "name": name_of(moved)}
+                if versions and versions[1] and f.get("version") and f.get("version") == versions[0]:
+                    draft["file"]["version"] = versions[1]
+            else:
+                draft["file"] = None
+                draft["dirty"] = bool((draft.get("sql") or "").strip())
+            _write(_draft_name(t["id"]), draft)
+            changed.append(t["id"])
+        try:
+            recent = _read("recent.json", [])
+        except OSError:
+            recent = []
+        out = []
+        for r in recent if isinstance(recent, list) else []:
+            moved = moved_path(r.get("path") or "", old, new, folder) if isinstance(r, dict) else None
+            if moved is None:
+                out.append(r)
+            elif moved:
+                out.append({**r, "path": moved, "name": name_of(moved)})
+        if out != recent:
+            _write("recent.json", out)
+    return changed

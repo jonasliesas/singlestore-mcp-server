@@ -142,6 +142,32 @@ def test_replace_drop_and_memory_budget(monkeypatch: pytest.MonkeyPatch) -> None
     assert "r_dddddd" in kept and "r_bbbbbb" in kept and "r_cccccc" not in kept
 
 
+def test_write_streams_without_row_limit_and_reports_affected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A confirmed write (sql_editor_execute) streams like a SELECT: no sql_select_limit on the session (it could
+    cut an INSERT … SELECT), sent once (write=True), and a DML result reports the affected rows."""
+    calls = []
+
+    def fake(sql, database=None, max_rows=None, chunk=1000, on_connection=None, write=False, on_rowcount=None):
+        calls.append({"max_rows": max_rows, "write": write})
+
+        def gen():
+            on_rowcount(7)
+            yield [], []
+        return gen()
+
+    monkeypatch.setattr(rs.db, "stream", fake)
+    s = rs.start("UPDATE t SET a = 1", None, write=True)
+    _done(s)
+    assert calls == [{"max_rows": None, "write": True}]
+    assert s.status()["affected_rows"] == 7 and s.write and not s.columns
+    # A write that returns rows pages like a SELECT.
+    monkeypatch.setattr(rs.db, "stream", lambda sql, database=None, max_rows=None, chunk=1000, on_connection=None, **kw:
+                        FakeStream(2500)(sql, database, max_rows, chunk, on_connection))
+    s = rs.start("CALL p()", None, write=True)
+    _done(s)
+    assert s.status()["loaded"] == 2500 and [r["id"] for r in s.page(2400, 200)] == list(range(2400, 2500))
+
+
 def test_stream_ids_are_checked() -> None:
     with pytest.raises(ValueError):
         rs.start("SELECT 1", None, stream_id="../x")

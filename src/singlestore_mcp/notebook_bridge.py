@@ -22,6 +22,9 @@ import json
 import queue
 import sys
 import threading
+import time
+
+RESTART_GRACE_S = 2.0  # how long a restart waits for the running cell to stop after its interrupt
 
 # Runs once in every new kernel: inline charts, pandas, a SingleStore
 # connection `conn` (same SINGLESTORE_* settings as the MCP server), and the
@@ -67,6 +70,33 @@ if _s2_os.name == "nt":
             return spec
 
     _s2_sys.meta_path.insert(0, _S2PandarallelHook())
+
+    # Interrupt on Windows: jupyter_client signals the kernel's interrupt event and ipykernel's parent poller calls
+    # _thread.interrupt_main(). That raises KeyboardInterrupt at the next Python bytecode, but doesn't wake a call
+    # waiting in C: time.sleep(60) only stopped when it returned. A real Ctrl+C also sets CPython's SIGINT event,
+    # which those waits watch; do that too. (Socket reads, lock waits and long C loops such as sum(range(10**10))
+    # still can't be interrupted on Windows: the app offers Restart kernel for those.)
+    def _s2_wake_sigint_waits():
+        try:
+            import ctypes as _ct, _thread as _th
+            import ipykernel.parentpoller as _pp
+            get_event = _ct.pythonapi._PyOS_SigintEvent
+            get_event.restype = _ct.c_void_p
+            handle = get_event()
+            set_event = _ct.WinDLL("kernel32").SetEvent
+            set_event.argtypes = [_ct.c_void_p]
+            original = _th.interrupt_main
+            if not handle or getattr(_pp.interrupt_main, "_s2", False):
+                return
+            def interrupt_main(*args):
+                original(*args)
+                set_event(handle)
+            interrupt_main._s2 = True
+            _pp.interrupt_main = interrupt_main
+        except Exception:  # an older/newer ipykernel or CPython without these: plain interrupt as before
+            pass
+    _s2_wake_sigint_waits()
+    del _s2_wake_sigint_waits
 import json as _s2_json, os as _s2_os
 import pandas as pd
 import singlestoredb as _s2
@@ -629,20 +659,35 @@ class Bridge:
 
         self.km, self.kc = start_new_kernel(kernel_name="python3")
         self.jobs: queue.Queue[dict] = queue.Queue()
+        # Set by a restart request: a cell that an interrupt can't stop (a C call on Windows) is given up after
+        # RESTART_GRACE_S, so the worker gets to the restart instead of waiting for the cell forever.
+        self.restart_requested = threading.Event()
+        self.restart_at = 0.0
         self._startup()
 
     def _startup(self) -> None:
         self._run(None, STARTUP, silent=True)
 
+    def request_restart(self) -> None:
+        self.restart_at = time.monotonic()
+        self.restart_requested.set()
+
     def _run(self, run_id: str | None, code: str, silent: bool = False) -> None:
         msg_id = self.kc.execute(code, silent=silent, store_history=not silent)
         status, count = "ok", None
+        last = time.monotonic()
         while True:
-            try:
-                msg = self.kc.get_iopub_msg(timeout=3600)
-            except queue.Empty:
-                status = "aborted"
+            if self.restart_requested.is_set() and time.monotonic() - self.restart_at > RESTART_GRACE_S:
+                status = "aborted"  # the restart ends it
                 break
+            try:
+                msg = self.kc.get_iopub_msg(timeout=0.5)
+            except queue.Empty:
+                if time.monotonic() - last > 3600:
+                    status = "aborted"
+                    break
+                continue
+            last = time.monotonic()
             if msg.get("parent_header", {}).get("msg_id") != msg_id:
                 continue
             kind = msg["header"]["msg_type"]
@@ -669,6 +714,7 @@ class Bridge:
             if job is None:
                 return
             if job.get("restart"):
+                self.restart_requested.clear()  # before the restart's own start-up run
                 try:
                     self.restart()
                 except Exception as exc:  # noqa: BLE001
@@ -729,6 +775,7 @@ def main() -> None:
                 if job:
                     _emit({"id": job["id"], "event": "done", "status": "aborted", "execution_count": None})
             bridge.km.interrupt_kernel()
+            bridge.request_restart()  # a cell the interrupt can't stop is given up after RESTART_GRACE_S
             bridge.jobs.put({"restart": True})  # after the running cell has stopped
         elif op == "shutdown":
             break

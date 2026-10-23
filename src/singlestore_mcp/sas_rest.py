@@ -1,7 +1,9 @@
-"""SAS Viya REST client for the Workspace: one SAS Compute session and one CAS session, kept alive and reused.
+"""SAS Viya REST client for the Workspace: one SAS Compute session and one CAS session per SAS Viya connection,
+kept alive and reused.
 
 Signs in with the Viya sign-in from ``sas_viya`` (OAuth token, ``sas.json``, compute context). Used by the SQL
-Editor's "Run as" PROC SQL / FedSQL / FedSQL in CAS and by the Schema Explorer's SAS sources.
+Editor's "Run as" PROC SQL / FedSQL / FedSQL in CAS and by the Schema Explorer's SAS sources. ``sessions(name)``
+gives a connection's pair (``Compute``, ``Cas``); ``compute`` / ``cas`` are the active connection's.
 
 Every call to Viya is a round trip (and the token, TLS and proxy add to the first), so:
 
@@ -10,6 +12,9 @@ Every call to Viya is a round trip (and the token, TLS and proxy add to the firs
   it's recreated and the startup code runs again;
 - job state is long-polled (``?wait=``), result tables are read through the Compute data API in parallel.
 
+A run can be stopped (``Compute.cancel_job`` / ``Cas.cancel``, the documented job / action cancel); a job runs at
+most ``job_timeout()`` seconds (SINGLESTORE_MCP_SAS_TIMEOUT_MIN, default 240 minutes, 0 = no limit).
+
 Startup code (``sas.json`` → ``startup_code``, set in Connections) runs once per session with
 ``options nosource nosource2`` and its log is never kept or shown (it typically ``%include``s libname files
 that hold passwords): only the number of errors and the first error line (passwords masked) are reported.
@@ -17,8 +22,10 @@ that hold passwords): only the number of errors and the first error line (passwo
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
+import os
 import re
 import socket
 import ssl
@@ -29,11 +36,34 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from . import sas_sql, sas_viya
+from . import connections, sas_sql, sas_viya
 from .sas_sql import SasError
 
-JOB_TIMEOUT = 900          # seconds a single job may run
+DEFAULT_TIMEOUT_MIN = 240  # a single job may run this long (SINGLESTORE_MCP_SAS_TIMEOUT_MIN; 0 = no limit)
 _WAIT = 20                 # long-poll seconds per state request
+
+
+def job_timeout() -> float | None:
+    """Seconds a single SAS job / CAS action may run before it's cancelled (None: no limit)."""
+    raw = os.environ.get("SINGLESTORE_MCP_SAS_TIMEOUT_MIN", "").strip()
+    try:
+        minutes = float(raw) if raw else DEFAULT_TIMEOUT_MIN
+    except ValueError:
+        minutes = DEFAULT_TIMEOUT_MIN
+    return None if minutes <= 0 else minutes * 60
+
+
+class SasStopped(SasError):
+    """The run was stopped by the user (its session may have been ended meanwhile)."""
+
+
+class RunControl:
+    """Lets another thread stop a running job: ``cancel`` is set by Stop, ``job`` is the job running now."""
+
+    def __init__(self) -> None:
+        self.cancel = threading.Event()
+        self.job: str | None = None
+
 _RUNNING = {"pending", "queued", "running", "idle"}
 _local = threading.local()
 _COLLECTION = "application/vnd.sas.collection+json, application/json"
@@ -154,10 +184,11 @@ def _send(url: str, method: str, data: bytes | None, hdrs: dict[str, str], timeo
 
 def request(method: str, url: str, *, body: Any = None, accept: str = "application/json",
             content_type: str = "application/json", timeout: float = 60, headers: dict[str, str] | None = None,
-            auth: bool = True, raw: bool = False) -> tuple[int, Any, dict[str, str]]:
+            auth: bool = True, raw: bool = False, conn: str | None = None) -> tuple[int, Any, dict[str, str]]:
     """One HTTP request to Viya on a kept-alive connection: (status, parsed JSON or text, headers).
-    ``raw``: a successful (2xx) answer's body as bytes, as it came (file contents)."""
-    s = sas_viya.settings()
+    ``raw``: a successful (2xx) answer's body as bytes, as it came (file contents). ``conn``: the SAS Viya
+    connection whose sign-in (and certificate check) is used (default: the active one)."""
+    s = sas_viya.settings(conn)
     data = None
     hdrs = {"Accept": accept, **(headers or {})}
     if body is not None:
@@ -165,7 +196,7 @@ def request(method: str, url: str, *, body: Any = None, accept: str = "applicati
         data = text.encode() if isinstance(text, str) else text
         hdrs["Content-Type"] = content_type
     if auth:
-        hdrs["Authorization"] = f"Bearer {sas_viya.token(120)}"
+        hdrs["Authorization"] = f"Bearer {sas_viya.token(120, conn) if conn else sas_viya.token(120)}"
     proxied = bool(_proxy_for(url))
     # The configured proxy first (unless Viya answered only directly before), then directly.
     routes = [sas_viya._route["direct"], not sas_viya._route["direct"]] if proxied else [True]
@@ -205,8 +236,8 @@ def _viya_error(status: int, body: Any, what: str) -> SasError:
     return SasError(f"{what}: HTTP {status} {str(body)[:300]}")
 
 
-def _base() -> str:
-    url = sas_viya.settings()["url"]
+def _base(conn: str | None = None) -> str:
+    url = sas_viya.settings(conn)["url"]
     if not url:
         raise sas_viya.NeedsSignIn("SAS Viya isn't set up: enter its address in the Connections window (SAS Viya).")
     return url
@@ -216,9 +247,12 @@ def _base() -> str:
 
 
 class Compute:
-    """One SAS Compute session on the configured compute context, reused for every run."""
+    """One SAS Compute session on the configured compute context, reused for every run. ``conn``: the SAS Viya
+    connection it belongs to (None: whichever is active)."""
 
-    def __init__(self) -> None:
+    def __init__(self, conn: str | None = None) -> None:
+        self.conn = conn
+        self.current_run: Any = None                  # the editor run holding the session now (sas_runs.Run)
         self.lock = threading.RLock()
         self.sid: str | None = None
         self.key: tuple[str, str] | None = None
@@ -226,12 +260,16 @@ class Compute:
         self.startup: dict[str, Any] | None = None
         self.libraries: list[dict[str, Any]] | None = None
         self.last_used: float | None = None
+        self.auto_lib: dict[str, Any] | None = None   # the automatic SingleStore library (status, no secrets)
+        self._auto_key: tuple[Any, ...] | None = None  # what it was assigned with (password only as a hash)
+        self.sas9: dict[str, Any] | None = None       # SAS/CONNECT sign-on to SAS 9 and its libraries
+        self.warming = False                          # a background warm-up (sas_prewarm) holds the lock now
 
     # -- session
 
     def _context_id(self, name: str) -> str:
         q = urllib.parse.quote(f'eq(name,"{name}")')
-        status, body, _ = request("GET", f"{_base()}/compute/contexts?filter={q}&limit=5")
+        status, body, _ = request("GET", conn=self.conn, url=f"{_base(self.conn)}/compute/contexts?filter={q}&limit=5")
         if status != 200:
             raise _viya_error(status, body, "Couldn't list the compute contexts")
         items = body.get("items", []) if isinstance(body, dict) else []
@@ -240,7 +278,7 @@ class Compute:
         return items[0]["id"]
 
     def session(self) -> str:
-        s = sas_viya.settings()
+        s = sas_viya.settings(self.conn)
         key = (s["url"], s["compute_context"])
         with self.lock:
             if self.sid and self.key == key:
@@ -248,15 +286,85 @@ class Compute:
             if self.sid:
                 self.close()
             ctx = self._context_id(s["compute_context"])
-            status, body, _ = request("POST", f"{_base()}/compute/contexts/{ctx}/sessions",
+            status, body, _ = request("POST", conn=self.conn, url=f"{_base(self.conn)}/compute/contexts/{ctx}/sessions",
                                       body={"name": "SingleStore Workspace", "description": "SQL Editor / Schema Explorer"},
                                       accept="application/vnd.sas.compute.session+json, application/json", timeout=180)
             if status not in (200, 201) or not isinstance(body, dict) or not body.get("id"):
                 raise _viya_error(status, body, f"Couldn't start a SAS session on {s['compute_context']!r}")
             self.sid, self.key, self.started = body["id"], key, time.time()
             self.libraries = None
+            self.auto_lib, self._auto_key, self.sas9 = None, None, None
+            # The automatic SingleStore library first, so the startup code can override it.
+            self._ensure_auto()
             self.startup = self._run_startup(s.get("startup_code") or "")
             return self.sid
+
+    # -- the automatic SingleStore library (LIBNAME <libref> SSTORE … from the active SingleStore connection)
+
+    def _ensure_auto(self) -> None:
+        """Assign (or re-assign) the automatic SingleStore library when it's missing or what it should point at
+        changed: another active connection, its settings, its password, or a renewed token (Entra renews a few
+        minutes before expiry, so a token library is re-assigned before the old token runs out). Never raises
+        for SAS or credential problems (they're reported in ``auto_lib``); a session that ended does."""
+        with self.lock:
+            if not self.sid:
+                return
+            try:
+                spec = auto_spec(self.conn)
+            except Exception as exc:  # noqa: BLE001 - credential store / settings: report, don't break the session
+                spec = {"skip": f"Couldn't read the SingleStore connection: {str(exc)[:200]}"}
+            if "skip" in spec:
+                if self.auto_lib is None or not self.auto_lib.get("assigned"):
+                    self.auto_lib = {"assigned": False, "note": spec["skip"], "libref": spec.get("libref"),
+                                     "enabled": spec.get("enabled", True)}
+                elif not spec.get("enabled", True):
+                    self.auto_lib = {**self.auto_lib, "note": spec["skip"]}  # turned off: the library stays until the session ends
+                return
+            if self._auto_key == spec["key"]:
+                return
+            try:
+                self._assign_auto(spec)
+            except _SessionGone:
+                raise
+            except Exception as exc:  # noqa: BLE001 - Viya refused the job etc.: report it
+                self._auto_key = None
+                self.auto_lib = {"assigned": False, "enabled": True, "libref": spec["libref"],
+                                 "connection": spec["profile"].name,
+                                 "error": sas_sql.mask_value(str(exc), spec["password"])[:400]}
+
+    def _assign_auto(self, spec: dict[str, Any]) -> None:
+        p, pw = spec["profile"], spec["password"]
+        code = sas_sql.auto_libname_code(spec["libref"], p.host, p.port, p.user, pw, p.database, trace=True)
+        job = self._submit(code, self.sid or "")
+        try:
+            state = self._wait(job)
+            lines = self._log(job)
+        finally:
+            self._forget_job(job)
+        ok, errors = sas_sql.auto_libname_result([x["line"] for x in lines])
+        errors = [sas_sql.mask_value(x, pw) for x in errors]
+        ok = ok and state not in ("failed", "canceled")
+        self.libraries = None
+        self._auto_key = spec["key"] if ok else None
+        self.auto_lib = {"assigned": ok, "enabled": True, "libref": spec["libref"], "connection": p.name, "host": p.host,
+                         "port": p.port, "user": p.user, "database": p.database, "auth": p.auth,
+                         "token_expires": spec.get("expires"), "assigned_at": time.time(),
+                         "error": " ".join(errors)[:400] or (None if ok else f"SAS job {state}")}
+
+    def _forget_job(self, job: str) -> None:
+        """Delete a finished job from the session (its code held a password; the log never did: NOSOURCE)."""
+        try:
+            request("DELETE", conn=self.conn, url=f"{_base(self.conn)}/compute/sessions/{job}", timeout=15)
+        except Exception:  # noqa: BLE001 - the session's end removes it anyway
+            pass
+
+    def ensure_auto(self) -> None:
+        """``_ensure_auto`` for callers outside a run (the library list): a session that ended is forgotten."""
+        with self.lock:
+            try:
+                self._ensure_auto()
+            except _SessionGone:
+                self.sid = None
 
     def _run_startup(self, code: str) -> dict[str, Any]:
         if not code.strip():
@@ -270,19 +378,50 @@ class Compute:
         first = sas_sql.mask_secrets(counts["first_error"])[:300] if counts["first_error"] else None
         return {"ran": True, "state": state, "errors": counts["errors"], "warnings": counts["warnings"], "first_error": first}
 
-    def close(self) -> None:
+    def close(self, force: bool = False) -> None:
+        """End the session. ``force``: without waiting for a run that holds the session (Restart SAS session after
+        a Stop that didn't work); that run then fails with "session ended"."""
+        if force:
+            self._close()
+            return
         with self.lock:
-            sid, self.sid, self.key, self.libraries = self.sid, None, None, None
-            if sid:
-                try:
-                    request("DELETE", f"{_base()}/compute/sessions/{sid}", timeout=15)
-                except Exception:  # noqa: BLE001 - it expires anyway
-                    pass
+            self._close()
+
+    def _close(self) -> None:
+        sid, self.sid, self.key, self.libraries = self.sid, None, None, None
+        self.auto_lib, self._auto_key, self.sas9 = None, None, None
+        if sid:
+            try:
+                request("DELETE", conn=self.conn, url=f"{_base(self.conn)}/compute/sessions/{sid}", timeout=15)
+            except Exception:  # noqa: BLE001 - it expires anyway
+                pass
+
+    def cancel_job(self, job: str) -> bool:
+        """Cancel a running job: the documented ``PUT /compute/sessions/{id}/jobs/{id}/state?value=canceled`` with
+        the job's ETag (If-Match); if Viya refuses that, the session's running code (``PUT .../sessions/{id}/state
+        ?value=canceled``). True when Viya accepted one of them (the job then ends as "canceled")."""
+        sid = job.split("/jobs/")[0]
+        for path, accept in ((job, "application/vnd.sas.compute.job+json, application/json"),
+                             (sid, "application/vnd.sas.compute.session+json, application/json")):
+            try:
+                status, _, headers = request("GET", conn=self.conn, url=f"{_base(self.conn)}/compute/sessions/{path}",
+                                             accept=accept, timeout=30)
+                if status != 200:
+                    continue
+                etag = headers.get("etag")
+                status, _, _ = request("PUT", conn=self.conn, url=f"{_base(self.conn)}/compute/sessions/{path}/state?value=canceled",
+                                       body="", accept="text/plain", content_type="text/plain",
+                                       headers={"If-Match": etag} if etag else {}, timeout=30)
+                if 200 <= status < 300 or status == 409:  # 409: it isn't running any more
+                    return True
+            except (SasError, OSError, http.client.HTTPException):
+                continue
+        return False
 
     # -- jobs
 
     def _submit(self, code: str, sid: str) -> str:
-        status, body, _ = request("POST", f"{_base()}/compute/sessions/{sid}/jobs",
+        status, body, _ = request("POST", conn=self.conn, url=f"{_base(self.conn)}/compute/sessions/{sid}/jobs",
                                   body={"code": code.splitlines() or [""]},
                                   accept="application/vnd.sas.compute.job+json, application/json", timeout=60)
         if status in (404, 410):
@@ -291,44 +430,63 @@ class Compute:
             raise _viya_error(status, body, "SAS didn't accept the code")
         return f"{sid}/jobs/{body['id']}"
 
-    def _wait(self, job: str) -> str:
-        deadline = time.time() + JOB_TIMEOUT
+    def _wait(self, job: str, ctl: RunControl | None = None) -> str:
+        limit = job_timeout()
+        deadline = time.time() + limit if limit else None
         state = "running"
         while True:
-            status, body, _ = request("GET", f"{_base()}/compute/sessions/{job}/state?wait={_WAIT}",
+            status, body, _ = request("GET", conn=self.conn, url=f"{_base(self.conn)}/compute/sessions/{job}/state?wait={_WAIT}",
                                       accept="text/plain", timeout=_WAIT + 30)
             if status in (404, 410):
+                if ctl is not None and ctl.cancel.is_set():
+                    raise SasStopped("Stopped: the SAS session was ended.")
                 raise _SessionGone()
             if status != 200:
                 raise _viya_error(status, body, "Couldn't read the job state")
             state = str(body).strip().lower()
             if state not in _RUNNING:
                 return state
-            if time.time() > deadline:
-                request("PUT", f"{_base()}/compute/sessions/{job}/state?value=canceled", body="", accept="text/plain",
-                        content_type="text/plain")
-                raise SasError(f"The SAS job ran longer than {JOB_TIMEOUT // 60} minutes and was cancelled.")
+            if deadline and time.time() > deadline:
+                self.cancel_job(job)
+                minutes = round((limit or 0) / 60)
+                raise SasError(f"The SAS job ran longer than {minutes} minutes and was cancelled "
+                               "(SINGLESTORE_MCP_SAS_TIMEOUT_MIN sets the limit).")
 
     def _log(self, job: str, kind: str = "log") -> list[dict[str, str]]:
-        status, body, _ = request("GET", f"{_base()}/compute/sessions/{job}/{kind}?limit=200000", timeout=120)
+        status, body, _ = request("GET", conn=self.conn, url=f"{_base(self.conn)}/compute/sessions/{job}/{kind}?limit=200000", timeout=120)
         if status != 200 or not isinstance(body, dict):
             return []
         return [{"line": str(i.get("line", "")), "type": str(i.get("type", "normal")).lower()} for i in body.get("items", [])]
 
-    def run(self, code: str, *, listing: bool = False) -> dict[str, Any]:
-        """Run SAS code; returns state, log lines ({line, type}) and, with ``listing``, the listing text."""
+    def run(self, code: str, *, listing: bool = False, ctl: RunControl | None = None) -> dict[str, Any]:
+        """Run SAS code; returns state, log lines ({line, type}) and, with ``listing``, the listing text.
+        ``ctl``: Stop sets ``ctl.cancel`` and cancels ``ctl.job`` (the log so far comes back, state "canceled")."""
         with self.lock:
             for attempt in range(2):
+                if ctl is not None and ctl.cancel.is_set():
+                    raise SasStopped("Stopped before it started.")
                 sid = self.session()
                 started = time.perf_counter()
                 try:
+                    self._ensure_auto()
+                    if ctl is not None and ctl.cancel.is_set():
+                        raise SasStopped("Stopped before it started.")
                     job = self._submit(code, sid)
-                    state = self._wait(job)
+                    if ctl is not None:
+                        ctl.job = job
+                        if ctl.cancel.is_set():  # Stop came while the code was being submitted
+                            self.cancel_job(job)
+                    state = self._wait(job, ctl)
                 except _SessionGone:
                     self.sid = None  # expired: start a new one (startup code runs again)
+                    if ctl is not None and ctl.cancel.is_set():
+                        raise SasStopped("Stopped: the SAS session was ended.") from None
                     if attempt:
                         raise SasError("The SAS session ended and couldn't be restarted.") from None
                     continue
+                finally:
+                    if ctl is not None:
+                        ctl.job = None
                 with ThreadPoolExecutor(2) as pool:
                     log_f = pool.submit(self._log, job)
                     lst_f = pool.submit(self._log, job, "listing") if listing else None
@@ -343,7 +501,7 @@ class Compute:
 
     def _data(self, path: str, timeout: float = 120) -> Any:
         def get() -> tuple[int, Any]:
-            st, b, _ = request("GET", f"{_base()}/compute/sessions/{self.session()}/data{path}", timeout=timeout,
+            st, b, _ = request("GET", conn=self.conn, url=f"{_base(self.conn)}/compute/sessions/{self.session()}/data{path}", timeout=timeout,
                                accept=_COLLECTION)
             return st, b
 
@@ -369,10 +527,10 @@ class Compute:
         for attempt in range(2):
             with self.lock:
                 sid = self.session()
-            base = f"{_base()}/compute/sessions/{sid}/data"
+            base = f"{_base(self.conn)}/compute/sessions/{sid}/data"
 
             def get(pair: tuple[str, str], base: str = base) -> tuple[int, Any]:
-                st, b, _ = request("GET", f"{base}/{_q(pair[0])}/{_q(pair[1])}/columns?limit=10000", timeout=120,
+                st, b, _ = request("GET", conn=self.conn, url=f"{base}/{_q(pair[0])}/{_q(pair[1])}/columns?limit=10000", timeout=120,
                                    accept=_COLLECTION)
                 return st, b
 
@@ -405,14 +563,15 @@ class Compute:
         body = self._data(f"/{_q(libref)}/{_q(table)}")
         return body if isinstance(body, dict) else {}
 
-    def rows(self, libref: str, table: str, limit: int) -> dict[str, Any]:
-        """Columns (with SAS type, length, format, label) and the first ``limit`` rows, in parallel."""
+    def rows(self, libref: str, table: str, limit: int, start: int = 0) -> dict[str, Any]:
+        """Columns (with SAS type, length, format, label) and ``limit`` rows from row ``start`` (0-based), in
+        parallel."""
         with self.lock:
             sid = self.session()
-            base = f"{_base()}/compute/sessions/{sid}/data/{_q(libref)}/{_q(table)}"
+            base = f"{_base(self.conn)}/compute/sessions/{sid}/data/{_q(libref)}/{_q(table)}"
 
             def get(path: str) -> Any:
-                status, body, _ = request("GET", base + path, timeout=180, accept=_COLLECTION)
+                status, body, _ = request("GET", conn=self.conn, url=base + path, timeout=180, accept=_COLLECTION)
                 if status != 200:
                     raise _viya_error(status, body, f"Couldn't read {libref}.{table}")
                 return body
@@ -421,7 +580,7 @@ class Compute:
                 cols_f = pool.submit(get, "/columns?limit=10000")
                 # Unformatted: numbers stay numbers (formatted values come as padded text); date formats are
                 # applied here from the column metadata.
-                rows_f = pool.submit(get, f"/rows?start=0&limit={max(1, int(limit))}&format=false")
+                rows_f = pool.submit(get, f"/rows?start={max(0, int(start))}&limit={max(1, int(limit))}&format=false")
                 info_f = pool.submit(get, "")
                 cols = [_column(c) for c in cols_f.result().get("items", [])]
                 rows_body = rows_f.result()
@@ -479,48 +638,74 @@ def _column(c: dict[str, Any]) -> dict[str, Any]:
 
 
 class Cas:
-    """One CAS session (REST, on the configured CAS server), reused for every action."""
+    """One CAS session (REST, on the configured CAS server), reused for every action. ``conn``: the SAS Viya
+    connection it belongs to (None: whichever is active)."""
 
-    def __init__(self) -> None:
+    def __init__(self, conn: str | None = None) -> None:
+        self.conn = conn
+        self.current_run: Any = None
         self.lock = threading.RLock()
         self.sid: str | None = None
         self.key: tuple[str, str] | None = None
         self.caslib: str | None = None
         self.loaded: set[str] = set()
+        self.warming = False                          # a background warm-up (sas_prewarm) holds the lock now
 
     def _root(self) -> str:
-        server = sas_viya.settings().get("cas_server") or "cas-shared-default"
-        return f"{_base()}/{server}-http"
+        server = sas_viya.settings(self.conn).get("cas_server") or "cas-shared-default"
+        return f"{_base(self.conn)}/{server}-http"
 
     def session(self) -> str:
-        s = sas_viya.settings()
+        s = sas_viya.settings(self.conn)
         key = (s["url"], s.get("cas_server") or "cas-shared-default")
         with self.lock:
             if self.sid and self.key == key:
                 return self.sid
-            status, body, _ = request("POST", f"{self._root()}/cas/sessions", body={}, timeout=60)
+            status, body, _ = request("POST", f"{self._root()}/cas/sessions", body={}, timeout=60, conn=self.conn)
             if status not in (200, 201) or not isinstance(body, dict) or not body.get("session"):
                 raise _viya_error(status, body, f"Couldn't start a CAS session on {key[1]}")
             self.sid, self.key, self.caslib, self.loaded = body["session"], key, None, set()
             return self.sid
 
-    def close(self) -> None:
+    def close(self, force: bool = False) -> None:
+        """End the session (``force``: without waiting for an action that is running)."""
+        if force:
+            self._close()
+            return
         with self.lock:
-            sid, self.sid = self.sid, None
-            if sid:
-                try:
-                    request("DELETE", f"{self._root()}/cas/sessions/{sid}", timeout=15)
-                except Exception:  # noqa: BLE001
-                    pass
+            self._close()
+
+    def _close(self) -> None:
+        sid, self.sid = self.sid, None
+        if sid:
+            try:
+                request("DELETE", f"{self._root()}/cas/sessions/{sid}", timeout=15, conn=self.conn)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def cancel(self) -> bool:
+        """Cancel the action running in the session: the documented ``DELETE /cas/sessions/{id}/actions`` (CAS
+        sends itself a cancelAction). True when CAS accepted it."""
+        sid = self.sid
+        if not sid:
+            return False
+        try:
+            status, _, _ = request("DELETE", f"{self._root()}/cas/sessions/{sid}/actions", timeout=30, conn=self.conn)
+        except (SasError, OSError, http.client.HTTPException):
+            return False
+        return 200 <= status < 300
 
     def action(self, name: str, params: dict[str, Any] | None = None, *, check: bool = True,
-               timeout: float = JOB_TIMEOUT) -> dict[str, Any]:
-        """Run one CAS action: {results, log, severity, status, reason}. Raises SasError on errors when ``check``."""
+               timeout: float | None = None) -> dict[str, Any]:
+        """Run one CAS action: {results, log, severity, status, reason}. Raises SasError on errors when ``check``.
+        ``timeout``: seconds (default ``job_timeout()``)."""
+        if timeout is None:
+            timeout = job_timeout() or 7 * 24 * 3600.0
         with self.lock:
             for attempt in range(2):
                 sid = self.session()
                 status, body, _ = request("POST", f"{self._root()}/cas/sessions/{sid}/actions/{name}",
-                                          body=params or {}, timeout=timeout)
+                                          body=params or {}, timeout=timeout, conn=self.conn)
                 if status in (404, 410) and not attempt:
                     self.sid = None
                     continue
@@ -582,14 +767,180 @@ def first_table(results: dict[str, Any], *names: str) -> Any:
     return None
 
 
-compute = Compute()
-cas = Cas()
+# ------------------------------------------------------------------ sessions per SAS Viya connection
+
+_sessions: dict[str, tuple[Compute, Cas]] = {}
+_sessions_lock = threading.Lock()
 
 
-def reset() -> None:
-    """End both sessions (the next run starts fresh ones; the startup code runs again)."""
-    compute.close()
-    cas.close()
+def sessions(conn: str | None = None) -> tuple[Compute, Cas]:
+    """The Compute and CAS session objects of SAS Viya connection ``conn`` (default: the active one): one pair per
+    connection, so SQL Editor tabs pinned to the same connection share its sessions."""
+    name = conn or sas_viya.active_name() or ""
+    with _sessions_lock:
+        pair = _sessions.get(name)
+        if pair is None:
+            pair = _sessions[name] = (Compute(name or None), Cas(name or None))
+        return pair
+
+
+def all_sessions() -> list[tuple[str, Compute, Cas]]:
+    with _sessions_lock:
+        return [(name, c, k) for name, (c, k) in _sessions.items()]
+
+
+class _Active:
+    """``compute`` / ``cas``: the active connection's session object (attributes are read and set on it)."""
+
+    def __init__(self, index: int) -> None:
+        object.__setattr__(self, "_index", index)
+
+    def _target(self) -> Any:
+        return sessions()[object.__getattribute__(self, "_index")]
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._target(), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        setattr(self._target(), name, value)
+
+
+compute: Compute = _Active(0)  # type: ignore[assignment]
+cas: Cas = _Active(1)  # type: ignore[assignment]
+
+
+def auto_spec(conn: str | None = None) -> dict[str, Any]:
+    """What the automatic SingleStore library should be: ``{libref, profile, password, key, expires}``, or
+    ``{skip: why}`` when there's none (turned off, no active connection, a URL connection, no token).
+    ``conn``: the SAS Viya connection whose settings (libref, on/off) apply."""
+    s = sas_viya.settings(conn)
+    libref = (s.get("libref") or "S2").upper()
+    if not s.get("auto_libname", True):
+        return {"skip": f"Automatic {libref} library turned off (Connections → SAS Viya → Edit).", "libref": libref,
+                "enabled": False}
+    p = connections.active()
+    if p is None:
+        return {"skip": "No active SingleStore connection.", "libref": libref}
+    if p.url or not p.host:
+        return {"skip": f"No {libref} library: the active SingleStore connection {p.name} uses a connection URL.", "libref": libref}
+    try:
+        pw = connections.password_for(p)
+    except connections.NeedsSignIn as exc:
+        return {"skip": f"No {libref} library: {exc}", "libref": libref}
+    exp = connections._token_expiry(pw) if p.auth != "password" else None
+    digest = hashlib.sha256(pw.encode()).hexdigest()
+    key = (libref, p.name, p.host, int(p.port), p.user, p.database, p.auth, digest)
+    return {"libref": libref, "profile": p, "password": pw, "key": key, "expires": exp}
+
+
+def _on_singlestore_change() -> None:
+    # The active SingleStore connection changed: the library is re-assigned before the next SAS run (and the
+    # library list re-read). Nothing runs here: the listener is called on the thread that switched.
+    for _, c, _k in all_sessions():
+        c.libraries = None
+
+
+connections.on_change(_on_singlestore_change)
+
+
+# ------------------------------------------------------------------ SAS 9 through SAS/CONNECT
+
+
+SAS9_DOWN_HINT = ("A SAS 9 server that is shut down (CAUKI, for example, every evening at 22:00) doesn't answer: "
+                  "that's expected then.")
+
+
+def sas9_connect(force: bool = False, conn: str | None = None) -> dict[str, Any]:
+    """Sign on to the SAS 9 server from the Workspace's Compute session (the connection's "SAS 9 sign-on code",
+    run with NOSOURCE like the startup code; its log is never kept) and assign its libraries through remote
+    library services (``libname X server=<server> slibref=X``). Done once per SAS session (``force``: again).
+    Returns ``{ok, server, assigned, skipped, ms}``; raises SasError when the sign-on fails."""
+    s = sas_viya.settings(conn)
+    compute = sessions(conn)[0]
+    code, server = (s.get("sas9_signon") or "").strip(), (s.get("sas9_server") or "").strip().upper()
+    if not code or not server:
+        raise SasError("SAS 9 isn't set up: add the SAS 9 sign-on code and server in Connections → SAS Viya → Edit.")
+    wanted = sas_sql.parse_sas9_libraries(s.get("sas9_libraries"))
+    with compute.lock:
+        compute.session()
+        if compute.sas9 and compute.sas9.get("ok") and compute.sas9.get("server") == server and not force:
+            return compute.sas9
+        started = time.perf_counter()
+        for attempt in range(2):
+            try:
+                res = _sas9_sign_on(compute, code, server, wanted)
+                break
+            except _SessionGone:
+                compute.sid = None
+                if attempt:
+                    raise SasError("The SAS session ended and couldn't be restarted.") from None
+                compute.session()
+        res["ms"] = round((time.perf_counter() - started) * 1000)
+        compute.sas9 = res
+        compute.libraries = None
+    if not res["ok"]:
+        raise SasError(res["error"])
+    return res
+
+
+def _sas9_sign_on(c: Compute, code: str, server: str, wanted: list[tuple[str, str]]) -> dict[str, Any]:
+    # The marker: a new session's first job log also holds the compute context's autoexec (errors included).
+    wrapped = f"options nosource nosource2 nonotes nomprint nosymbolgen;\n%put S2SAS9_BEGIN;\n{code}\n;options source notes;"
+    job = c._submit(wrapped, c.sid or "")
+    state = c._wait(job)
+    lines = [x for x in c._log(job)]
+    start = next((i for i, x in enumerate(lines) if x["line"].startswith("S2SAS9_BEGIN")), 0)
+    counts = sas_sql.log_counts(lines[start:])  # only counted: the included file's log is never kept
+    c._forget_job(job)
+    if state in ("failed", "canceled") or counts["errors"]:
+        first = sas_sql.mask_secrets(counts["first_error"] or f"SAS job {state}")[:300]
+        return {"ok": False, "server": server, "error": f"Couldn't sign on to SAS 9 ({server}): {first} {SAS9_DOWN_HINT}"}
+    # The remote libraries: dictionary.libnames on the SAS 9 side, copied back through its WORK.
+    listing = (f"rsubmit {server} wait=yes;\n"
+               "  proc sql noprint; create table work._s2r9 as select distinct libname, engine from dictionary.libnames; quit;\n"
+               "endrsubmit;\n"
+               f"libname _s2r9w server={server} slibref=work;\n"
+               "data work._s2r9; set _s2r9w._s2r9; run;\n"
+               "libname _s2r9w clear;")
+    res = c.run(listing)
+    counts = sas_sql.log_counts(res["log"])
+    if counts["errors"]:
+        return {"ok": False, "server": server,
+                "error": f"Signed on to {server}, but couldn't list its libraries: {sas_sql.mask_secrets(counts['first_error'])[:300]}"}
+    remote = [str(r.get("libname") or r.get("LIBNAME") or "").strip().upper()
+              for r in c.rows("WORK", "_S2R9", 5000)["rows"]]
+    remote = sorted({x for x in remote if x})
+    if wanted:
+        pairs = [(loc, rem) for loc, rem in wanted if rem in remote]
+        missing = [rem for _, rem in wanted if rem not in remote]
+    else:
+        pairs = [(x, x) for x in remote if x not in sas_sql.SAS9_SKIP and not x.startswith("_")]
+        missing = []
+    explicit = {loc for loc, _ in wanted}
+    lines = ["%macro _s2r9a(local, remote, always);",
+             "  %if &always or %sysfunc(libref(&local)) ne 0 %then %do;",
+             f"    libname &local server={server} slibref=&remote;",
+             "    %if %sysfunc(libref(&local)) ne 0 %then %put S2R9FAIL &local;",
+             "  %end;",
+             "  %else %put S2R9SKIP &local;",
+             "%mend;"]
+    lines += [f"%_s2r9a({loc}, {rem}, {1 if loc in explicit else 0})" for loc, rem in pairs]
+    lines.append("%sysmacdelete _s2r9a;")
+    res = c.run("\n".join(lines))
+    log = [x["line"] for x in res["log"]]
+    skipped = sorted({ln.split()[1] for ln in log if ln.startswith("S2R9SKIP ")})
+    failed = sorted({ln.split()[1] for ln in log if ln.startswith("S2R9FAIL ")})
+    assigned = [{"local": loc, "remote": rem} for loc, rem in pairs if loc not in skipped and loc not in failed]
+    return {"ok": True, "server": server, "assigned": assigned, "skipped": skipped, "failed": failed,
+            "missing": missing, "remote": remote}
+
+
+def reset(conn: str | None = None) -> None:
+    """End connection ``conn``'s two sessions (default: the active one's); the next run starts fresh ones (the
+    startup code runs again). Doesn't wait for a run that holds them (a Stop that didn't work)."""
+    c, k = sessions(conn)
+    c.close(force=True)
+    k.close(force=True)
 
 
 def sas_code_log(lines: list[dict[str, str]]) -> str:
@@ -614,18 +965,45 @@ def library_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         lib = libs.setdefault(name, {"name": name, "engine": str(r.get("engine") or "").strip(),
                                      "path": str(r.get("path") or "").strip() or None, "database": None,
-                                     "server": None, "schema": None})
+                                     "server": None, "schema": None, "user": None, "remote_server": None})
         sysname = str(r.get("sysname") or "").strip().lower()
         value = str(r.get("sysvalue") or "").strip()
         if sysname in ("database", "data base"):
             lib["database"] = value or None
         elif sysname == "schema":
             lib["schema"] = value or None
+        elif sysname == "user":
+            lib["user"] = value or None
+        elif sysname == "accessed through server":
+            lib["remote_server"] = value or None
     for lib in libs.values():
-        lib["singlestore"] = lib["engine"].upper() in sas_sql.SAS_ENGINES_SINGLESTORE
+        engine = lib["engine"].upper()
+        lib["singlestore"] = engine in sas_sql.SAS_ENGINES_SINGLESTORE
+        lib["singlestore_kind"] = "access" if lib["singlestore"] else None
+        lib["sas9"] = engine in sas_sql.SAS_ENGINES_REMOTE
         if lib["singlestore"]:
             lib["server"] = lib["path"]
+        lib.update(sas_sql.singlestore_badge(lib["singlestore_kind"], lib["database"], lib["server"]))
     return sorted(libs.values(), key=lambda x: (x["name"] != "WORK", x["name"]))
+
+
+def _mark(libs: list[dict[str, Any]], compute: Compute) -> list[dict[str, Any]]:
+    """The automatic SingleStore library and the SAS 9 libraries this Workspace assigned, marked as such."""
+    auto = compute.auto_lib or {}
+    sas9 = {a["local"]: a["remote"] for a in (compute.sas9 or {}).get("assigned") or []}
+    for lib in libs:
+        # (the startup code may have assigned the same libref elsewhere since: then it isn't the automatic one)
+        if (auto.get("assigned") and lib["name"] == auto.get("libref") and lib["singlestore"]
+                and str(lib.get("server") or "").lower() == str(auto.get("host") or "").lower()
+                and str(lib.get("database") or "").lower() == str(auto.get("database") or "").lower()):
+            lib.update(auto=True, connection=auto.get("connection"), port=auto.get("port"))
+            lib.update(sas_sql.singlestore_badge("access", lib["database"], lib["server"], auto=auto.get("connection")))
+        if lib["sas9"]:
+            lib["remote_libref"] = sas9.get(lib["name"])
+            lib["badge"], lib["badge_style"] = "9", "sas9"
+            lib["badge_title"] = (f"SAS 9 library on {lib.get('remote_server') or '?'} (SAS/CONNECT remote library services)"
+                                  + (f", remote libref {lib['remote_libref']}" if lib.get("remote_libref") else ""))
+    return libs
 
 
 _LIBS_CODE = """proc sql noprint;
@@ -634,9 +1012,12 @@ _LIBS_CODE = """proc sql noprint;
 quit;"""
 
 
-def libraries(force: bool = False) -> list[dict[str, Any]]:
+def libraries(force: bool = False, conn: str | None = None) -> list[dict[str, Any]]:
     """The librefs assigned in the Compute session (compute context + startup code), engine and database."""
+    compute = sessions(conn)[0]
     with compute.lock:
+        if compute.sid:
+            compute.ensure_auto()  # may re-assign it (another SingleStore connection) and forget the list
         if compute.libraries is not None and not force:
             return compute.libraries
         res = compute.run(_LIBS_CODE)
@@ -644,7 +1025,7 @@ def libraries(force: bool = False) -> list[dict[str, Any]]:
             counts = sas_sql.log_counts(res["log"])
             raise SasError(counts["first_error"] or "Couldn't list the SAS libraries")
         data = compute.rows("WORK", "_S2LIBS", 5000)
-        compute.libraries = library_rows([{k.lower(): v for k, v in r.items()} for r in data["rows"]])
+        compute.libraries = _mark(library_rows([{k.lower(): v for k, v in r.items()} for r in data["rows"]]), compute)
         return compute.libraries
 
 

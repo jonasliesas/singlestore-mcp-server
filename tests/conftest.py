@@ -13,11 +13,15 @@ need the cluster are marked ``cluster`` too.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 import pytest
-from support import DB, McpSession, remove_links, seed_home, server_env
+from support import DB, McpSession, remove_links, sas_signin_mode, seed_home, server_env
+
+# In-process tests never start a SAS session in the background (test_sas_prewarm turns it on for itself).
+os.environ["SINGLESTORE_MCP_SAS_PREWARM"] = "0"
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -77,10 +81,18 @@ def cluster(mcp: McpSession) -> McpSession:
 def sas(request: pytest.FixtureRequest, cluster: McpSession) -> McpSession:
     if not request.config.getoption("--sas"):
         pytest.skip("SAS tests are slow: run with --sas")
+    mode = sas_signin_mode()
     r = cluster.call("sas_viya_test", timeout=60)
     if r.is_error or not (isinstance(r.data, dict) and r.data.get("ok")):
         reason = r.data.get("error") if isinstance(r.data, dict) else r.text
-        pytest.skip(f"SAS Viya not reachable or not signed in: {str(reason)[:200]}")
+        pytest.skip(f"SAS Viya not reachable or not signed in (S2_TEST_SAS_SIGNIN={mode}): {str(reason)[:200]}")
+    # Say which sign-in the SAS tests run with: without S2_TEST_SAS_SECRETS the test home has none of its own, and
+    # the server reuses the SAS Viya MCP server's / CLI's cached sign-in (see support.sas_signin_mode).
+    # (own: importing is off in the test server, so this is the copied sign-in, whatever it was first made with.)
+    used = r.data.get("signed_in_with") or "unknown"
+    reporter = request.config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        reporter.write_line(f"SAS tests sign in to SAS Viya with: {used} (S2_TEST_SAS_SIGNIN={mode})")
     return cluster
 
 
@@ -124,3 +136,37 @@ def app_url(mcp: McpSession):
 @pytest.fixture(scope="session")
 def database() -> str:
     return DB
+
+
+# ----------------------------------------------------------------------------- UI tests (tests/ui)
+# These live here, not in tests/ui/conftest.py: pytest 9 binds a conftest's fixtures to the Directory
+# node it was collected under, and a call that mixes files (``pytest tests/test_x.py tests/ui/test_y.py
+# tests/test_z.py tests/ui/test_w.py``) builds a second ``tests/ui`` node for the later file, which then
+# didn't see them ("fixture 'ui' not found"). The ``tests`` node is shared by every file, so this works.
+
+UI_ARTIFACTS = Path(__file__).parent / "ui" / "_artifacts"
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: Any):
+    outcome = yield
+    rep = outcome.get_result()
+    setattr(item, f"rep_{rep.when}", rep)
+
+
+@pytest.fixture
+def ui(page: Any, request: pytest.FixtureRequest):
+    """The Playwright page plus an error collector; screenshots the page into tests/ui/_artifacts/ if the test fails."""
+    from uihelpers import Errors  # tests/ui is on sys.path once a UI test module is imported
+
+    errors = Errors(page)
+    page.set_default_timeout(30_000)
+    yield page, errors
+    rep = getattr(request.node, "rep_call", None)
+    if rep is not None and rep.failed:
+        UI_ARTIFACTS.mkdir(parents=True, exist_ok=True)
+        name = re.sub(r"[^\w.-]+", "_", request.node.nodeid.split("::", 1)[-1])[:120]
+        try:
+            page.screenshot(path=str(UI_ARTIFACTS / f"{name}.png"), full_page=True)
+        except Exception:  # noqa: BLE001 - the page may be gone
+            pass

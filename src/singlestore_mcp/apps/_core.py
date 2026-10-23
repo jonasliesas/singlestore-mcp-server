@@ -119,23 +119,49 @@ SHARED_HEAD_MARKER = "<!--S2:SHARED-HEAD-->"
 
 
 _VENDOR_MARKER = re.compile(r"<!--S2:VENDOR:([\w.-]+)-->")
+# Stands for a vendor block the caller already has (app_page with matching ``vendors``).
+VENDOR_HAVE_MARKER = "<!--S2:VENDOR-HAVE:{name}-->"
+# name -> (hash, the inlined block): CodeMirror (~0.5 MB) is in both the SQL Editor's and the Notebook's page,
+# so the Workspace keeps the blocks it got once and asks for later pages without them.
+_VENDOR_BLOCKS: dict[str, tuple[str, str]] = {}
 
 
 def _vendor_inline(match: re.Match[str]) -> str:
-    """Inline a file from vendor/: a .js file as a classic script, a .json file as a data block."""
+    """Inline a file from vendor/: a .js file as a classic script, a .json file as a data block.
+
+    The block is marked ``data-s2-vendor`` / ``data-s2-hash`` (first attributes, so the Workspace can find it)."""
     name = match.group(1)
+    if name in _VENDOR_BLOCKS:
+        return _VENDOR_BLOCKS[name][1]
     path = _HERE / "vendor" / name
     if name.endswith(".json") and not path.exists():
         text = "[]"  # optional data (e.g. the function list); the app copes without it
     else:
         text = path.read_text(encoding="utf-8")
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+    mark = f'data-s2-vendor="{name}" data-s2-hash="{digest}"'
     if name.endswith(".json"):
         # "<\/" is the same JSON string but can't close the <script> element.
         block_id = "vendor-" + name.rsplit(".", 1)[0]
-        return f'<script type="application/json" id="{block_id}">{text.replace("</", "<\\/")}</script>'
-    if "</script" in text.lower():
-        raise RuntimeError(f"vendor/{name} contains '</script' and can't be inlined")
-    return f"<script>\n{text}\n</script>"
+        block = f'<script {mark} type="application/json" id="{block_id}">{text.replace("</", "<\\/")}</script>'
+    else:
+        if "</script" in text.lower():
+            raise RuntimeError(f"vendor/{name} contains '</script' and can't be inlined")
+        block = f"<script {mark}>\n{text}\n</script>"
+    _VENDOR_BLOCKS[name] = (digest, block)
+    return block
+
+
+def without_vendors(html: str, have: dict[str, str] | None) -> tuple[str, list[str]]:
+    """``html`` with the vendor blocks the caller already has (name -> hash, matching) replaced by
+    VENDOR_HAVE_MARKER; returns (html, names left out)."""
+    omitted = []
+    for name, digest in (have or {}).items():
+        known = _VENDOR_BLOCKS.get(name)
+        if known and known[0] == digest and known[1] in html:
+            html = html.replace(known[1], VENDOR_HAVE_MARKER.format(name=name), 1)
+            omitted.append(name)
+    return html, omitted
 
 
 def build_page(template: str) -> str:
@@ -155,6 +181,23 @@ _browser_url_factory: Callable[[str, dict[str, Any]], str] | None = None
 def set_browser_url_factory(factory: Callable[[str, dict[str, Any]], str]) -> None:
     global _browser_url_factory
     _browser_url_factory = factory
+
+
+_browser_reset: Callable[[], Any] | None = None
+
+
+def set_browser_reset(reset: Callable[[], Any]) -> None:
+    """How "Reset browser links" gives the browser view a new token (the process's BrowserView)."""
+    global _browser_reset
+    _browser_reset = reset
+
+
+def reset_browser_links() -> bool:
+    """New browser-view token: every open browser tab and earlier link stops working. False when there's no view."""
+    if _browser_reset is None:
+        return False
+    _browser_reset()
+    return True
 
 
 def browser_url(tool: str, arguments: dict[str, Any]) -> str | None:

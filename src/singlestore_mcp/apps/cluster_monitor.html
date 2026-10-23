@@ -945,6 +945,20 @@ const HIST_METRICS = [
 ];
 const histPlots = Object.fromEntries(HIST_METRICS.map(([k, label]) => [k, createPlot(`${label} per node, stored history`)]));
 
+// The loaded History range as CSV: one row per point and node, the same values the charts show.
+function historyCsv(x, nodes) {
+  const host = Object.fromEntries(nodes.map((n) => [String(n.id), n.host]));
+  const cols = [["cpu", "cpu_pct"], ["cpu_max", "cpu_max_pct"], ["mem", "memory_pct_of_max"], ["disk", "disk_pct_used"],
+    ["queued", "queued_peak"], ["running", "running_avg"], ["conns", "connections_avg"]];
+  const cell = (v) => (v == null ? "" : /[",\r\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
+  const lines = [["time_utc", "node_id", "host", ...cols.map(([, name]) => name)].join(",")];
+  for (const p of x.points) {
+    const ids = [...new Set(cols.flatMap(([k]) => Object.keys(p[k] ?? {})))].sort((a, b) => Number(a) - Number(b));
+    for (const id of ids) lines.push([new Date(p.t * 1000).toISOString(), id, host[id] ?? "", ...cols.map(([k]) => p[k]?.[id])].map(cell).join(","));
+  }
+  return lines.join("\r\n") + "\r\n";
+}
+
 function historyTab(d) {
   const slot = state.extra.history;
   const x = slot.data;
@@ -959,7 +973,10 @@ function historyTab(d) {
     seg("Time range", HIST_RANGES, hs.range, (k) => { hs.range = k; refreshTab(true); render(); }),
     seg("Nodes to show", GROUPS, hs.group, (k) => { hs.group = k; hs.hidden.clear(); render(); }),
     h("button", { class: "s2-btn", disabled: slot.loading, title: "Take one sample now and add it to the history", onclick: () => refreshTab("sample") },
-      slot.loading ? h("span", { class: "s2-spinner" }) : null, "Sample now"));
+      slot.loading ? h("span", { class: "s2-spinner" }) : null, "Sample now"),
+    h("button", { class: "s2-btn ghost", disabled: !x?.points?.length, title: "Save the points of this range (one row per point and node) as a CSV file",
+      onclick: () => S2.download(`cluster-history-${x.range}-${new Date().toISOString().slice(0, 16).replace(/[T:]/g, "")}.csv`,
+        historyCsv(x, [...d.nodes, ...x.nodes.filter((n) => !d.nodes.some((m) => m.id === n.id))]), "text/csv") }, "Export CSV"));
   if (!x) return [head, tabStatus(slot, "History") ?? h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Reading the stored history…")];
   // The live node list first (same colors as the other tabs), then nodes that only exist in the history.
   const nodes = [...d.nodes, ...x.nodes.filter((n) => !d.nodes.some((m) => m.id === n.id))];
@@ -1041,7 +1058,21 @@ function backupsTab() {
   ];
 }
 
+// render() rebuilds the page. One landing between a button's mousedown and mouseup (auto-refresh, or a tab's data
+// arriving) replaces the button under the pointer, and the browser then fires no click: a tab or button click was
+// lost now and then. Renders wait while a button is pressed (at most 1.5 s) and the last one runs right after the click.
+const press = { down: false, at: 0, pending: false };
+document.addEventListener("pointerdown", () => { press.down = true; press.at = Date.now(); }, true);
+function release() {
+  if (!press.down) return;
+  press.down = false;
+  if (press.pending) { press.pending = false; setTimeout(render, 0); }  // after this pointerup's click
+}
+for (const ev of ["pointerup", "pointercancel"]) document.addEventListener(ev, release, true);
+window.addEventListener("blur", release);
+
 function render() {
+  if (press.down && Date.now() - press.at < 1500) { press.pending = true; return; }
   if (!state.data) {
     root.replaceChildren(state.error ? S2.errorBox(state.error) : h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Measuring the cluster…"));
     return;

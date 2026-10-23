@@ -43,7 +43,14 @@ _lock = threading.RLock()
 _pending: dict[str, Any] = {}  # PKCE state between "Sign in" and "paste the code"
 _route = {"direct": False}  # True when Viya is only reachable without the configured proxy
 DEFAULTS = {"url": "", "compute_context": "SAS Studio compute context", "client_id": "vscode",
-            "ssl_verify": True, "libref": "S2", "cas_server": "cas-shared-default", "startup_code": ""}
+            "ssl_verify": True, "libref": "S2", "cas_server": "cas-shared-default", "startup_code": "",
+            # Workspace SAS session: LIBNAME <libref> on the active SingleStore connection (before the startup code)
+            "auto_libname": True,
+            # Start the Workspace's SAS session in the background when the Workspace opens (sas_prewarm)
+            "prewarm": True,
+            # SAS 9 through SAS/CONNECT: sign-on code (e.g. %include of a signon file), the remote session name
+            # used in its SIGNON (server= of the remote libnames) and which remote libraries to assign (empty: all)
+            "sas9_signon": "", "sas9_server": "", "sas9_libraries": ""}
 FIELDS = ("name", *DEFAULTS)
 MAX_STARTUP_CODE = 20_000  # characters of SAS code run when the Workspace's SAS session starts
 # Same rule as SingleStore connection names (no ":" so the secret keys can't clash with theirs).
@@ -89,7 +96,27 @@ def _fields(values: dict[str, Any], cur: dict[str, Any]) -> dict[str, Any]:
         "cas_server": str(get("cas_server") or "").strip() or DEFAULTS["cas_server"],
         # Workspace SAS session startup code (e.g. %include of libname files); never a password itself.
         "startup_code": str(get("startup_code") or "")[:MAX_STARTUP_CODE],
+        "auto_libname": bool(get("auto_libname")),
+        "prewarm": bool(get("prewarm")),
+        "sas9_signon": str(get("sas9_signon") or "")[:MAX_STARTUP_CODE],
+        "sas9_server": _sas9_server(get("sas9_server")),
+        "sas9_libraries": _sas9_libraries(get("sas9_libraries")),
     }
+
+
+def _sas9_server(value: Any) -> str:
+    server = str(value or "").strip().upper()
+    if server and not re.fullmatch(r"[A-Z_][A-Z0-9_]{0,7}", server):
+        raise ValueError("The SAS 9 server is the remote session name used in the SIGNON (1–8 letters, digits, _), e.g. CAUKI.")
+    return server
+
+
+def _sas9_libraries(value: Any) -> str:
+    from .sas_sql import parse_sas9_libraries
+
+    text = " ".join(str(value or "").split())[:2000]
+    parse_sas9_libraries(text)  # ValueError for a bad name
+    return text
 
 
 def _clean(entry: dict[str, Any]) -> dict[str, Any]:
@@ -316,9 +343,18 @@ def _store(name: str, tokens: dict[str, Any], client_id: str, source: str, url: 
     return data
 
 
+def foreign_import_enabled() -> bool:
+    """SINGLESTORE_MCP_SAS_IMPORT=0 turns off reusing other SAS tools' sign-ins (e.g. for tests that must use their own)."""
+    import os
+
+    return os.environ.get("SINGLESTORE_MCP_SAS_IMPORT", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
 def _import_foreign(name: str, url: str, verify: bool) -> dict[str, Any] | None:
     """Reuse a sign-in cached by the SAS Viya MCP server or the SAS Viya CLI, if this Viya accepts it.
     (Viya tokens name http://localhost as issuer, so the only way to tell is to ask this Viya.)"""
+    if not foreign_import_enabled():
+        return None
     for path, client in _FOREIGN:
         try:
             creds = json.loads(path.read_text())["Default"]
@@ -435,7 +471,7 @@ def token_info(name: str) -> dict[str, Any]:
     s = settings(name)
     t = _stored(name)
     if not t or t.get("url") != s["url"]:
-        return {"signed_in": False, "foreign_available": any(p.is_file() for p, _ in _FOREIGN)}
+        return {"signed_in": False, "foreign_available": foreign_import_enabled() and any(p.is_file() for p, _ in _FOREIGN)}
     valid = t.get("exp", 0) - time.time() > 60
     c = _claims(t.get("access") or "")
     return {"signed_in": valid or bool(t.get("refresh")), "user": c.get("user_name") or c.get("sub"),
@@ -486,7 +522,10 @@ def test(name: str | None = None) -> dict[str, Any]:
         names = compute_contexts(name)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)[:400]}
-    return {"ok": ctx in names, "contexts": names, "ms": round((time.time() - started) * 1000),
+    # Where the sign-in came from: "sign-in" (this server's own), or another SAS tool's that was reused
+    # ("SAS Viya MCP server sign-in" / "SAS Viya CLI sign-in").
+    signed_in_with = (_stored(settings(name)["name"]) or {}).get("source")
+    return {"ok": ctx in names, "contexts": names, "ms": round((time.time() - started) * 1000), "signed_in_with": signed_in_with,
             **({} if ctx in names else {"error": f"No compute context named {ctx!r}. Pick one of the list."})}
 
 

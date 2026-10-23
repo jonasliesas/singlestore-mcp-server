@@ -243,3 +243,51 @@ def test_overview_adds_live_trace_calls_not_yet_stored(store: str) -> None:
     old = {**call(sas_ep.epoch("2026-10-01 00:00:00"), 5200), "stmt": "s0"}
     o = sas_ep.overview("2026-10-14 00:00:00", live + [old])
     assert o["calls"] == 4 and o["bursts"] == 1 and o["rows"][0]["source"] == "SAS VA / CAS (format function)"
+
+
+# ------------------------------------------------------------------ runs the cluster's trace lost (kept locally)
+
+def test_parse_reads_a_cut_off_job_call() -> None:
+    # A run kept locally stores only the first 300 characters: the call is cut before its closing quote.
+    cut = sas_ep.parse(JOB[:300])
+    assert cut["kind"] == "job" and cut["truncated"] and cut["command"] == "RUNDATASTEP"
+    assert cut["params"]["epdatabase"] == "MyDB" and "databasePassword" not in cut["params"]
+    assert "truncated" not in sas_ep.parse(JOB)
+
+
+def test_queries_list_includes_the_ep_calls_the_overview_counts(store: str) -> None:
+    """The Usage tab's EP overview counts stored runs; the Queries list must list the ones the live trace lost
+    (e.g. after a cluster restart), so clicking an overview row always shows them."""
+    import datetime as dt
+
+    from singlestore_mcp.apps import query_history as qh
+
+    conn = history_store.connect()
+    try:
+        _add_run(conn, store, 1, "2026-10-14 12:35:21.664179", 5257, JOB, "MyDB")
+        _add_run(conn, store, 2, "2026-10-14 07:40:16.791362", 5200, FORMAT, "FANS")
+        _add_run(conn, store, 3, "2026-10-14 07:40:17.000000", 400, FORMAT, "FANS", ok=0)  # failed, under 1 s
+        _add_run(conn, store, 4, "2026-10-16 09:00:00.000000", 5200, FORMAT, "FANS")       # still in the live trace
+        conn.commit()
+    finally:
+        conn.close()
+    o = sas_ep.overview()
+    assert o["calls"] == 4 and o["kept_calls"] == 4 and o["live_calls"] == 0 and o["short_calls"] == 1
+
+    # The live trace starts on Oct 16 (it was reset): the older runs come from the store, at least 1 s, newest first.
+    total = {"oldest": dt.datetime(2026, 10, 16, 8, 6, 47)}
+    now = [{"offset_min": 0, "now": dt.datetime(2026, 10, 16, 17, 0, 0)}]
+    kept = qh._kept_events([], total, now, 1000, None, 5000)
+    assert [e["key"] for e in kept["events"]] == ["4:1:1", "4:1:2"]
+    job = kept["events"][0]
+    assert job["kept"] and job["origin"] == "SAS EP" and job["sql_truncated"] and "NOTAREALSECRET" not in job["sql"]
+    assert kept["oldest"] == "2026-10-14 07:40:16.791362"
+    # The period applies (54 h back from the cluster's NOW keeps only the 12:35 run), and live runs aren't repeated.
+    assert [e["key"] for e in qh._kept_events([], total, now, 1000, 54, 5000)["events"]] == ["4:1:1"]
+    assert [e["key"] for e in qh._kept_events([{"key": "4:1:1"}], total, now, 1000, None, 5000)["events"]] == ["4:1:2"]
+
+    # Opening a kept run: the start of its SQL (masked), marked kept, never profiled.
+    ev = qh._kept_detail("4:1:1")
+    assert ev["kept"] and ev["query_text_truncated"] and "NOTAREALSECRET" not in ev["query_text"]
+    assert ev["duration_ms"] == 5257 and ev["context_database"] == "MyDB" and "incomplete" in ev["kept_note"]
+    assert qh._kept_detail("9:9:9") is None

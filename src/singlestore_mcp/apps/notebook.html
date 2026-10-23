@@ -42,6 +42,13 @@
   .nb-pkgs .core { font-size: 10px; font-weight: 600; margin-left: 6px; padding: 0 4px; border-radius: 3px; background: var(--s2-info-bg); color: var(--s2-info); }
   .nb-pkgs pre { max-height: 140px; overflow: auto; background: var(--s2-bg); padding: 6px 8px; border-radius: var(--s2-radius-sm); margin: 6px 0 0; font-size: 11px; }
   .nb-files .s2-input { min-width: 220px; }
+  /* Open / Save as: a large dialog over the notebook (as in the SQL Editor); small prompts stay inline. */
+  .nb-files.dialog { position: fixed; inset: 4vh 4vw; z-index: 60; margin: 0; display: flex; flex-direction: column; padding: 12px 14px;
+    font-size: var(--s2-fs-sm); box-shadow: 0 0 0 100vmax rgba(0,0,0,.35), 0 10px 40px rgba(0,0,0,.3); }
+  .nb-files.dialog .list { flex: 1; min-height: 120px; max-height: none; }
+  .nb-files.dialog .item { padding: 6px 10px; }
+  .nb-stuck { color: var(--s2-warn); }
+  .nb-stuck .s2-btn { margin: 0 2px; }
 
   .nb-env { border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); padding: 14px 16px; margin-bottom: 10px; background: var(--s2-bg-2); font-size: var(--s2-fs-xs); line-height: 1.6; }
   .nb-env pre { max-height: 140px; overflow: auto; background: var(--s2-bg); padding: 6px 8px; border-radius: var(--s2-radius-sm); margin: 8px 0 0; font-size: 11px; }
@@ -327,7 +334,11 @@ const overwriteCR = (t) => t.includes("\r") ? t.split("\n").map((l) => l.split("
 // ---------------------------------------------------------------- layout
 const root = document.getElementById("root");
 const headEl = h("div", { class: "nb-head" });
-const filePanel = h("div", { class: "nb-files", hidden: true });
+const filePanel = h("div", { class: "nb-files", hidden: true, role: "group", "aria-label": "Notebook files" });
+// Escape closes the Open / Save as dialog wherever the focus is (Open leaves it on the toolbar button).
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !filePanel.hidden && filePanel.classList.contains("dialog")) { e.stopPropagation(); e.preventDefault(); hideFiles(); }
+}, true);
 const pkgPanel = h("div", { class: "nb-files nb-pkgs", hidden: true });
 const envEl = h("div", { class: "nb-env", hidden: true });
 const cellsEl = h("div", { class: "nb-cells" });
@@ -506,7 +517,9 @@ async function refreshKernel() {
   try { state.kernel = await S2.callTool("notebook_kernel_state", { notebook_id: notebookId }); } catch { return; }
   renderKernel();
 }
+const INTERRUPT_GRACE_MS = 5000;
 async function kernelControl(action) {
+  state.interruptAt = action === "interrupt" ? Date.now() : 0;
   try {
     await S2.callTool("notebook_kernel_control", { notebook_id: notebookId, action });
     if (action === "restart") {
@@ -699,7 +712,13 @@ function renderOutputs(cell) {
   }
   cell.el.outputs.replaceChildren(...merged.map(outputEl));
   const st = cell.el.status;
-  if (cell.running) st.replaceChildren(h("span", { class: "s2-spinner" }), ` Running${cell.seconds ? ` · ${cell.seconds}s` : ""}`);
+  // Interrupt stops Python code at once, but on Windows not a call waiting in C (a network read, a lock, a long
+  // numpy/C loop): after a few seconds, offer the restart that does stop it.
+  const stuck = cell.running && state.interruptAt && Date.now() - state.interruptAt > INTERRUPT_GRACE_MS;
+  if (cell.running) st.replaceChildren(h("span", { class: "s2-spinner" }), ` Running${cell.seconds ? ` · ${cell.seconds}s` : ""}`,
+    stuck ? h("span", { class: "nb-stuck", role: "alert" }, ` · Interrupt didn't stop it: the cell is waiting in code that can't be interrupted here `,
+      "(a network read, a lock or a long C call). ",
+      h("button", { class: "s2-btn", onclick: () => kernelControl("restart") }, "Restart kernel"), " stops it; variables are cleared.") : null);
   else if (cell.lastRun) st.replaceChildren(cell.lastRun);
   else st.replaceChildren();
 }
@@ -734,6 +753,7 @@ async function runCell(cell, { advance = false, confirmed = false } = {}) {
   }
   if (advance) focusNext(cell);
   cell.running = true; cell.outputs = []; cell.seconds = 0; cell.lastRun = null;
+  state.interruptAt = 0;
   renderGutter(cell); renderOutputs(cell);
   state.kernel = { ...state.kernel, state: "busy" }; renderKernel();
   let after = 0, cleared = 0, result = null, delay = 150;
@@ -866,42 +886,106 @@ function markDirty() { clearTimeout(dirtyTimer); dirtyTimer = setTimeout(renderF
 function renderFileLabel() {
   const dirty = isDirty();
   if (S2.embedded()) window.parent.postMessage({ type: "s2-title", title: baseOf(state.file.name) ?? "untitled", dirty, path: state.file.path ?? null }, "*");
-  fileLabel.title = state.file.path ?? (state.file.name ? `${state.file.folder ?? "SQL folder"}\\${state.file.name}` : "Not saved yet");
+  fileLabel.title = (state.file.path && fileTitle(state.file.path)) ?? (state.file.name ? `${state.file.folder ?? "SQL folder"}\\${state.file.name}` : "Not saved yet");
   fileLabel.replaceChildren(state.file.name ?? "untitled.ipynb", dirty ? h("span", { class: "dirty", title: "Unsaved changes" }, "●") : "");
 }
 const ago = (t) => { const s = Date.now() / 1000 - t; return s < 90 ? "just now" : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 129600 ? `${Math.round(s / 3600)} h ago` : new Date(t * 1000).toLocaleDateString(); };
-function hideFiles() { filePanel.hidden = true; filePanel.replaceChildren(); }
+function hideFiles() { filePanel.hidden = true; filePanel.classList.remove("dialog"); filePanel.replaceChildren(); }
 const dirOf = (p) => (p ? p.replace(/[\\/][^\\/]*$/, "") : null);
 const baseOf = (p) => (p ? p.split(/[\\/]/).pop() : null);
 function showFiles(mode) {
   filePanel.hidden = false;
-  S2.fileBrowser(filePanel, {
-    kind: "notebook", mode, start: dirOf(state.file.path), name: baseOf(state.file.name) ?? "notebook.ipynb",
+  filePanel.classList.add("dialog");
+  // Where: this computer, SAS Content or the SAS server (the active SAS Viya connection), as in the SQL Editor.
+  S2.fileLocations(filePanel, {
+    kind: "notebook", mode, start: state.file.path ?? null, name: baseOf(state.file.name) ?? "notebook.ipynb",
     onOpen: (path) => openFile(path, { newTab: true }),
     onSave: (path, overwrite) => saveAs(path, overwrite),
     onClose: hideFiles,
-    extra: mode === "save" ? [h("button", { class: "s2-btn", title: "Download the .ipynb (browser view)",
-      onclick: () => S2.download(baseOf(state.file.name) || "notebook.ipynb", JSON.stringify(toIpynb(), null, 1), "application/x-ipynb+json") }, "Download")] : [],
+    extra: (loc) => (mode === "save" && loc === "local" ? [h("button", { class: "s2-btn", title: "Download the .ipynb (browser view)",
+      onclick: () => S2.download(baseOf(state.file.name) || "notebook.ipynb", JSON.stringify(toIpynb(), null, 1), "application/x-ipynb+json") }, "Download")] : []),
   });
+}
+function savedTo(res, nb) {
+  state.file = { name: res.name, path: res.path, folder: res.folder, version: res.version ?? null, savedJson: JSON.stringify(nb) };
+  renderFileLabel(); hideFiles();
+  S2.toast(`Saved ${S2.viyaLocation(res.path) ? fileTitle(res.path) : res.name}`, "ok");
+  reportContext();
 }
 // Returns the tool result ({exists} asks the browser to confirm); throws on errors.
 async function saveAs(name, overwrite) {
   const nb = toIpynb();
   const res = await S2.callTool("notebook_save", { name, notebook: nb, overwrite });
-  if (res.exists) return res;
-  state.file = { name: res.name, path: res.path, folder: res.folder, savedJson: JSON.stringify(nb) };
-  renderFileLabel(); hideFiles();
-  S2.toast(`Saved ${res.name}`, "ok");
-  reportContext();
+  if (res.exists || res.conflict) return { ...res, exists: true };
+  if (res.connection_mismatch) throw new Error(res.message);
+  savedTo(res, nb);
   return res;
 }
 async function saveFile() {
   if (!state.file.name) return showFiles("save");
+  if (S2.viyaLocation(state.file.path)) return saveViya();
   try { await saveAs(state.file.path ?? state.file.name, true); } catch (e) { S2.toast(`Couldn't save: ${cleanError(e).message}`, "err"); }
 }
+// A notebook on SAS Viya is saved where it came from; the server checks the version it was opened at (a newer one
+// on Viya, a file of another Viya connection or an existing file is asked about first), as in the SQL Editor.
+async function saveViya({ overwrite = false, useActive = false } = {}) {
+  const nb = toIpynb();
+  let res;
+  try {
+    res = await S2.callTool("notebook_save", { name: state.file.path, notebook: nb, overwrite, expected_version: state.file.version ?? null, use_active: useActive });
+  } catch (e) { S2.toast(`Couldn't save ${state.file.name}: ${cleanError(e).message}`, "err"); return; }
+  if (res.saved) { savedTo(res, nb); return; }
+  const where = S2.FILE_LOCATIONS.find((l) => l.id === S2.viyaLocation(state.file.path))?.label ?? "SAS Viya";
+  const ask = (text, button) => {
+    filePanel.hidden = false;
+    filePanel.classList.remove("dialog");
+    filePanel.replaceChildren(h("div", { class: "row" }, h("span", { class: "warn" }, text), button,
+      h("button", { class: "s2-btn ghost", onclick: () => showFiles("save") }, "Save as…"),
+      h("button", { class: "s2-btn ghost", onclick: hideFiles }, "Cancel")));
+    button.focus();
+  };
+  if (res.connection_mismatch) {
+    ask(`${state.file.name} is on the SAS Viya connection "${res.file_connection}", but the active one is "${res.active}".`,
+      h("button", { class: "s2-btn", onclick: () => saveViya({ useActive: true }) }, `Save to ${res.active} (same path)`));
+  } else if (res.conflict) {
+    const who = [res.modified_by && `by ${res.modified_by}`, res.modified && ago(res.modified)].filter(Boolean).join(", ");
+    ask(`${state.file.name} changed on ${where} since you opened it${who ? ` (${who})` : ""}. Overwrite it with your version?`,
+      h("button", { class: "s2-btn", onclick: () => saveViya({ overwrite: true, useActive }) }, "Overwrite"));
+  } else if (res.exists) {
+    ask(`${state.file.name} already exists in ${where}. Replace it?`,
+      h("button", { class: "s2-btn", onclick: () => saveViya({ overwrite: true, useActive }) }, "Replace it"));
+  }
+}
+// "SAS Content: /Users/me/My Folder/a.ipynb" for a file on SAS Viya.
+function fileTitle(path) {
+  const loc = S2.viyaLocation(path);
+  if (!loc) return path;
+  const conn = String(path).replace(/^sas-(content|server):\/\//, "").split("/")[0];
+  return `${S2.FILE_LOCATIONS.find((l) => l.id === loc).label} (${conn}): ${S2.refPath(path)}`;
+}
+// A file browser renamed or deleted this notebook's file (or its folder): follow it, or keep the cells as unsaved.
+window.addEventListener("s2:files-changed", (e) => {
+  const change = e.detail;
+  const moved = S2.movedPath(state.file.path, change);
+  if (moved === undefined) return;
+  const old = state.file.name;
+  if (moved) {
+    const folder = state.file.folder ? String(state.file.folder).replace(/[\\/]+$/, "") : null;
+    const inFolder = folder && !S2.viyaLocation(moved) && moved.toLowerCase().startsWith(`${folder.toLowerCase()}\\`);
+    state.file.path = moved;
+    state.file.name = S2.viyaLocation(moved) ? baseOf(moved) : inFolder ? moved.slice(folder.length + 1).replace(/\\/g, "/") : moved;
+    if (change.version && change.old_version && state.file.version === change.old_version) state.file.version = change.version;
+    S2.toast(`${old} is now ${state.file.name}`, "ok");
+  } else {
+    state.file = { name: null, folder: state.file.folder, savedJson: "" };
+    S2.toast(`${old} was deleted: the notebook stays open, unsaved`);
+  }
+  renderFileLabel(); reportContext();
+});
 function confirmDiscard(then) {
   if (!isDirty()) return then();
   filePanel.hidden = false;
+  filePanel.classList.remove("dialog");
   filePanel.replaceChildren(h("div", { class: "row" }, h("span", { class: "warn" }, `Discard unsaved changes in ${state.file.name ?? "this notebook"}?`),
     h("button", { class: "s2-btn", onclick: () => { hideFiles(); then(); } }, "Discard"),
     h("button", { class: "s2-btn ghost", onclick: hideFiles }, "Cancel")));
@@ -921,7 +1005,7 @@ function openFile(name, { newTab = false } = {}) {
       const db = res.notebook?.metadata?.singlestore?.database;
       if (db && state.databases.includes(db)) await chooseDatabase(db);
       loadCells(fromIpynb(res.notebook));
-      state.file = { name: res.name, path: res.path, folder: res.folder, savedJson: JSON.stringify(toIpynb()) };
+      state.file = { name: res.name, path: res.path, folder: res.folder, version: res.version ?? null, savedJson: JSON.stringify(toIpynb()) };
       renderFileLabel(); hideFiles(); renderHeader();
       reportContext();
     } catch (e) { S2.toast(`Couldn't open ${name}: ${cleanError(e).message}`, "err"); }

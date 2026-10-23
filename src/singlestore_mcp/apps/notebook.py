@@ -5,7 +5,8 @@ startup code), so each result becomes a pandas DataFrame (``df`` or a named
 variable) that Python cells can use. Python cells run as-is. Statements that
 change data or schema ask for confirmation first, like the SQL Editor.
 
-Files are standard Jupyter notebooks in the SQL folder; SQL cells are stored
+Files are standard Jupyter notebooks in the SQL folder (or on SAS Viya by a sas-content:// or sas-server://
+ref, see singlestore_mcp.viya_files); SQL cells are stored
 as ``%%sql`` cells (``%%sql name <<`` when the result is named), the
 convention SingleStore Notebooks and Jupyter use.
 """
@@ -18,7 +19,7 @@ from typing import Any
 
 from mcp.types import CallToolResult, ToolAnnotations
 
-from .. import assistant, fileio, notebook_kernel
+from .. import assistant, fileio, notebook_kernel, viya_files
 from ..notebook_bridge import split_statements
 from ._core import APP_ONLY, apps, register_app, tool_result, with_browser_link
 from .query_grid import ReadOnlyViolation, check_read_only
@@ -46,7 +47,8 @@ def notebook(name: str | None = None, database: str | None = None) -> CallToolRe
     The result includes ``browser_url``: post it as a clickable link under the app.
 
     Args:
-        name: Notebook file to open (e.g. "sales.ipynb"); omit for a new notebook.
+        name: Notebook file to open (e.g. "sales.ipynb", or a SAS Viya ref "sas-content://<connection>/<path>");
+            omit for a new notebook.
         database: Database for SQL cells (case-sensitive).
     """
     data: dict[str, Any] = {"name": name, "database": database, "environment": notebook_kernel.environment_status()}
@@ -194,9 +196,27 @@ def notebook_files() -> CallToolResult:
     return tool_result(f"{len(files)} notebook(s)", {"folder": str(root), "files": files[:500]})
 
 
+def _parse_notebook(text: str, label: str) -> dict[str, Any]:
+    try:
+        nb = json.loads(text)
+    except ValueError as exc:
+        raise ValueError(f"{label} isn't a valid notebook: {exc}") from exc
+    if not isinstance(nb, dict) or not isinstance(nb.get("cells"), list):
+        raise ValueError(f"{label} isn't a Jupyter notebook.")
+    return nb
+
+
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
 def notebook_open(name: str) -> CallToolResult:
-    """Read one .ipynb notebook from the SQL folder."""
+    """Read one .ipynb notebook from the SQL folder, or from SAS Viya by its ref (``sas-content://<connection>/…``
+    or ``sas-server://…``, see viya_files_browse with kind="notebook"); a Viya notebook's ``version`` (ETag) is
+    what notebook_save checks before overwriting."""
+    if viya_files.is_ref(name):
+        res = viya_files.read(name)
+        nb = _parse_notebook(res["text"], res["display"])
+        return tool_result(f"Opened {res['display']}", {
+            "name": res["name"], "path": res["ref"], "notebook": nb, "folder": None, "version": res["version"],
+            "location": res["location"], "connection": res["connection"], "display": res["display"]})
     path = _sql_path(name, _SUFFIX)
     if not path.is_file():
         raise LookupError(f"{_relative(path)} doesn't exist in {sql_dir()}.")
@@ -212,12 +232,30 @@ def notebook_open(name: str) -> CallToolResult:
 
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
-def notebook_save(name: str, notebook: dict[str, Any], overwrite: bool = False) -> CallToolResult:
-    """Save a notebook (nbformat 4 JSON) as a .ipynb file in the SQL folder."""
-    path = _sql_path(name, _SUFFIX)
+def notebook_save(name: str, notebook: dict[str, Any], overwrite: bool = False, expected_version: str | None = None,
+                  use_active: bool = False) -> CallToolResult:
+    """Save a notebook (nbformat 4 JSON) as a .ipynb file in the SQL folder, or on SAS Viya by its ref.
+
+    SAS Viya (``name`` a ``sas-content://`` / ``sas-server://`` ref; SAS Content stores it as
+    ``application/x-ipynb+json``): ``expected_version`` is the version the notebook opened; a newer one on Viya
+    answers ``conflict`` (nothing written), an existing file on Save as ``exists``, a ref of another connection
+    ``connection_mismatch`` (``use_active`` saves it to the same path on the active connection) - as the SQL
+    Editor's Save does.
+    """
     if not isinstance(notebook.get("cells"), list):
         raise ValueError("Not a notebook: missing cells.")
     text = json.dumps(notebook, indent=1, ensure_ascii=False) + "\n"
+    if viya_files.is_ref(name):
+        if not name.lower().endswith(_SUFFIX):
+            name += _SUFFIX
+        res = viya_files.write(name, text, expected=expected_version, overwrite=overwrite, use_active=use_active,
+                               suffix=_SUFFIX)
+        if res.get("saved"):
+            return tool_result(f"Saved {res['display']}", {**res, "path": res["ref"], "folder": None, "exists": False})
+        what = ("is on another SAS Viya connection" if res.get("connection_mismatch")
+                else "changed on SAS Viya since it was opened" if res.get("conflict") else "already exists")
+        return tool_result(f"{name} {what}; nothing saved.", {**res, "path": res.get("ref", name)})
+    path = _sql_path(name, _SUFFIX)
     if len(text.encode("utf-8")) > _MAX_FILE_BYTES:
         raise ValueError(f"The notebook is larger than {_MAX_FILE_BYTES // 1_000_000} MB (large outputs or images?).")
     if path.exists() and not overwrite:

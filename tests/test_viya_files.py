@@ -182,7 +182,7 @@ class FakeViya:
             if method == "GET" and m.group(2):
                 return 200, f["data"] if raw else f["data"].decode(), {"etag": f["etag"]}
             if method == "GET":
-                return 200, {"name": f["name"], "size": len(f["data"]), "contentType": f["ctype"],
+                return 200, {"id": m.group(1), "name": f["name"], "size": len(f["data"]), "contentType": f["ctype"], "links": [],
                              "modifiedTimeStamp": f["modified"], "modifiedBy": f["by"]}, {"etag": f["etag"]}
             if method == "PUT" and m.group(2):
                 if "If-Match" not in headers:
@@ -191,6 +191,33 @@ class FakeViya:
                     return 412, {"message": "stale"}, {}
                 f.update(data=body, ctype=content_type, etag=self._etag())
                 return 200, {"name": f["name"]}, {"etag": f["etag"]}
+            if method == "PUT":  # metadata (rename): the whole resource back, with If-Match
+                if headers.get("If-Match") != f["etag"]:
+                    return 412, {"message": "stale"}, {}
+                assert body["id"] == m.group(1) and "links" not in body and content_type.startswith("application/vnd.sas.file+json")
+                f.update(name=body["name"], etag=self._etag())
+                return 200, {"name": f["name"]}, {"etag": f["etag"]}
+            if method == "DELETE":
+                if headers.get("If-Match") not in (None, f["etag"]):
+                    return 412, {"message": "stale"}, {}
+                del self.files[m.group(1)]
+                return 204, None, {}
+        m = re.fullmatch(r"/folders/folders/(\w+)", p)
+        if m and m.group(1) in self.folders:
+            fid, f = m.group(1), self.folders[m.group(1)]
+            etag = f.setdefault("etag", self._etag())
+            if method == "GET":
+                return 200, {"id": fid, "name": f["name"], "type": f["type"], "links": []}, {"etag": etag}
+            if headers.get("If-Match") != etag:
+                return 412, {"message": "stale"}, {}
+            if method == "PUT":
+                f.update(name=body["name"], etag=self._etag())
+                return 200, {"id": fid, "name": f["name"]}, {"etag": f["etag"]}
+            if method == "DELETE":
+                if any(v["parent"] == fid for v in self.folders.values()) or any(v["parent"] == fid for v in self.files.values()):
+                    return 409, {"message": "not empty"}, {}
+                del self.folders[fid]
+                return 204, None, {}
         return 500, {"message": f"fake Viya doesn't know {method} {path}"}, {}
 
     def _compute(self, method: str, seg: str, body: Any, headers: dict[str, str], raw: bool) -> tuple[int, Any, dict[str, str]]:
@@ -224,6 +251,22 @@ class FakeViya:
                 return 412, {}, {}
             node.update(data=body, etag=self._etag())
             return 200, {}, {"etag": node["etag"]}
+        if method == "PUT" and not suffix:  # rename: {name, path (the parent folder)}, If-Match required
+            if node is None:
+                return 404, {}, {}
+            if headers.get("If-Match") != node.get("etag", '"d"'):
+                return 412 if "If-Match" in headers else 428, {}, {}
+            new = body["path"].rstrip("/") + "/" + body["name"]
+            for k in [k for k in self.fs if k == path or k.startswith(path + "/")]:
+                self.fs[new + k[len(path):]] = self.fs.pop(k)
+            return 200, {"name": body["name"]}, {"etag": self._etag()}
+        if method == "DELETE":
+            if node is None:
+                return 404, {}, {}
+            if headers.get("If-Match") not in ("*", node.get("etag", '"d"')):
+                return 412, {}, {}
+            del self.fs[path]
+            return 204, None, {}
         if method == "POST":
             new = path.rstrip("/") + "/" + body["name"]
             if new in self.fs:
@@ -416,3 +459,121 @@ def test_draft_keeps_the_viya_version_and_recent_keeps_viya_files(viya: FakeViya
     st.remember_file(str(tmp_path / "gone.sql"), "gone.sql")  # a local file that doesn't exist is dropped
     assert [r["path"] for r in st.recent_files()] == [ref]
     assert json.loads((tmp_path / "sql-editor" / "recent.json").read_text(encoding="utf-8"))[1]["path"] == ref
+
+
+# ------------------------------------------------------------------ rename and delete (the file browser)
+
+
+def test_moved_path() -> None:
+    old = "sas-content://Zeus/Users/me/My Folder/a"
+    assert st.moved_path(old + "/x.sql", old, old + "2", True) == old + "2/x.sql"
+    assert st.moved_path(old + "/x.sql", old, None, True) == ""
+    assert st.moved_path(old + "b/x.sql", old, old + "2", True) is None  # a sibling with a longer name
+    assert st.moved_path(old + "/x.sql", old, old + "2", False) is None  # a file's change doesn't touch others
+    assert st.moved_path(old, old, "sas-content://Zeus/n", False) == "sas-content://Zeus/n"
+    assert st.moved_path(old.upper(), old, "x", False) is None  # refs compare exactly
+    assert st.moved_path("", old, "x", False) is None
+
+
+def test_content_rename_and_delete(viya: FakeViya) -> None:
+    my = "/Users/me/My Folder"
+    sub = viya._folder("sub", viya.my)
+    fid = viya.add_file(sub, "a.sql", "select 1;")
+    viya.add_file(sub, "b.sql", "select 2;")
+    ref = f"sas-content://Zeus{my}/sub/a.sql"
+    opened = _data(sql_editor.sql_editor_open_file(ref))
+    st.resolve_tab(None)
+    tab = st.create_tab()["tab"]["id"]  # a second tab, with the file open
+    sql_editor.sql_editor_save_draft("select 1;", file_name="a.sql", file_path=ref, saved_hash="h", file_version=opened["version"], tab_id=tab)
+
+    from singlestore_mcp.apps import file_manage as fm
+    listed = vf.browse("content", f"{my}/sub")
+    a = next(f for f in listed["files"] if f["name"] == "a.sql")
+    assert listed["manage"] and listed["folders"] == [] and a["ref"] == ref
+
+    # A name that's taken, then a file changed since it was listed: nothing renamed.
+    assert _data(fm.viya_files_rename("content", a["path"], "b.sql"))["exists"]
+    assert _data(fm.viya_files_rename("content", a["path"], "c", expected_modified=a["modified"] + 60))["conflict"]
+    res = _data(fm.viya_files_rename("content", a["path"], "c", expected_modified=a["modified"]))
+    assert res["renamed"] and res["new_path"] == f"{my}/sub/c.sql"  # keeps its extension
+    assert res["from_ref"] == ref and res["to_ref"] == f"sas-content://Zeus{my}/sub/c.sql" and res["tabs"] == [tab]
+    assert viya.files[fid]["name"] == "c.sql"
+    assert st.load_draft(tab)["file"]["path"] == res["to_ref"] and st.load_draft(tab)["file"]["name"] == "c.sql"
+    # The rename changed the file's version: the tab, which had the old one, gets the new one (Save keeps working).
+    assert res["old_version"] == opened["version"] and st.load_draft(tab)["file"]["version"] == viya.files[fid]["etag"] == res["version"]
+    assert st.recent_files()[0]["path"] == res["to_ref"]
+
+    # The folder: renamed (the tab follows), never into a path, and only deleted when it's empty.
+    with pytest.raises(ValueError):
+        fm.viya_files_rename("content", f"{my}/sub", "x/y")
+    res = _data(fm.viya_files_rename("content", f"{my}/sub", "sub2"))
+    assert res["renamed"] and res["folder"] and viya.folders[sub]["name"] == "sub2"
+    assert st.load_draft(tab)["file"]["path"] == f"sas-content://Zeus{my}/sub2/c.sql"
+    assert _data(fm.viya_files_delete("content", f"{my}/sub2"))["not_empty"]
+    assert sub in viya.folders
+
+    # Delete the file: the tab keeps its text as unsaved; then the empty folder.
+    stale = _data(fm.viya_files_delete("content", f"{my}/sub2/c.sql", expected_modified=1))
+    assert stale["conflict"] and fid in viya.files
+    res = _data(fm.viya_files_delete("content", f"{my}/sub2/c.sql"))
+    assert res["deleted"] and fid not in viya.files and res["tabs"] == [tab]
+    draft = st.load_draft(tab)
+    assert draft["file"] is None and draft["dirty"] and draft["sql"] == "select 1;"
+    assert all("c.sql" not in r["path"] for r in st.recent_files())
+    _data(fm.viya_files_delete("content", f"{my}/sub2/b.sql"))
+    assert _data(fm.viya_files_delete("content", f"{my}/sub2"))["deleted"] and sub not in viya.folders
+
+
+def test_content_protected_items(viya: FakeViya) -> None:
+    from singlestore_mcp.apps import file_manage as fm
+    for path in ("/Users/me/My Folder", "/Users/me", "/Users", "/Public", "/"):
+        with pytest.raises(ValueError):
+            fm.viya_files_delete("content", path)
+        with pytest.raises(ValueError):
+            fm.viya_files_rename("content", path, "x")
+    with pytest.raises(LookupError, match="doesn't exist"):
+        fm.viya_files_delete("content", "/Users/me/My Folder/nope.sql")
+    with pytest.raises(ValueError):
+        fm.viya_files_rename("content", "/Users/me/My Folder/a.sql", "..")
+
+
+def test_server_rename_and_delete(viya: FakeViya) -> None:
+    from singlestore_mcp.apps import file_manage as fm
+    viya.fs["/srv/landing/sub"] = {"dir": True, "etag": '"d1"'}
+    viya.fs["/srv/landing/sub/q.sas"] = {"dir": False, "data": b"proc print; run;", "etag": '"s1"'}
+    ref = "sas-server://Zeus/srv/landing/sub/q.sas"
+    tab = st.resolve_tab(None)
+    sql_editor.sql_editor_save_draft("x", file_name="q.sas", file_path=ref, saved_hash="h", tab_id=tab)
+    for path in ("/srv/landing", "/srv", "/tmp", "/"):  # the lockdown path, a folder above it, top level
+        with pytest.raises(ValueError):
+            fm.viya_files_rename("server", path, "x")
+    res = _data(fm.viya_files_rename("server", "/srv/landing/sub", "sub2"))
+    assert res["renamed"] and "/srv/landing/sub2/q.sas" in viya.fs and "/srv/landing/sub" not in viya.fs
+    assert st.load_draft(tab)["file"]["path"] == "sas-server://Zeus/srv/landing/sub2/q.sas"
+    assert _data(fm.viya_files_rename("server", "/srv/landing/sub2/q.sas", "q.sas"))["unchanged"]
+    assert _data(fm.viya_files_delete("server", "/srv/landing/sub2"))["not_empty"]
+    res = _data(fm.viya_files_delete("server", "/srv/landing/sub2/q.sas"))
+    assert res["deleted"] and "/srv/landing/sub2/q.sas" not in viya.fs and st.load_draft(tab)["file"] is None
+    assert _data(fm.viya_files_delete("server", "/srv/landing/sub2"))["deleted"]
+
+
+def test_notebook_on_viya(viya: FakeViya) -> None:
+    from singlestore_mcp.apps import notebook
+    nb = {"cells": [{"cell_type": "code", "source": "1", "metadata": {}, "outputs": [], "execution_count": None}],
+          "metadata": {}, "nbformat": 4, "nbformat_minor": 5}
+    ref = "sas-content://Zeus/Users/me/My Folder/analysis"
+    saved = _data(notebook.notebook_save(ref, nb))
+    assert saved["saved"] and saved["path"] == ref + ".ipynb" and saved["name"] == "analysis.ipynb"
+    fid = next(k for k, v in viya.files.items() if v["name"] == "analysis.ipynb")
+    assert viya.files[fid]["ctype"] == vf.IPYNB_MEDIA_TYPE
+    assert _data(notebook.notebook_save(saved["path"], nb))["exists"]
+    listing = vf.browse("content", "/Users/me/My Folder", kind="notebook")
+    assert [f["name"] for f in listing["files"]] == ["analysis.ipynb"]
+    assert vf.browse("content", "/Users/me/My Folder")["files"] == []  # the SQL Editor lists .sql / .sas only
+    opened = _data(notebook.notebook_open(saved["path"]))
+    assert opened["notebook"]["cells"][0]["source"] == "1" and opened["version"] == viya.files[fid]["etag"]
+    viya.touch(fid, json.dumps(nb))
+    assert _data(notebook.notebook_save(saved["path"], nb, expected_version=opened["version"]))["conflict"]
+    viya.touch(fid, "not json")
+    with pytest.raises(ValueError, match="isn't a valid notebook"):
+        notebook.notebook_open(saved["path"])

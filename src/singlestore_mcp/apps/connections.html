@@ -118,7 +118,7 @@ function renderSas() {
           h("span", { class: `cx-tag${c.signed_in ? " on" : ""}`, style: c.signed_in ? {} : { color: "var(--s2-warn)" },
             title: !c.signed_in && c.foreign_available ? "Test reuses a SAS Viya MCP server / SAS Viya CLI sign-in to this Viya, if there is one" : "" }, who ?? "not signed in"),
           c.signed_in ? h("span", { class: "cx-tag" }, sasTokenText(c)) : null),
-        h("div", { class: "cx-where", title: c.url }, `${c.url} · ${c.compute_context} · CAS ${c.cas_server} · libref ${c.libref}${c.startup_code?.trim() ? " · startup code" : ""}`),
+        h("div", { class: "cx-where", title: c.url }, `${c.url} · ${c.compute_context} · CAS ${c.cas_server} · libref ${c.libref}${c.auto_libname === false ? " (not automatic)" : ""}${c.prewarm === false ? " · no pre-start" : ""}${c.startup_code?.trim() ? " · startup code" : ""}${c.sas9_server && c.sas9_signon?.trim() ? ` · SAS 9 ${c.sas9_server}` : ""}`),
         signing ? h("div", { class: "cx-row", style: { marginTop: "6px" } }, signing.input,
           h("button", { class: "s2-btn primary", disabled: !!sas.busy, onclick: () => finishSas(c.name) }, spin("code", c.name), "Finish sign-in"),
           h("button", { class: "s2-btn ghost", onclick: () => { sas.signing = null; renderSas(); } }, "Cancel"),
@@ -140,7 +140,8 @@ function renderSas() {
 }
 
 function editSas(c) {
-  const e = c ?? { name: "", url: "", compute_context: "SAS Studio compute context", client_id: "vscode", ssl_verify: true, libref: "S2", cas_server: "cas-shared-default", startup_code: "" };
+  const e = c ?? { name: "", url: "", compute_context: "SAS Studio compute context", client_id: "vscode", ssl_verify: true, libref: "S2", cas_server: "cas-shared-default", startup_code: "",
+    auto_libname: true, prewarm: true, sas9_signon: "", sas9_server: "", sas9_libraries: "" };
   const f = {
     name: h("input", { class: "s2-input", value: e.name, placeholder: "e.g. Viya prod", spellcheck: false, "aria-label": "Viya connection name" }),
     url: h("input", { class: "s2-input", value: e.url, placeholder: "https://viya.example.com", spellcheck: false, "aria-label": "Viya address" }),
@@ -152,10 +153,20 @@ function editSas(c) {
     startup: h("textarea", { class: "s2-input cx-startup", rows: 4, spellcheck: false, "aria-label": "Startup code",
       placeholder: "e.g.\nfilename inc filesrvc folderpath='/Users/me/My Folder/mcp' filename='s2_libname.sas';\n%include inc / nosource2;\nfilename inc clear;",
       value: e.startup_code ?? "" }),
+    auto: h("input", { type: "checkbox", checked: e.auto_libname !== false, "aria-label": "Automatic SingleStore library" }),
+    warm: h("input", { type: "checkbox", checked: e.prewarm !== false, "aria-label": "Start the SAS session when the Workspace opens" }),
+    s9code: h("textarea", { class: "s2-input cx-startup", rows: 3, spellcheck: false, "aria-label": "SAS 9 sign-on code",
+      placeholder: "e.g.\nfilename inc filesrvc folderpath='/Users/me/My Folder/mcp' filename='cauki_signon.sas';\n%include inc / nosource2;\nfilename inc clear;",
+      value: e.sas9_signon ?? "" }),
+    s9server: h("input", { class: "s2-input", value: e.sas9_server ?? "", maxlength: 8, spellcheck: false, placeholder: "e.g. CAUKI",
+      style: { width: "120px" }, "aria-label": "SAS 9 server" }),
+    s9libs: h("input", { class: "s2-input", value: e.sas9_libraries ?? "", spellcheck: false, placeholder: "all (except SASHELP, WORK …)",
+      "aria-label": "SAS 9 libraries" }),
   };
   const status = h("div", { class: "cx-result" });
   const values = () => ({ name: f.name.value.trim(), url: f.url.value.trim(), compute_context: f.ctx.value.trim(), client_id: f.client.value.trim(),
-    libref: f.lib.value.trim(), ssl_verify: f.verify.checked, cas_server: f.cas.value.trim(), startup_code: f.startup.value });
+    libref: f.lib.value.trim(), ssl_verify: f.verify.checked, cas_server: f.cas.value.trim(), startup_code: f.startup.value,
+    auto_libname: f.auto.checked, prewarm: f.warm.checked, sas9_signon: f.s9code.value, sas9_server: f.s9server.value.trim(), sas9_libraries: f.s9libs.value.trim() });
   const close = () => { sasFormEl.hidden = true; sasFormEl.replaceChildren(); };
   async function save(activate) {
     const v = values();
@@ -189,7 +200,22 @@ function editSas(c) {
       h("label", {}, "Startup code"), f.startup,
       h("div", { class: "hint" }, "SAS code run once when the Workspace's SAS session starts (the Schema Explorer's SAS libraries and the SQL Editor's PROC SQL / FedSQL), " +
         "e.g. %include of your libname files. It runs with NOSOURCE, and its log is never shown, so the libname files' contents stay hidden. " +
-        "Don't put passwords here: keep them in the included files. Saving the active connection restarts the Workspace's SAS session.")),
+        "Don't put passwords here: keep them in the included files. Saving the active connection restarts the Workspace's SAS session."),
+      h("label", {}, ""), h("label", {}, f.auto, " Automatic SingleStore library (the libref above)"),
+      h("div", { class: "hint" }, "Assigns the SingleStore libref (SAS/ACCESS, engine SSTORE) in the Workspace's SAS session on the active SingleStore connection " +
+        "and its default database, before the startup code (which can override it), and again when the active connection changes. The password comes from " +
+        "the credential store and is sent with NOSOURCE, so it never appears in the log. Token connections (JWT / Entra ID) use the token and are re-assigned when it's renewed."),
+      h("label", {}, ""), h("label", {}, f.warm, " Start the SAS session when the Workspace opens"),
+      h("div", { class: "hint" }, "Starts the Workspace's SAS session (with the SingleStore library and the startup code) and the CAS session in the background when the Workspace opens " +
+        "or this connection becomes the active one, and keeps it from timing out while the Workspace is open, so the first PROC SQL doesn't wait ~15–35 s. " +
+        "It never asks you to sign in. Turn it off to start the session only with the first SAS run. The SAS 9 sign-on always waits until you open the SAS 9 source."),
+      h("div", { class: "cx-sec" }, "SAS 9 through SAS/CONNECT (optional)"),
+      h("label", {}, "SAS 9 sign-on code"), f.s9code,
+      h("label", {}, "SAS 9 server"), f.s9server,
+      h("label", {}, "SAS 9 libraries"), f.s9libs,
+      h("div", { class: "hint" }, "Signs on to a SAS 9 server from the Workspace's SAS session when you open the Schema Explorer's SAS 9 source (NOSOURCE, log never shown: " +
+        "keep the credentials in the included file). Server: the remote session name in its SIGNON. Libraries: remote librefs to assign as LIBNAME x SERVER= SLIBREF= " +
+        "(local=REMOTE renames one); empty assigns all but SASHELP, WORK and the like.")),
     h("div", { class: "cx-row" },
       h("button", { class: "s2-btn", onclick: () => save(false) }, "Save"),
       c?.active ? null : h("button", { class: "s2-btn primary", onclick: () => save(true) }, "Save and use"),
@@ -299,7 +325,11 @@ function render() {
         c.builtin ? null : h("button", { class: "s2-btn ghost", title: "Delete this connection and its saved password", onclick: (e) => remove(c, e.currentTarget) }, "Delete"),
       ].filter(Boolean)));
   }) : [h("div", { class: "s2-empty" }, "No connections yet. Add one with + New connection.")]));
-  footEl.textContent = `Passwords are stored in: ${d.password_store}. The list itself (no passwords) is in ~/.singlestore-mcp/connections.json.`;
+  footEl.replaceChildren(
+    `Passwords are stored in: ${d.password_store}. The list itself (no passwords) is in ~/.singlestore-mcp/connections.json. `,
+    h("button", { class: "s2-btn ghost", style: { fontSize: "11px", padding: "1px 6px" }, disabled: st.busy,
+      title: "Give browser links a new secret: every open browser tab and link made before stops working. Restarts keep the links.",
+      onclick: (e) => resetLinks(e.currentTarget) }, "Reset browser links"));
 }
 
 // ---------------------------------------------------------------- form
@@ -470,6 +500,13 @@ async function signIn(name) {
   } catch (err) { st.results[name] = { ok: false, error: cleanError(err) }; }
   st.busy = null; render();
   return ok;
+}
+
+// New browser-view token (open browser tabs end; in the browser view this page moves to the new link itself).
+async function resetLinks(button) {
+  if (!(await S2.confirmInline(button, "Reset? Every open browser tab and earlier browser link stops working.", "Reset"))) return;
+  try { await S2.callTool("browser_reset_links", {}); S2.toast("Browser links reset: get new links from Claude", "ok"); }
+  catch (err) { S2.toast(cleanError(err), "err"); }
 }
 
 async function testSaved(name) {

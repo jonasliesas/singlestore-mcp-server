@@ -2,8 +2,9 @@
 
 CPU time and disk I/O in MV_SYSINFO_* are cumulative counters, so rates come
 from the difference between two samples. The previous sample is kept between
-refreshes; on the first call (or after a long gap) two samples are taken a
-second apart.
+refreshes, and the metrics sampler takes one in the background soon after the
+server starts (``prime_baseline``); only without any usable sample (sampler
+off, or after a long gap) are two samples taken a second apart.
 """
 
 from __future__ import annotations
@@ -112,19 +113,53 @@ def _counters() -> dict[int, dict[str, Any]]:
     return out
 
 
+_last_sample_at = 0.0  # time.monotonic() of the newest entry in _samples
+
+
+def _keep(sample: dict[int, dict[str, Any]]) -> None:
+    global _last_sample_at
+    _samples.append(sample)
+    _last_sample_at = time.monotonic()
+
+
+def baseline_age() -> float | None:
+    """Seconds since the newest counter sample of this process, or None if there is none."""
+    return time.monotonic() - _last_sample_at if _samples else None
+
+
+def prime_baseline(max_age_s: float = _MAX_SAMPLE_GAP_S - 60) -> bool:
+    """Take a counter sample (one round trip, no wait) unless one younger than ``max_age_s`` exists.
+
+    The metrics sampler calls this in the background (soon after the server starts, and when another
+    process took the stored sample), so the Cluster Monitor's first open has a baseline to measure CPU
+    and disk rates against instead of waiting a second for one."""
+    age = baseline_age()
+    if age is not None and age < max_age_s:
+        return False
+    with _sample_lock:
+        _keep(_counters())
+    return True
+
+
 def _rates() -> tuple[dict[int, dict[str, Any]], float]:
     """Current counters plus rates since the previous sample. Returns (nodes, seconds measured)."""
     with _sample_lock:
         now = _counters()
         prev = next((s for s in reversed(_samples)
                      if _MIN_SAMPLE_GAP_S <= (_sample_gap(s, now) or 0) <= _MAX_SAMPLE_GAP_S), None)
-        if prev is None:  # no usable earlier sample (first call, or after a long gap): measure over a second
-            _samples.append(now)
-            prev = now
-            time.sleep(1.0)
+        if prev is None:
+            young = _sample_gap(_samples[-1], now) if _samples else None
+            if young is not None and 0 <= young < _MIN_SAMPLE_GAP_S:
+                # A baseline was taken a moment ago (e.g. two calls close together): wait only for the rest of the gap.
+                prev = _samples[-1]
+                time.sleep(_MIN_SAMPLE_GAP_S - young)
+            else:  # no usable earlier sample (first call, or after a long gap): measure over a second
+                _keep(now)
+                prev = now
+                time.sleep(1.0)
             now = _counters()
         gap = _sample_gap(prev, now)
-        _samples.append(now)
+        _keep(now)
 
     result: dict[int, dict[str, Any]] = {}
     for node_id, cur in now.items():

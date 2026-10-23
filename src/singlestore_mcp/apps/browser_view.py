@@ -9,30 +9,61 @@ Security: listens on 127.0.0.1 only, every URL carries a random token, POSTs
 must come from the page's own origin and Host must match (blocks other sites
 and DNS rebinding), and only app tools plus a few pipeline actions the apps
 use are callable.
+
+Stable address: the port and token are kept in the server's home folder
+(``browser_address``) and reused by the next server process of the same MCP
+client (``restart_server``, the standby, a crash restart), which listens on
+them again right at start. An open tab then reconnects by itself
+(browser_host.html retries for a while). The token changes only on request
+(``rotate_token``, the Connections window's "Reset browser links").
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import secrets
 import socket
 import threading
 import time
 import urllib.parse
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from mcp.server.mcpserver.exceptions import ToolError
 
+from ..browser_address import new_token
 from ._core import page_html
 
 HOST_NAME = "singlestore-browser-view"
 _HOST_PAGE = Path(__file__).with_name("browser_host.html")
 # Plain (non-app) tools the apps' buttons call.
 _EXTRA_TOOLS = {"start_pipeline", "stop_pipeline", "test_pipeline", "browser_link", "workload_status", "workload_stop"}
+# Calls the page may send again after the connection dropped mid-call (besides read-only / idempotent tools):
+# an autosave just writes the latest text again.
+_REPEATABLE = {"sql_editor_save_draft"}
 _MAX_BODY = 1_000_000
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return max(0.0, float(os.environ.get(name, default)))
+    except ValueError:
+        return default
+
+
+# How long a new server waits for its predecessor (same slot) to let go of the port.
+BIND_WAIT_S = _env_float("SINGLESTORE_MCP_BROWSER_BIND_WAIT", 15)
+# How long an open page keeps trying to reach the server before it shows "Session ended".
+RECONNECT_S = _env_float("SINGLESTORE_MCP_BROWSER_RECONNECT", 60)
+
+
+class AddressStore(Protocol):
+    def load(self) -> tuple[int, str] | None: ...
+    def save(self, port: int, token: str) -> None: ...
 
 
 class _ExclusiveHTTPServer(ThreadingHTTPServer):
@@ -49,17 +80,88 @@ class _ExclusiveHTTPServer(ThreadingHTTPServer):
 
 
 class BrowserView:
-    def __init__(self, mcp: Any, port: int = 0, token: str | None = None) -> None:
+    """``port``/``token``: a fixed address (the standalone workspace). ``store``: where the address is kept
+    across restarts (or a function returning that store, called at start); its address is reused."""
+
+    def __init__(self, mcp: Any, port: int = 0, token: str | None = None,
+                 store: AddressStore | Callable[[], AddressStore | None] | None = None) -> None:
         self._mcp = mcp
         self._port = port
-        self._token = token or secrets.token_urlsafe(24)
+        self._token = token or new_token()
+        self._fixed = bool(port or token)
+        self._store_arg = store
+        self._store: AddressStore | None = None
+        self._resolved = False
+        self._kept = False  # the address came from the store: wait for a predecessor to release the port
+        self._kept_changed = False
         self.last_activity = time.time()  # any request; open pages ping every 30 s
         self.allow_shutdown = False        # standalone workspace: /shutdown stops it
         self.shutdown_requested = False
         self._lock = threading.Lock()
         self._httpd: ThreadingHTTPServer | None = None
         self._tools: dict[str, dict[str, Any]] = {}
+        self._repeatable: list[str] = []
 
+    # ------------------------------------------------------------ address
+    def _resolve(self) -> None:
+        """Find the store and its kept address (once; under the lock)."""
+        if self._resolved:
+            return
+        self._resolved = True
+        store = self._store_arg
+        if callable(store) and not hasattr(store, "load"):
+            try:
+                store = store()
+            except Exception:  # noqa: BLE001 - no kept address: a random one, as before
+                store = None
+        self._store = store  # type: ignore[assignment]
+        if self._store is not None and not self._fixed:
+            kept = self._store.load()
+            if kept:
+                self._port, self._token = kept
+                self._kept = True
+
+    def has_kept_address(self) -> bool:
+        with self._lock:
+            self._resolve()
+            return self._kept
+
+    def start_early(self) -> None:
+        """Listen right away (in the background) when this server has a kept address, so a tab left open
+        across a restart reaches the new server; otherwise the first browser link starts it."""
+        def go() -> None:
+            try:
+                if self.has_kept_address():
+                    self._ensure_started()
+            except Exception:  # noqa: BLE001 - the first browser link tries again
+                pass
+
+        threading.Thread(target=go, name="browser-view-start", daemon=True).start()
+
+    def rotate_token(self) -> str:
+        """A new token: every open tab and link made before stops working (shows "Session ended")."""
+        with self._lock:
+            self._resolve()
+            self._token = new_token()
+            if self._httpd is not None and self._store is not None:
+                self._store.save(self._httpd.server_address[1], self._token)
+            else:
+                self._kept_changed = True  # saved once it listens
+        return self._token
+
+    def close(self) -> None:
+        """Stop listening (tests; a server process just exits)."""
+        with self._lock:
+            httpd, self._httpd = self._httpd, None
+        if httpd is not None:
+            httpd.shutdown()
+            httpd.server_close()
+
+    @property
+    def port(self) -> int | None:
+        return self._httpd.server_address[1] if self._httpd is not None else None
+
+    # ------------------------------------------------------------ serving
     def url(self, tool: str, arguments: dict[str, Any]) -> str:
         self._ensure_started()
         if tool not in self._tools or "resourceUri" not in self._tools[tool].get("_meta", {}).get("ui", {}):
@@ -72,14 +174,51 @@ class BrowserView:
         with self._lock:
             if self._httpd is not None:
                 return
-            tools = asyncio.run(self._mcp.list_tools())
-            for t in tools:
-                d = t.model_dump(by_alias=True, exclude_none=True, mode="json")
-                if "ui" in d.get("_meta", {}) or t.name in _EXTRA_TOOLS:
-                    self._tools[t.name] = d
-            self._httpd = _ExclusiveHTTPServer(("127.0.0.1", self._port), self._handler())
+            self._resolve()
+            if not self._tools:
+                tools = asyncio.run(self._mcp.list_tools())
+                for t in tools:
+                    d = t.model_dump(by_alias=True, exclude_none=True, mode="json")
+                    if "ui" in d.get("_meta", {}) or t.name in _EXTRA_TOOLS:
+                        self._tools[t.name] = d
+                        hints = d.get("annotations") or {}
+                        if hints.get("readOnlyHint") or hints.get("idempotentHint") or t.name in _REPEATABLE:
+                            self._repeatable.append(t.name)
+            self._httpd = self._bind()
             self._httpd.daemon_threads = True
             threading.Thread(target=self._httpd.serve_forever, name="browser-view", daemon=True).start()
+            port = self._httpd.server_address[1]
+            if self._store is not None and not self._fixed and (not self._kept or port != self._port or self._kept_changed):
+                # First start, or the kept port was taken by another program: keep this one from now on.
+                try:
+                    self._store.save(port, self._token)
+                except OSError:
+                    pass
+            self._port = port
+
+    def _bind(self) -> ThreadingHTTPServer:
+        handler = self._handler()
+        if self._port:
+            # A kept port: the previous server of this client may still be stopping (restart_server stops it
+            # while this one starts), so wait a little for it to let go.
+            deadline = time.monotonic() + (BIND_WAIT_S if self._kept else 0)
+            while True:
+                try:
+                    return _ExclusiveHTTPServer(("127.0.0.1", self._port), handler)
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        if not self._kept:
+                            raise  # a fixed port (standalone workspace): the caller picks another
+                        break
+                    time.sleep(0.2)
+        # A new port: not one another client's slot keeps (that client would find it taken when it restarts).
+        others = getattr(self._store, "other_ports", lambda: set())()
+        for _ in range(5):
+            httpd = _ExclusiveHTTPServer(("127.0.0.1", 0), handler)
+            if httpd.server_address[1] not in others:
+                break
+            httpd.server_close()
+        return httpd
 
     def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name not in self._tools:
@@ -131,6 +270,8 @@ class BrowserView:
                     return self._send(200, _HOST_PAGE.read_bytes(), "text/html; charset=utf-8")
                 if route == "ping":
                     return self._json(200, {"ok": True})
+                if route == "session":  # what the page needs to reconnect on its own
+                    return self._json(200, {"repeatable": view._repeatable, "reconnect_s": RECONNECT_S})
                 if route == "shutdown" and view.allow_shutdown:
                     view.shutdown_requested = True
                     return self._json(200, {"ok": True})

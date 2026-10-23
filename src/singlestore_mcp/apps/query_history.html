@@ -211,6 +211,7 @@ const state = {
   group: true,           // merge repeated runs of the same statement into one row
   expanded: new Set(),   // statement keys of opened groups
   plansOn: false,        // list plan-cache-only statements (aggregates) too (remembered per browser)
+  pinnedPlan: null,      // a plan-cache statement the SQL Editor's "Find in Query History" opened (listed and selected)
   table: null,           // "db.table": list filtered to statements naming it (from Usage)
   usage: { loading: false, error: null, data: null, days: 7, sortT: "time", sortU: "ms" },
   planView: {},          // key -> "tree" | "text" | "json" | "profile"
@@ -321,6 +322,11 @@ const secs = (ms) => fmt.duration(ms / 1000);
 // The plan-cache-only statements (aggregates, no individual runs), when they pass the filters. They have no user
 // and no single duration: the runtime filter applies to their average, and only above the 1 s default.
 function planRows() {
+  const pin = state.pinnedPlan;
+  const rows = planRowsFiltered();
+  return pin && !rows.some((p) => p.key === pin.key) ? [pin, ...rows] : rows;
+}
+function planRowsFiltered() {
   const d = state.data;
   if (!d?.plans?.length || !state.plansOn || state.shape || state.user || state.category) return [];
   const q = state.search.trim().toLowerCase();
@@ -472,6 +478,7 @@ function stats(rows, plans) {
 }
 
 const listEl = h("div");
+const KEPT_TITLE = "Kept locally: the cluster's query history no longer has this run (it restarted or moved on); only the start of its SQL was kept";
 function renderList() {
   const runs = filtered();
   const items = listItems();
@@ -493,7 +500,8 @@ function renderList() {
   const status = (ok, code) => ok ? h("span", { class: "s2-badge ok" }, "OK") : h("span", { class: "s2-badge err", title: code ?? "" }, "Failed");
   const runRow = (e, child) => h("tr", { class: child ? "qh-child" : "", "aria-selected": String(state.selected === e.key), tabindex: "0",
     onclick: () => choose(e.key), onkeydown: (ev) => { if (ev.key === "Enter") choose(e.key); } },
-    h("td", { title: `Started ${when(e.started)}` }, child ? h("span", { class: "qh-branch", "aria-hidden": "true" }, "↳") : h("span", { class: "qh-twisty" }), when(e.finished)),
+    h("td", { title: e.kept ? KEPT_TITLE : `Started ${when(e.started)}` }, child ? h("span", { class: "qh-branch", "aria-hidden": "true" }, "↳") : h("span", { class: "qh-twisty" }), when(e.finished),
+      e.kept ? h("span", { class: "s2-badge plain", style: { marginLeft: "4px" } }, "kept") : null),
     h("td", { class: "num qh-runs" }, child ? "" : "1"),
     h("td", { class: "num" }, h("div", { class: "qh-dur" }, secs(e.ms), bar(e.ms))),
     h("td", {}, e.user ?? "–"),
@@ -564,7 +572,8 @@ function renderList() {
 // ---------------------------------------------------------------- detail + tuning
 const detailEl = h("section", { class: "s2-card qh-detail", "aria-label": "Selected query" });
 const isPlanKey = (key) => String(key ?? "").startsWith("plan:");
-const selectedPlan = () => state.data?.plans?.find((p) => p.key === state.selected) ?? null;
+const selectedPlan = () => state.data?.plans?.find((p) => p.key === state.selected)
+  ?? (state.pinnedPlan?.key === state.selected ? state.pinnedPlan : null);
 
 async function choose(key) {
   state.selected = state.selected === key ? null : key;
@@ -640,9 +649,11 @@ function renderDetail() {
     h("div", { style: { display: "flex", alignItems: "center", gap: "8px" } },
       h("h2", {}, `${secs(row.ms)} query`),
       row.ok ? h("span", { class: "s2-badge ok" }, "Succeeded") : h("span", { class: "s2-badge err" }, "Failed"),
+      row.kept ? h("span", { class: "s2-badge plain", title: KEPT_TITLE }, "Kept locally") : null,
       h("span", { class: "s2-spacer" }),
       h("button", { class: "s2-btn ghost", "aria-label": "Close details", onclick: () => { state.selected = null; render(); } }, "✕")),
     h("dl", { class: "qh-meta" }, meta.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, String(v))])),
+    ev?.kept_note ? h("div", { class: "s2-small s2-faint", style: { marginBottom: "6px" } }, ev.kept_note) : null,
     pc ? h("details", { class: "qh-more", open: true }, h("summary", {}, "This statement in the plan cache (every run, since its plan was compiled)"), planCacheTable(pc)) : null,
     !row.ok && ev?.error_message ? h("div", { class: "s2-error", style: { marginBottom: "8px" } }, `${ev.error_code ?? ""} ${ev.error_message}`) : null,
     d.loading ? h("div", { class: "s2-small s2-muted" }, h("span", { class: "s2-spinner" }), " Loading the full SQL…")
@@ -673,6 +684,7 @@ function renderPlanDetail() {
     h("div", { style: { display: "flex", alignItems: "center", gap: "8px" } },
       h("h2", {}, `${secs(p.avg_ms)} on average`),
       h("span", { class: "s2-badge plain" }, p.live ? "Plan cache" : "Plan cache (kept locally)"),
+      p.pinned ? h("span", { class: "s2-badge info plain", title: "Opened from the SQL Editor's Find in Query History: SAS sent this statement to SingleStore" }, "from the SQL Editor") : null,
       h("span", { class: "s2-spacer" }),
       h("button", { class: "s2-btn ghost", "aria-label": "Close details", onclick: () => { state.selected = null; render(); } }, "✕")),
     h("div", { class: "s2-small s2-faint", style: { margin: "6px 0" } },
@@ -1080,6 +1092,11 @@ function planTable(p) {
   return h("table", { class: "qh-kv" }, h("tbody", {}, rows.map(([k, v]) => h("tr", {}, h("td", {}, k), h("td", {}, v)))));
 }
 
+// Older runs the cluster's trace no longer has (it restarted, or its ring buffer moved on), listed from the local copy.
+const keptText = (d) => d.kept?.runs
+  ? ` · plus ${fmt.number(d.kept.runs)} older run${d.kept.runs === 1 ? "" : "s"} kept locally (since ${when(d.kept.oldest)})`
+  : "";
+
 // ---------------------------------------------------------------- page
 function render() {
   if (!state.data) {
@@ -1093,8 +1110,8 @@ function render() {
       h("div", {},
         h("h1", { class: "s2-title" }, "Query History"),
         h("div", { class: "s2-subtitle" }, hist.events
-          ? `${fmt.number(hist.events)} traced queries since ${when(hist.oldest)} · newest ${when(hist.newest)}${d.limited ? ` · showing the latest ${fmt.number(d.limit)}` : ""}`
-          : "Query history is empty")),
+          ? `${fmt.number(hist.events)} traced queries since ${when(hist.oldest)} · newest ${when(hist.newest)}${d.limited ? ` · showing the latest ${fmt.number(d.limit)}` : ""}${keptText(d)}`
+          : d.kept?.runs ? `The cluster's query history is empty${keptText(d)}` : "Query history is empty")),
       h("span", { class: "s2-spacer" }),
       traceChip(),
       h("label", { class: "qh-field", title: `Refresh every ${REFRESH_MS / 1000} s` },
@@ -1201,8 +1218,10 @@ function sortable(rows, sortKey, columns, onSort) {
     : h("th", { class: isNum ? "num" : "", title }, label))));
 }
 
+// The Queries list over the overview's period (24 h / 7 days; longer periods: everything, which includes them).
 function showEp() {
-  state.minSeconds = 1; state.hours = "";
+  const days = state.usage.days;
+  state.minSeconds = 1; state.hours = days === 1 ? "24" : days === 7 ? "168" : "";
   state.user = state.database = state.status = state.category = state.search = "";
   state.origin = "SAS EP";
   state.shape = null; state.table = null;
@@ -1221,11 +1240,13 @@ function epOverview(o, period) {
     h("h2", {}, "SAS Embedded Process"),
     h("div", { class: "s2-small s2-faint", style: { marginBottom: "6px" } },
       `Over ${period}: ${fmt.number(o.calls)} traced EP calls (sasepFunction jobs and SAS VA / CAS format functions), ${secs(o.ms)} in all`,
+      o.kept_calls ? ` (${fmt.number(o.live_calls ?? 0)} in the cluster's query history, ${fmt.number(o.kept_calls)} older ones kept locally after it lost them; the Queries list shows both)` : "",
       pl ? `; ${fmt.number(o.plateau_calls)} sat on the ${secs(pl.low_ms)}–${secs(pl.high_ms)} plateau, ${share(o.plateau_time_share)} of the EP time` +
         (pl.warm_ms != null ? ` (calls off it: median ${secs(pl.warm_ms)}, so about ${secs(pl.fixed_ms)} of each plateau call is waiting)` : "") : "",
       o.shared_bursts ? `. ${o.shared_bursts} of ${o.bursts} groups of overlapping calls finished together (one shared wait)` : "",
       ". ",
       o.all_format_functions ? `The plan cache saw ${fmt.number(o.all_format_functions)} VA / CAS EP functions registered (every call, however fast); ${fmt.number(o.traced_format_functions)} were traced, the others ran under the trace threshold, so the shares above are of the slow calls only. ` : "",
+      o.short_calls ? `${fmt.number(o.short_calls)} of them ran under 1 s, below the Queries list's minimum, so they aren't listed there. ` : "",
       "Click a row for the EP calls; open one for its EP card and tuning tips."),
     h("div", { class: "s2-table-wrap", style: { maxHeight: "260px" } }, h("table", { class: "s2-table qh-usage-table" },
       h("thead", {}, h("tr", {}, ["Source", "Database", "User", "Calls", "Total time", "Median", "On plateau", "Plateau time", "Failed", "Last"].map((c, i) =>
@@ -1745,10 +1766,16 @@ function setAuto(on) {
 }
 
 S2.onDisplayModeChange = () => { if (state.data) render(); };
-// From the SQL Editor ("Find in Query History" on SQL that SAS sent to SingleStore): search for it.
+// From the SQL Editor ("Find in Query History" on SQL that SAS sent to SingleStore): search for it. A statement
+// only the plan cache knows (all its runs under the trace threshold) comes as ``plan``: it's listed and selected.
 window.addEventListener("s2:set-sql", (e) => {
-  if (typeof e.detail?.search !== "string") return;
-  state.search = e.detail.search;
+  if (typeof e.detail?.search !== "string" && !e.detail?.plan) return;
+  state.search = e.detail.search ?? "";
+  if (e.detail.plan?.key) {
+    state.pinnedPlan = e.detail.plan;
+    state.selected = e.detail.plan.key;
+    state.tab = "queries";
+  }
   if (state.data) render();
 });
 await S2.connect({

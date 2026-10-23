@@ -384,6 +384,246 @@ class TestScript:
                         {"action": "revoke_all", "grantee_type": "user", "user": "admin"}], keep_order=True)
 
 
+# ============================================================================= password, lock, lockout, TLS, columns (offline)
+
+def plain_bob(**over: Any) -> dict[str, Any]:
+    """Connected as bob, who holds no ALTER USER / grant option."""
+    return ctx(me={"user": "bob", "host": "%"}, my_grants=["GRANT USAGE ON *.* TO 'bob'@'%'"], **over)
+
+
+class TestPassword:
+    def test_other_user_alter_user_bound_and_masked(self) -> None:
+        pw = "N3w'pw%" + secrets.token_hex(4)
+        p = adm.build(ctx(), {"action": "change_password", "user": "bob"}, password=pw)
+        assert stmts(p) == ["ALTER USER 'bob'@'%' IDENTIFIED BY '********';"]
+        s = p["statements"][0]
+        assert s["params"] == (pw,) and pw not in s["sql"] and pw not in repr(adm.public(p))
+        assert s["sql"] == "/* s2-security-change */ ALTER USER 'bob'@'%%' IDENTIFIED BY %s"
+        assert not p["blockers"] and not p["confirm"]["typed"]
+        assert any("open connection" in w for w in p["warnings"])  # bob has 1 open connection
+
+    def test_admin_and_own_need_typing(self) -> None:
+        ann = adm.build(ctx(), {"action": "change_password", "user": "ann", "host": "10.0.0.%"}, password="x" * 12)
+        assert ann["confirm"]["typed"] and ann["confirm"]["phrase"] == "ann"
+        own = adm.build(ctx(), {"action": "change_password", "user": "admin"}, password="x" * 12)
+        assert stmts(own) == ["ALTER USER 'admin'@'%' IDENTIFIED BY '********';"]
+        assert own["confirm"]["typed"] and any("your own password" in w for w in own["warnings"])
+
+    def test_own_password_without_privilege_uses_set_password(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        p = adm.build(plain_bob(), {"action": "change_password", "user": "bob"}, password="x" * 12)
+        assert stmts(p) == ["SET PASSWORD FOR 'bob'@'%' = PASSWORD('********');"]
+        monkeypatch.setattr(adm, "load_context", plain_bob)
+        monkeypatch.setattr(adm, "_active_profile", lambda: None)
+        assert adm.plan({"action": "change_password", "user": "bob"})["allowed"]["ok"]
+        other = adm.plan({"action": "change_password", "user": "ann", "host": "10.0.0.%"})
+        assert not other["allowed"]["ok"] and "ALTER USER" in other["allowed"]["reason"]
+
+    def test_blockers(self) -> None:
+        c = ctx()
+        c["users"][BOB]["type"] = "JWT"
+        p = adm.build(c, {"action": "change_password", "user": "bob"}, password="")
+        assert any("JWT" in b for b in p["blockers"]) and any("Enter the new password" in b for b in p["blockers"])
+        assert any("shorter than 8" in w for w in adm.build(ctx(), {"action": "change_password", "user": "bob"}, password="short")["warnings"])
+
+    def test_plan_and_script_never_hold_it(self, offline: pytest.MonkeyPatch) -> None:
+        pw = "Zz9-" + secrets.token_hex(8)
+        offline.setattr(adm, "_active_profile", lambda: None)
+        p = adm.plan({"action": "change_password", "user": "bob", "password": pw})
+        assert p["statements"] == ["ALTER USER 'bob'@'%' IDENTIFIED BY '********';"] and not p["blockers"]
+        out = adm.script([{"action": "change_password", "user": "bob", "password": pw}])
+        assert pw not in repr(out) and "********" not in out["script"]
+        assert "ALTER USER 'bob'@'%' IDENTIFIED BY '<set password>';" in out["script"]
+        assert "-- WARNING: the password change has the placeholder" in out["script"]
+        offline.setattr(adm, "load_context", plain_bob)
+        own = adm.script([{"action": "change_password", "user": "bob"}])
+        assert "SET PASSWORD FOR 'bob'@'%' = PASSWORD('<set password>');" in own["script"]
+
+    def test_apply_masks_and_updates_the_saved_connection(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        from singlestore_mcp import connections
+
+        pw = "Zz9-" + secrets.token_hex(8)
+        ran: list[Any] = []
+        saved: dict[str, str] = {}
+        monkeypatch.setattr(adm, "load_context", lambda: ctx())
+        monkeypatch.setattr(adm.db, "execute", lambda sql, params=None, **kw: ran.append((sql, params)))
+        monkeypatch.setattr(connections, "set_password", lambda name, value: saved.__setitem__(name, value))
+        prof = SimpleNamespace(name="Test cluster", user="admin", builtin=False, url=None, auth="password", host="h")
+        monkeypatch.setattr(adm, "_active_profile", lambda: prof)
+        p = adm.plan({"action": "change_password", "user": "admin"})
+        assert p["connection"] == {"name": "Test cluster", "uses_account": True, "can_update": True, "reason": None}
+        with pytest.raises(adm.ChangeError, match="type 'admin'"):
+            adm.apply({"action": "change_password", "user": "admin"}, confirm=True, password=pw)
+        out = adm.apply({"action": "change_password", "user": "admin"}, confirm=True, typed="admin", password=pw,
+                        update_connection=True)
+        assert out["ok"] and ran[0][1] == (pw,) and pw not in ran[0][0]
+        assert saved == {"Test cluster": pw} and out["connection"]["updated"]
+        assert pw not in repr(out) and pw not in adm.summary(out)
+        # Without the tick: nothing is saved, the result says what to do.
+        saved.clear()
+        out = adm.apply({"action": "change_password", "user": "admin"}, confirm=True, typed="admin", password=pw)
+        assert not saved and "Connections" in out["connection"]["note"]
+        # Another user's password never touches the saved connection.
+        out = adm.apply({"action": "change_password", "user": "bob"}, confirm=True, password=pw, update_connection=True)
+        assert not saved and "connection" not in out
+
+    def test_connection_that_cant_be_updated(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from types import SimpleNamespace
+
+        c = ctx()
+        for prof, why in ((SimpleNamespace(name="env", user="admin", builtin=True, url=None, auth="password"), "SINGLESTORE_PASSWORD"),
+                          (SimpleNamespace(name="u", user="admin", builtin=False, url="x", auth="password"), "URL"),
+                          (SimpleNamespace(name="j", user="admin", builtin=False, url=None, auth="jwt"), "token"),
+                          (SimpleNamespace(name="o", user="other", builtin=False, url=None, auth="password"), "signs in as other")):
+            monkeypatch.setattr(adm, "_active_profile", lambda prof=prof: prof)
+            info = adm.connection_info(c)
+            assert not info["can_update"] and why in info["reason"]
+
+
+class TestLock:
+    def test_lock_unlock_statements(self) -> None:
+        c = ctx()
+        p = adm.build(c, {"action": "lock_user", "user": "bob"})
+        assert stmts(p) == ["ALTER USER 'bob'@'%' ACCOUNT LOCK;"] and not p["blockers"] and not p["confirm"]["typed"]
+        assert any("open connection" in w for w in p["warnings"]) and any("restart" in w for w in p["warnings"])
+        c["users"][BOB]["status"] = "LOCKED"
+        assert any("already locked" in b for b in adm.build(c, {"action": "lock_user", "user": "bob"})["blockers"])
+        u = adm.build(c, {"action": "unlock_user", "user": "bob"})
+        assert stmts(u) == ["ALTER USER 'bob'@'%' ACCOUNT UNLOCK;"] and not u["blockers"]
+        c["users"][BOB]["status"] = "OPEN"
+        assert any("isn't locked" in b for b in adm.build(c, {"action": "unlock_user", "user": "bob"})["blockers"])
+
+    def test_refuses_yourself_and_the_last_admin(self) -> None:
+        assert any("lock you out" in b for b in adm.build(ctx(), {"action": "lock_user", "user": "admin"})["blockers"])
+        c = plain_bob()
+        c["users"][ANN]["status"] = "LOCKED"  # admin is then the only unlocked admin
+        p = adm.build(c, {"action": "lock_user", "user": "admin"})
+        assert any("last admin" in b for b in p["blockers"])
+        ok = adm.build(plain_bob(), {"action": "lock_user", "user": "admin"})
+        assert not ok["blockers"] and ok["confirm"]["typed"] and ok["confirm"]["phrase"] == "admin"
+
+    def test_login_policy(self) -> None:
+        p = adm.build(ctx(), {"action": "set_login_policy", "user": "bob", "failed_login_attempts": 5, "password_lock_time": "900"})
+        assert stmts(p) == ["ALTER USER 'bob'@'%' SET FAILED_LOGIN_ATTEMPTS = 5 PASSWORD_LOCK_TIME = 900;"]
+        off = adm.build(ctx(), {"action": "set_login_policy", "user": "bob", "failed_login_attempts": 0, "password_lock_time": 0})
+        assert stmts(off) == ["ALTER USER 'bob'@'%' SET FAILED_LOGIN_ATTEMPTS = 0 PASSWORD_LOCK_TIME = 0;"]
+        with pytest.raises(adm.ChangeError, match="go together"):
+            adm.build(ctx(), {"action": "set_login_policy", "user": "bob", "failed_login_attempts": 3, "password_lock_time": 0})
+        with pytest.raises(adm.ChangeError, match="whole number"):
+            adm.build(ctx(), {"action": "set_login_policy", "user": "bob", "failed_login_attempts": "3; DROP", "password_lock_time": 5})
+        with pytest.raises(adm.ChangeError, match="0–"):
+            adm.build(ctx(), {"action": "set_login_policy", "user": "bob", "failed_login_attempts": -1, "password_lock_time": -1})
+        c = ctx()
+        c["users"][BOB].update(failed_login_attempts=5, password_lock_time=900)
+        assert adm.build(c, {"action": "set_login_policy", "user": "bob", "failed_login_attempts": 5, "password_lock_time": 900})["blockers"]
+        own = adm.build(ctx(), {"action": "set_login_policy", "user": "admin", "failed_login_attempts": 3, "password_lock_time": 60})
+        assert own["confirm"]["typed"]
+
+    def test_create_user_with_policy_and_require(self) -> None:
+        p = adm.build(ctx(), {"action": "create_user", "user": "zz_test_n", "default_pool": "etl", "require": "ssl",
+                              "failed_login_attempts": 3, "password_lock_time": 60}, password="x" * 12)
+        assert stmts(p) == ["CREATE USER 'zz_test_n'@'%' IDENTIFIED BY '********' WITH DEFAULT RESOURCE POOL = etl "
+                            "FAILED_LOGIN_ATTEMPTS = 3 PASSWORD_LOCK_TIME = 60 REQUIRE SSL;"]
+        n = adm.build(ctx(), {"action": "create_user", "user": "zz_test_n", "require": "NONE"}, password="x" * 12)
+        assert stmts(n) == ["CREATE USER 'zz_test_n'@'%' IDENTIFIED BY '********' REQUIRE NONE;"]
+        with pytest.raises(adm.ChangeError, match="SSL or NONE"):
+            adm.build(ctx(), {"action": "create_user", "user": "zz_test_n", "require": "X509"}, password="x" * 12)
+
+
+class TestRequireSsl:
+    def test_statements_and_state(self) -> None:
+        p = adm.build(ctx(), {"action": "set_require", "user": "bob", "require": "SSL"})
+        assert stmts(p) == ["ALTER USER 'bob'@'%' REQUIRE SSL;"] and not p["confirm"]["typed"]
+        c = ctx(ssl={BOB})
+        assert any("already has REQUIRE SSL" in b for b in adm.build(c, {"action": "set_require", "user": "bob", "require": "SSL"})["blockers"])
+        assert stmts(adm.build(c, {"action": "set_require", "user": "bob", "require": "none"})) == ["ALTER USER 'bob'@'%' REQUIRE NONE;"]
+
+    def test_own_account_without_tls_warns_lockout(self) -> None:
+        p = adm.build(ctx(my_tls=False), {"action": "set_require", "user": "admin", "require": "SSL"})
+        assert p["confirm"]["typed"] and p["warnings"][0].startswith("LOCK-OUT RISK")
+        unknown = adm.build(ctx(my_tls=None), {"action": "set_require", "user": "admin", "require": "SSL"})
+        assert "Couldn't tell" in unknown["warnings"][0]
+        tls = adm.build(ctx(my_tls=True), {"action": "set_require", "user": "admin", "require": "SSL"})
+        assert any("uses TLS, so it keeps working" in w for w in tls["warnings"])
+
+    def test_load_context_keeps_ssl_out_of_privileges(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """REQUIRE SSL is PRIVILEGE_TYPE 'SSL' in USER_PRIVILEGES: it must not end up in "revoke all"."""
+        users = [{"USER": "bob", "HOST": "%", "TYPE": "NATIVE", "CONNECTIONS": 0, "DEFAULT_RESOURCE_POOL": "", "ACCOUNT_STATUS": "OPEN",
+                  "EFFECTIVE_FAILED_LOGIN_ATTEMPTS": 0, "EFFECTIVE_PASSWORD_LOCK_TIME": 0}]
+        uprivs = [{"GRANTEE": BOB, "PRIVILEGE_TYPE": "SSL", "IS_GRANTABLE": "NO"},
+                  {"GRANTEE": BOB, "PRIVILEGE_TYPE": "SELECT", "IS_GRANTABLE": "NO"}]
+        results = [users, uprivs, [], [], [], [], [], [], [], [], [], [], {"user": "bob", "host": "%"}, [], [],
+                   [{"cpu_mode": "SOFT", "transfer_mode": None, "sync_permissions": "ON"}],
+                   [{"Variable_name": "Ssl_cipher", "Value": ""}]]
+        monkeypatch.setattr(adm.db, "parallel", lambda *calls: results)
+        c = adm.load_context()
+        assert c["ssl"] == {BOB} and c["global"][BOB] == {"SELECT"} and c["my_tls"] is False
+        assert c["users"][BOB]["status"] == "OPEN"
+        assert stmts(adm.build(c, {"action": "revoke_all", "user": "bob"})) == ["REVOKE SELECT ON *.* FROM 'bob'@'%';"]
+
+
+VIEW_CTX = {"columns": {("SASDP", "CARS"): ["Make", "Model", "MSRP"]}, "objects": {"SASDP": {"CARS", "CARS_old"}}}
+
+
+class TestColumnGrants:
+    def test_view_and_grant(self) -> None:
+        p = adm.build(ctx(**copy_view()), {"action": "grant_view", "grantee_type": "user", "user": "bob", "database": "SASDP",
+                                           "table": "CARS", "columns": ["model", "Make"], "view": "zz_test_cars_v"})
+        assert stmts(p) == ["CREATE VIEW `SASDP`.`zz_test_cars_v` AS SELECT `Model`, `Make` FROM `SASDP`.`CARS`;",
+                            "GRANT SELECT ON `SASDP`.`zz_test_cars_v` TO 'bob'@'%';"]
+        # bob already has SELECT on SASDP.*: the restriction wouldn't hold, and that comes first.
+        assert p["warnings"][0].startswith("bob@% already has SELECT on SASDP.*")
+        assert any("no column-level privileges" in w for w in p["warnings"])
+        r = adm.build(ctx(**copy_view()), {"action": "grant_view", "grantee_type": "role", "role": "empty", "database": "SASDP",
+                                           "table": "CARS", "columns": ["MSRP"], "view": "zz_test_v"})
+        assert stmts(r)[1] == "GRANT SELECT ON `SASDP`.`zz_test_v` TO ROLE 'empty';"
+        assert not r["warnings"][0].startswith("role empty already")
+
+    def test_checks(self) -> None:
+        base = {"action": "grant_view", "user": "bob", "database": "SASDP", "table": "CARS", "view": "zz_test_v"}
+        with pytest.raises(adm.ChangeError, match="No column Price"):
+            adm.build(ctx(**copy_view()), {**base, "columns": ["Price"]})
+        with pytest.raises(adm.ChangeError, match="at least one column"):
+            adm.build(ctx(**copy_view()), {**base, "columns": []})
+        with pytest.raises(adm.ChangeError, match="No table SASDP.cars"):
+            adm.build(ctx(**copy_view()), {**base, "table": "cars", "columns": ["Make"]})
+        assert any("already exists" in b for b in adm.build(ctx(**copy_view()), {**base, "view": "CARS_old", "columns": ["Make"]})["blockers"])
+        with pytest.raises(adm.ChangeError, match="name of its own"):
+            adm.build(ctx(**copy_view()), {**base, "view": "CARS", "columns": ["Make"]})
+        with pytest.raises(adm.ChangeError, match="control characters"):
+            adm.build(ctx(**copy_view()), {**base, "view": "v\x07x", "columns": ["Make"]})
+
+    def test_script_and_basket(self, offline: pytest.MonkeyPatch) -> None:
+        offline.setattr(adm, "load_context", lambda: ctx(**copy_view()))
+        a = {"action": "grant_view", "grantee_type": "role", "role": "zz_test_r", "database": "SASDP", "table": "CARS",
+             "columns": ["Make"], "view": "zz_test_v"}
+        out = adm.script([a, {"action": "create_role", "role": "zz_test_r"}])
+        sql = [line for line in out["script"].splitlines() if line and not line.startswith("--")]
+        assert sql == ["CREATE ROLE 'zz_test_r';", "CREATE VIEW `SASDP`.`zz_test_v` AS SELECT `Make` FROM `SASDP`.`CARS`;",
+                       "GRANT SELECT ON `SASDP`.`zz_test_v` TO ROLE 'zz_test_r';"]
+        offline.setattr(adm, "load_context", lambda: ctx(**copy_view(), roles={"zz_test_r"}))
+        assert adm.script([a])["file_name"].endswith("-grant-view-zz_test_v.sql")
+        offline.setattr(adm, "load_context", lambda: ctx(**copy_view()))
+        with pytest.raises(adm.ChangeError, match="already exists"):  # the same view twice in one script
+            adm.script([a, {**a, "role": "empty"}, {"action": "create_role", "role": "zz_test_r"}])
+
+    def test_lock_changes_in_one_script(self, offline: pytest.MonkeyPatch) -> None:
+        out = adm.script([{"action": "lock_user", "user": "bob"}, {"action": "unlock_user", "user": "bob"}], keep_order=True)
+        assert [i["action"] for i in out["items"]] == ["lock_user", "unlock_user"]
+        with pytest.raises(adm.ChangeError, match="already locked"):
+            adm.script([{"action": "lock_user", "user": "bob"}, {"action": "lock_user", "user": "bob"}])
+        out = adm.script([{"action": "set_require", "user": "bob", "require": "SSL"},
+                          {"action": "create_user", "user": "zz_test_u", "require": "SSL"}])
+        assert [i["action"] for i in out["items"]] == ["create_user", "set_require"]
+
+
+def copy_view() -> dict[str, Any]:
+    import copy
+
+    return copy.deepcopy(VIEW_CTX)
+
+
 # ============================================================================= cluster: zz_test_ objects only
 
 PREFIX = "zz_test_"
@@ -496,3 +736,88 @@ def test_change_round_trip_on_zz_test_objects(zz) -> None:
     rows = mcp.ok("run_sql", {"sql": f"SELECT QUERY_TEXT AS t FROM information_schema.MV_PLANCACHE WHERE QUERY_TEXT LIKE '%{n['user']}%'"})
     texts = [str(next(iter(x.values())) if isinstance(x, dict) else x[0]) for x in rows.get("rows", [])]
     assert all(pw not in t for t in texts)
+
+
+@pytest.mark.cluster
+def test_password_lock_tls_and_column_view_on_zz_test_user(cluster: McpSession) -> None:
+    """Password change, lock / unlock, failed-login lockout, REQUIRE SSL / NONE and a column view + grant on a
+    zz_test_ user and view; everything dropped in teardown and checked to be gone. Passwords never printed."""
+    mcp = cluster
+    cap = mcp.ok("security_admin_capabilities")
+    if not (cap["users"]["ok"] and cap["alter_user"]["ok"] and cap["grants"]["ok"]):
+        pytest.skip("The connected user can't create and alter users")
+    tag = secrets.token_hex(3)
+    user, view = f"{PREFIX}p{tag}", f"{PREFIX}v{tag}"
+    pw, pw2 = secrets.token_urlsafe(18), secrets.token_urlsafe(18)  # never printed
+
+    def detail() -> dict[str, Any]:
+        return mcp.ok("security_user_detail", {"user": user, "host": "%"})
+
+    try:
+        _apply(mcp, {"action": "create_user", "user": user, "require": "SSL", "failed_login_attempts": 3,
+                     "password_lock_time": 60}, password=pw)
+        d = detail()
+        assert d["require_ssl"] is True and d["failed_login_attempts"] == 3 and d["password_lock_time"] == 60
+        assert d["account_status"] == "OPEN" and not d["effective"], d  # SSL isn't listed as a privilege
+
+        # Password change: masked in the plan, bound when run, never in the result.
+        plan = mcp.ok("security_change_plan", {"action": {"action": "change_password", "user": user, "password": pw2}})
+        assert plan["statements"] == [f"ALTER USER '{user}'@'%' IDENTIFIED BY '********';"]
+        assert "connection" not in plan  # not your own account
+        out = _apply(mcp, {"action": "change_password", "user": user}, password=pw2)
+        assert pw2 not in repr(out) and "'********'" in out["results"][0]["statement"]
+        script = mcp.ok("security_change_script", {"actions": [{"action": "change_password", "user": user}]})
+        assert "IDENTIFIED BY '<set password>'" in script["script"] and pw2 not in script["script"]
+
+        # Lock / unlock, with the status read back; locking yourself is refused.
+        _apply(mcp, {"action": "lock_user", "user": user})
+        assert detail()["account_status"] == "LOCKED"
+        users = mcp.ok("security_users")["users"]
+        assert "locked" in next(u for u in users if u["user"] == user)["flags"]
+        again = mcp.ok("security_change_plan", {"action": {"action": "lock_user", "user": user}})
+        assert any("already locked" in b for b in again["blockers"])
+        me = cap["me"]
+        mine = mcp.ok("security_change_plan", {"action": {"action": "lock_user", "user": me["user"], "host": me["host"]}})
+        assert any("lock you out" in b for b in mine["blockers"])
+        _apply(mcp, {"action": "unlock_user", "user": user})
+        assert detail()["account_status"] == "OPEN"
+
+        # Failed-login lockout off (both 0); one without the other is refused before anything runs.
+        r = mcp.call("security_change_plan", {"action": {"action": "set_login_policy", "user": user, "failed_login_attempts": 3,
+                                                         "password_lock_time": 0}})
+        assert r.is_error and "go together" in r.text
+        _apply(mcp, {"action": "set_login_policy", "user": user, "failed_login_attempts": 0, "password_lock_time": 0})
+        assert detail()["failed_login_attempts"] == 0
+
+        # REQUIRE NONE, then SSL again.
+        _apply(mcp, {"action": "set_require", "user": user, "require": "NONE"})
+        assert detail()["require_ssl"] is False
+        _apply(mcp, {"action": "set_require", "user": user, "require": "SSL"})
+        assert detail()["require_ssl"] is True
+
+        # Column grant through a view: two statements; the user gets SELECT on the view only.
+        cols = mcp.ok("security_columns", {"database": DB, "table": "CARS"})["columns"]
+        assert "Make" in cols and "Model" in cols
+        action = {"action": "grant_view", "grantee_type": "user", "user": user, "database": DB, "table": "CARS",
+                  "columns": ["Make", "Model"], "view": view}
+        plan = mcp.ok("security_change_plan", {"action": action})
+        assert plan["statements"] == [f"CREATE VIEW `{DB}`.`{view}` AS SELECT `Make`, `Model` FROM `{DB}`.`CARS`;",
+                                      f"GRANT SELECT ON `{DB}`.`{view}` TO '{user}'@'%';"]
+        _apply(mcp, action)
+        eff = detail()["effective"]
+        assert [(p["object"], p["privilege"]) for p in eff] == [(f"{DB}.{view}", "SELECT")], eff
+        dup = mcp.ok("security_change_plan", {"action": action})
+        assert any("already exists" in b for b in dup["blockers"])
+
+        # The passwords aren't in the cluster's plan cache (texts read back and searched locally).
+        rows = mcp.ok("run_sql", {"sql": f"SELECT QUERY_TEXT AS t FROM information_schema.MV_PLANCACHE WHERE QUERY_TEXT LIKE '%{user}%'"})
+        texts = [str(next(iter(x.values())) if isinstance(x, dict) else x[0]) for x in rows.get("rows", [])]
+        assert all(pw not in t and pw2 not in t for t in texts)
+    finally:
+        mcp.call("run_sql", {"sql": f"DROP VIEW IF EXISTS `{DB}`.`{view}`"}, timeout=60)
+        mcp.call("security_change_apply", {"action": {"action": "drop_user", "user": user}, "confirm": True,
+                                           "typed_confirmation": user}, timeout=60)
+        mcp.call("run_sql", {"sql": f"DROP USER IF EXISTS '{user}'@'%'"}, timeout=60)
+        left = [x for x in _leftovers(mcp) if tag in x]
+        r = mcp.ok("run_sql", {"sql": f"SELECT TABLE_NAME AS t FROM information_schema.TABLES WHERE TABLE_NAME = '{view}'"})
+        assert not left and not r.get("rows"), f"zz_test_ objects left behind: {left} {r.get('rows')}"

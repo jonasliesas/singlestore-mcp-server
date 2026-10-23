@@ -382,3 +382,102 @@ def test_backup_overview_empty_history_and_running() -> None:
     assert [x["state"] for x in d["databases"]] == ["never", "never"]
     assert d["issues"][0]["severity"] == "info"  # nothing recorded at all: probably backed up some other way
     assert d["running"][0]["columnstore_pct"] == 40 and d["running"][0]["database"] == "d1"
+
+
+# ----------------------------------------------------------------------------- CPU baseline (first open of the Cluster view)
+
+def _fake_counters(monkeypatch, cm) -> list:
+    calls = []
+
+    def counters():
+        calls.append(1)
+        ts = int(len(calls) * 2e9)  # each read 2 s after the previous one (cluster clock)
+        return {1: {"ts": ts, "cores": 4, "host_cpus": 4, "memsql_ns": len(calls) * 10**9, "used_ns": len(calls) * 10**9,
+                    "idle_ns": len(calls) * 10**9, "mounts": {}}}
+
+    monkeypatch.setattr(cm, "_counters", counters)
+    monkeypatch.setattr(cm, "_samples", type(cm._samples)(maxlen=8))
+    return calls
+
+
+def test_primed_baseline_means_no_wait(monkeypatch) -> None:
+    from singlestore_mcp.apps import cluster_monitor as cm
+
+    calls = _fake_counters(monkeypatch, cm)
+    slept = []
+    monkeypatch.setattr(cm.time, "sleep", lambda s: slept.append(s))
+    assert cm.prime_baseline() is True and len(calls) == 1
+    assert cm.prime_baseline() is False and len(calls) == 1  # fresh: no second read
+    rates, gap = cm._rates()
+    assert slept == [] and len(calls) == 2 and gap == 2.0  # measured against the primed sample, no 1 s wait
+    assert rates[1]["cpu"]["singlestore_pct"] == 12.5
+
+
+def test_without_baseline_rates_wait_a_second(monkeypatch) -> None:
+    from singlestore_mcp.apps import cluster_monitor as cm
+
+    _fake_counters(monkeypatch, cm)
+    slept = []
+    monkeypatch.setattr(cm.time, "sleep", lambda s: slept.append(s))
+    cm._rates()
+    assert slept == [1.0]
+
+
+def test_sampler_primes_the_baseline_early(monkeypatch) -> None:
+    from singlestore_mcp.apps import cluster_monitor as cm
+
+    monkeypatch.setenv("SINGLESTORE_MCP_METRICS", "1")
+    monkeypatch.setenv("SINGLESTORE_MCP_METRICS_DELAY", "3600")
+    monkeypatch.setattr(ms, "BASELINE_DELAY_S", 0)
+    primed = threading.Event()
+    monkeypatch.setattr(cm, "prime_baseline", lambda *a, **k: primed.set())
+    monkeypatch.setattr(ms, "sample_once", lambda force=False: pytest.fail("sampled before the delay"))
+    assert ms.start() is True
+    assert primed.wait(5), "no baseline right after start"
+    ms.stop(timeout=5)
+
+
+# ----------------------------------------------------------------------------- trends and trend alerts
+
+GB = 1024 ** 3
+
+
+def test_trends_disk_full_in_days(conn) -> None:
+    # 24 h of samples: disk grows 10 GB/day steadily (100 of 200 GB used now); memory flat with noise.
+    for i in range(0, 24 * 60, 10):
+        t = NOW - 86400 + i * 60
+        used = 90 * GB + (i * 60) / 86400 * 10 * GB
+        ms.write(conn, "c1", t, 60, [_row(1, disk_used_b=used, disk_total_b=200 * GB, mem_b=(50 + (i % 3)) * GB, mem_max_b=100 * GB)])
+    tr = ms.trends(conn, "c1", NOW)
+    disk, mem = tr[0]["disk"], tr[0]["memory"]
+    assert disk["r2"] > 0.99 and abs(disk["per_day_b"] - 10 * GB) < 0.1 * GB
+    assert 9.5 < disk["days_left"] < 10.5
+    assert mem["days_left"] is None  # no steady climb
+    # Too little history: nothing.
+    assert ms.trends(conn, "c1", NOW, window_s=3600) == []
+
+
+def test_check_trends_alerts_within_the_rule() -> None:
+    from singlestore_mcp import alerts
+
+    tr = [{"node_id": 2, "host": "leaf-0", "disk": {"used_b": 100 * GB, "cap_b": 200 * GB, "span_s": 86400, "points": 144,
+                                                      "per_day_b": 10 * GB, "r2": 0.99, "days_left": 10.0},
+           "memory": {"used_b": 90 * GB, "cap_b": 100 * GB, "span_s": 86400, "points": 144, "per_day_b": 10 * GB, "r2": 0.9,
+                      "days_left": 1.0}}]
+    found = alerts.check_trends({"days": 14}, {"days": 3}, tr)
+    by = {f["kind"]: f for f in found}
+    assert by["disk_trend"]["severity"] == "warning" and "full in ~10 days" in by["disk_trend"]["title"]
+    assert by["memory_trend"]["severity"] == "critical" and "~24 h" in by["memory_trend"]["title"]
+    assert all(f["continuing"] for f in found)
+    assert alerts.check_trends({"days": 7}, None, tr) == []  # 10 days is beyond a 7-day rule; memory rule off
+
+
+def test_trend_rules_have_days(tmp_path, monkeypatch) -> None:
+    from singlestore_mcp import alerts
+
+    monkeypatch.setattr(alerts, "_file", lambda: tmp_path / "alerts.json")
+    monkeypatch.setattr(alerts, "_state", {})
+    st = alerts.update_rules({"disk_trend": {"days": 30}, "memory_trend": {"days": 0, "enabled": False}})
+    assert st["rules"]["disk_trend"]["days"] == 30 and st["rules"]["memory_trend"] == {**alerts.DEFAULT_RULES["memory_trend"], "days": 1, "enabled": False}
+    monkeypatch.setattr(alerts, "_state", {})  # read back from the file
+    assert alerts.state()["rules"]["disk_trend"]["days"] == 30

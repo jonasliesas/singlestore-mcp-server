@@ -41,6 +41,7 @@ from support import DB, PYTHON, McpSession, remove_links, seed_home, server_env 
 RESULTS = Path(__file__).parent / "results"
 SQL_EDITOR_URI = "ui://singlestore/sql-editor.html"
 WORKSPACE_URI = "ui://singlestore/workspace.html"
+NOTEBOOK_URI = "ui://singlestore/notebook.html"
 
 
 def med(xs: list[float]) -> float:
@@ -90,17 +91,25 @@ def open_sequence(s: McpSession, t_spawn: float | None = None) -> dict[str, Any]
     bg = s.gather([("alerts_badge", {}), ("connections_state", {}), ("sql_editor_tabs", {})])
     for b in bg:
         step(b.name, b, b.ms, b.chars)
-    r = s.call("app_page", {"uri": SQL_EDITOR_URI, **({"head": head.group(1)} if head else {})})
+    head_arg = {"head": head.group(1)} if head else {}
+    r = s.call("app_page", {"uri": SQL_EDITOR_URI, **head_arg})
     step("app_page sql-editor", r, r.ms, r.chars)
+    sql_page = (r.data or {}).get("html", "") if isinstance(r.data, dict) else ""
     r = s.call("sql_editor_state", {})                   # the SQL view restores its draft
     step("sql_editor_state", r, r.ms, r.chars)
-    rs = s.gather([("sql_editor_schema", {"database": DB}), ("sql_editor_assistant", {})])
+    # (the Workspace asks for the SAS session ~1.5 s after it painted; here at the same time as the schema, the worst case)
+    rs = s.gather([("sql_editor_schema", {"database": DB}), ("sql_editor_assistant", {}), ("sas_prewarm", {})])
     for b in rs:
         step(b.name, b, b.ms, b.chars)
     total = (time.perf_counter() - t0) * 1000
     out = {"steps": steps, "sequence_ms": round(total), "bytes": sum(x["chars"] for x in steps)}
     if t_spawn is not None:
         out["spawn_to_usable_ms"] = round((time.perf_counter() - t_spawn) * 1000)
+    # Not part of the open sequence: the user opens the Notebook next. The Workspace asks for its page without the
+    # vendor scripts it already has from the SQL Editor's page (CodeMirror), if this server marks them.
+    vendors = dict(re.findall(r'data-s2-vendor="([^"]+)" data-s2-hash="([0-9a-f]+)"', sql_page))
+    r = s.call("app_page", {"uri": NOTEBOOK_URI, **head_arg, **({"vendors": vendors} if vendors else {})})
+    step("app_page notebook (after SQL Editor)", r, r.ms, r.chars)
     return out
 
 
@@ -338,6 +347,7 @@ def main() -> None:
     ap.add_argument("--restarts", type=int, default=3)
     ap.add_argument("--restart-gap", type=float, default=10, help="seconds between restarts (the standby needs ~5 s + its load)")
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--no-sas-prewarm", action="store_true", help="SINGLESTORE_MCP_SAS_PREWARM=0 (compare with / without)")
     ap.add_argument("--label", default="", help="added to the results file name")
     args = ap.parse_args()
 
@@ -347,7 +357,8 @@ def main() -> None:
     seed_home(home)
     report: dict[str, Any] = {}
     try:
-        env = server_env(home, sql_dir)
+        # As Jonas runs it: the SAS session starts in the background when the Workspace opens (the tests turn it off).
+        env = server_env(home, sql_dir, {"SINGLESTORE_MCP_SAS_PREWARM": "0" if args.no_sas_prewarm else "1"})
         with McpSession(env, read_timeout=120) as s:
             if s.call("list_databases", timeout=45).is_error:
                 raise SystemExit("The cluster isn't reachable (VPN?): no start-up run.")

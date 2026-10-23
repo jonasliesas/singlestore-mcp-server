@@ -296,7 +296,8 @@ def test_caslib_rows_merge_options_and_hide_passwords() -> None:
     assert [x["name"] for x in libs] == ["CASUSER(me)", "SASDP"]
     s = libs[1]
     assert s["singlestore"] and s["database"] == "SASDP" and s["server"] == "h1"
-    assert "*****" not in repr(libs) and "pwd" not in repr(libs)
+    assert "*****" not in repr(libs) and s["secret_options"] == ["pwd"]  # only the option's name, for "Show code"
+    assert s["singlestore_kind"] == "standard" and s["badge"] == "S2" and s["badge_style"] == "s2-std"
     tables = cas_table_list([{"Name": "CARS", "Rows": 428, "Columns": 15}],
                             [{"Catalog": "SASDP", "Schema": "SASDP", "Name": "CARS", "Type": "TABLE"},
                              {"Catalog": "SASDP", "Schema": "SASDP", "Name": "CLASS", "Type": "TABLE"},
@@ -311,7 +312,140 @@ def test_editor_state_keeps_sas_settings_and_history_language(tmp_path, monkeypa
     assert st.clean_sas({"library": " S2SASH ", "outobs": "50", "noexec": 1, "pushdown": False, "junk": "x"}) == \
         {"library": "S2SASH", "outobs": 50, "noexec": True, "pushdown": False}
     assert st.clean_sas(None) is None
+    assert st.clean_sas({"connection": "Ecodiag", "caslib": "Public"})["connection"] == "Ecodiag"  # a pinned SAS Viya connection
+    assert "connection" not in st.clean_sas({"connection": None})
     st.add_history("select 1 as x from sashelp.class", "SASHELP", ok=True, language="procsql")
     st.add_history("select 1", "db", ok=True, language="singlestore")
     entries = st.list_history()["entries"]
     assert entries[0].get("language") is None and entries[1]["language"] == "procsql"
+
+
+# ------------------------------------------------------------------ SingleStore kinds, Show code, automatic S2 (offline)
+
+
+@pytest.mark.parametrize("cas_type,kind,badge", [
+    ("SingleStore", "speedystore", "SS"), ("singlestore", "speedystore", "SS"),
+    ("singlestore_standard", "standard", "S2"), ("PATH", None, None), ("", None, None)])
+def test_caslib_singlestore_kind_and_badge(cas_type: str, kind: str | None, badge: str | None) -> None:
+    assert s.cas_singlestore_kind(cas_type) == kind
+    b = s.singlestore_badge(kind, "SASDP", "h1")
+    assert b["badge"] == badge
+    if kind == "speedystore":
+        assert "SpeedyStore" in b["badge_title"] and "no in-memory copy" in b["badge_title"] and "SASDP" in b["badge_title"]
+    if kind == "standard":
+        assert "loads the tables into its memory" in b["badge_title"] and "SASDP" in b["badge_title"]
+
+
+def test_speedystore_caslib_rows_keep_options_for_show_code() -> None:
+    from singlestore_mcp.apps.sas_workspace import caslib_rows
+
+    rows = [
+        {"Name": "CSASDP", "Type": "SingleStore", "Definition": "host = 'SVC-H'", "Personal": 0, "Active": 0},
+        {"Name": "CSASDP", "Type": "", "Definition": "uid = 'admin'"},
+        {"Name": "CSASDP", "Type": "", "Definition": "pwd = 'TopSecret1'"},
+        {"Name": "CSASDP", "Type": "", "Definition": "database = 'SASDP'"},
+        {"Name": "CSASDP", "Type": "", "Definition": "aggregatePushdown = true"},
+    ]
+    lib = caslib_rows(rows)[0]
+    assert lib["badge"] == "SS" and lib["badge_style"] == "ss" and lib["singlestore"]
+    assert "TopSecret1" not in repr(lib)
+    code = s.caslib_code(lib)
+    for text in code.values():
+        assert "TopSecret1" not in text and 'pwd="<set password>"' in text and "Reconstructed" in text
+    assert 'srctype="singlestore"' in code["statement"] and 'database="SASDP"' in code["statement"]
+    assert "aggregatePushdown=true" in code["statement"]  # unquoted booleans stay unquoted
+    assert "table.addCaslib" in code["action"] and 'name="CSASDP"' in code["action"]
+    assert 'srcType="singlestore"' in code["action"]
+
+
+def test_path_caslib_code() -> None:
+    code = s.caslib_code({"name": "Public", "type": "PATH", "path": "/cas/data/public/", "description": "Shared", "datasource": [],
+                          "secret_options": []})
+    assert 'caslib Public path="/cas/data/public/" desc="Shared";' in code["statement"]
+    assert 'srcType="path"' in code["action"] and 'path="/cas/data/public/"' in code["action"]
+
+
+def test_libname_code_for_each_engine() -> None:
+    from singlestore_mcp import sas_rest
+
+    libs = {x["name"]: x for x in sas_rest.library_rows([
+        {"libname": "SASDP", "engine": "SSTORE", "path": "SVC-H", "sysname": "DataBase", "sysvalue": "SASDP"},
+        {"libname": "SASDP", "engine": "SSTORE", "path": "SVC-H", "sysname": "User", "sysvalue": "admin"},
+        {"libname": "MCP", "engine": "V9", "path": "/data/mcp", "sysname": "Filename", "sysvalue": "/data/mcp"},
+        {"libname": "PARQ", "engine": "PARQUET", "path": "/data/pq", "sysname": "File extension list", "sysvalue": "parquet"},
+        {"libname": "STG", "engine": "REMOTE9", "path": "/sas9/stg", "sysname": "Accessed through server", "sysvalue": "CAUKI"},
+    ])}
+    assert libs["SASDP"]["badge"] == "S2" and libs["SASDP"]["singlestore_kind"] == "access" and libs["SASDP"]["user"] == "admin"
+    code = s.libname_code(libs["SASDP"])
+    assert 'libname SASDP sstore' in code and 'server="SVC-H"' in code and 'user="admin"' in code
+    assert 'password="<set password>"' in code and 'database="SASDP"' in code and "port=" in code  # the port note
+    assert s.libname_code(libs["MCP"]).endswith('libname MCP "/data/mcp";')
+    assert 'libname PARQ parquet "/data/pq";' in s.libname_code(libs["PARQ"])
+    assert libs["STG"]["sas9"] and libs["STG"]["remote_server"] == "CAUKI"
+    assert "libname STG server=CAUKI slibref=STG;" in s.libname_code(libs["STG"])
+
+
+def test_auto_libname_code_hides_the_statement_and_reads_its_result() -> None:
+    code = s.auto_libname_code("S2", "h1", 3306, "admin", 'pa"ss', "MyDB")
+    first, libname = code.splitlines()[0], next(x for x in code.splitlines() if x.startswith("libname"))
+    assert "nosource" in first and "nonotes" in first  # before the statement with the password
+    assert libname == 'libname S2 sstore server="h1" port=3306 user="admin" password="pa""ss" database="MyDB";'
+    assert code.splitlines()[-1] == "options source notes;"
+    # The log of a new session's first job also holds the autoexec: only what's between the markers counts.
+    ok, errors = s.auto_libname_result(["ERROR: autoexec could not reach CAS", "S2AUTOLIB_BEGIN", "S2AUTOLIB_RC=0"])
+    assert ok and errors == []
+    ok, errors = s.auto_libname_result(["S2AUTOLIB_BEGIN", "ERROR: Access denied for user admin", "S2AUTOLIB_RC=70006"])
+    assert not ok and errors == ["ERROR: Access denied for user admin"]
+    assert s.mask_value('ERROR: bad password "pa""ss" and pa"ss', 'pa"ss') == "ERROR: bad password \"********\" and ********"
+
+
+def test_parse_sas9_libraries() -> None:
+    assert s.parse_sas9_libraries("stg, sasdata\nF9=finance") == [("STG", "STG"), ("SASDATA", "SASDATA"), ("F9", "FINANCE")]
+    assert s.parse_sas9_libraries("") == []
+    with pytest.raises(ValueError):
+        s.parse_sas9_libraries("toolonglibref")
+
+
+def test_automatic_library_assignment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Compute session assigns the automatic SingleStore library with NOSOURCE, only again when what it points at
+    changes, and the password never reaches the status or error text."""
+    from singlestore_mcp import connections, sas_rest
+
+    p = connections.Profile(name="Zeus", host="h1", port=3306, user="admin", database="MyDB")
+    secret = {"pw": "S3cret!pw"}
+    monkeypatch.setattr(connections, "active", lambda: p)
+    monkeypatch.setattr(connections, "password_for", lambda prof: secret["pw"])
+    monkeypatch.setattr(sas_rest.sas_viya, "settings", lambda name=None: {"libref": "S2", "auto_libname": True})
+    submitted: list[str] = []
+    answer = {"lines": ["S2AUTOLIB_BEGIN", "S2AUTOLIB_RC=0"]}
+    c = sas_rest.Compute()
+    c.sid = "sid1"
+    monkeypatch.setattr(c, "_submit", lambda code, sid: submitted.append(code) or "sid1/jobs/1")
+    monkeypatch.setattr(c, "_wait", lambda job: "completed")
+    monkeypatch.setattr(c, "_log", lambda job, kind="log": [{"line": x, "type": "normal"} for x in answer["lines"]])
+    monkeypatch.setattr(c, "_forget_job", lambda job: None)
+    c._ensure_auto()
+    assert len(submitted) == 1 and submitted[0].index("nosource") < submitted[0].index("S3cret!pw")
+    assert c.auto_lib["assigned"] and c.auto_lib["database"] == "MyDB" and "S3cret!pw" not in repr(c.auto_lib)
+    c._ensure_auto()
+    assert len(submitted) == 1  # nothing changed
+    secret["pw"] = "N3w!pw"  # e.g. a renewed token
+    answer["lines"] = ["S2AUTOLIB_BEGIN", "ERROR: login failed with password=N3w!pw", "S2AUTOLIB_RC=1"]
+    c._ensure_auto()
+    assert len(submitted) == 2 and not c.auto_lib["assigned"]
+    assert "N3w!pw" not in c.auto_lib["error"] and "login failed" in c.auto_lib["error"]
+    monkeypatch.setattr(sas_rest.sas_viya, "settings", lambda name=None: {"libref": "S2", "auto_libname": False})
+    c._ensure_auto()
+    assert len(submitted) == 2 and "turned off" in c.auto_lib["note"]
+
+
+def test_viya_connection_sas9_and_auto_settings(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SINGLESTORE_MCP_HOME", str(tmp_path))
+    from singlestore_mcp import sas_viya
+
+    c = sas_viya.save_connection({"name": "Z", "url": "https://viya.example.com", "sas9_server": "cauki", "sas9_libraries": "stg  sasdata"})
+    assert c["auto_libname"] is True and c["sas9_server"] == "CAUKI" and c["sas9_libraries"] == "stg sasdata"
+    c = sas_viya.save_connection({**c, "auto_libname": False}, original_name="Z")
+    assert sas_viya.settings("Z")["auto_libname"] is False
+    with pytest.raises(ValueError):
+        sas_viya.save_connection({**c, "sas9_server": "not a name"}, original_name="Z")

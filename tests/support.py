@@ -39,6 +39,28 @@ SEED_FILES = ("connections.json", "sas.json", "query_history.db", "singlestore_b
 # (too large for the Windows credential store). Off by default: the test server may refresh the token in
 # its copy, and the real file would then keep the old one.
 SECRET_FILES = ("secrets-large.enc", "secrets.enc", "secret.key")
+
+
+def sas_signin_mode() -> str:
+    """Which SAS Viya sign-in the test server may use (S2_TEST_SAS_SIGNIN):
+
+    * ``any`` (default): its own copy of yours if S2_TEST_SAS_SECRETS=1, else – like the real server – the SAS
+      Viya MCP server's (``~/.sas-mcp-server/credentials.json``) or SAS Viya CLI's cached sign-in to the same
+      Viya. That import is why the SAS tests also pass without S2_TEST_SAS_SECRETS: ``sas_viya.token()`` finds
+      no sign-in in the test home and reuses the SAS Viya MCP server's (``sas-mcp-login``) for Zeus.
+    * ``own``: only a copy of your own sign-in (the secrets files are copied; importing is turned off with
+      SINGLESTORE_MCP_SAS_IMPORT=0), so the tests fail to sign in rather than borrow another tool's.
+    * ``import``: only another SAS tool's cached sign-in (nothing copied, even with S2_TEST_SAS_SECRETS=1).
+    """
+    mode = (os.environ.get("S2_TEST_SAS_SIGNIN") or "any").strip().lower()
+    if mode not in ("any", "own", "import"):
+        raise ValueError(f"S2_TEST_SAS_SIGNIN must be any, own or import, not {mode!r}")
+    return mode
+
+
+def _copy_secrets() -> bool:
+    mode = sas_signin_mode()
+    return mode == "own" or (mode == "any" and os.environ.get("S2_TEST_SAS_SECRETS") == "1")
 JUNCTION_DIRS = ("notebook-env",)
 
 DB = "SASDP"
@@ -105,7 +127,7 @@ def seed_home(home: Path) -> dict[str, Any]:
     """Fill a fresh test home from the real one. Returns what was copied/linked."""
     home.mkdir(parents=True, exist_ok=True)
     done: dict[str, Any] = {"copied": [], "linked": []}
-    names = SEED_FILES + (SECRET_FILES if os.environ.get("S2_TEST_SAS_SECRETS") == "1" else ())
+    names = SEED_FILES + (SECRET_FILES if _copy_secrets() else ())
     for name in names:
         src = REAL_HOME / name
         if src.is_file():
@@ -135,7 +157,7 @@ def seed_sas(home: Path) -> None:
     connection with that Viya address and makes it active, named S2_TEST_SAS_CONNECTION (default "Test Viya");
     S2_TEST_SAS_CONTEXT sets its compute context. S2_TEST_SAS_CONNECTION alone picks a saved connection.
     The sign-in itself: the test server's own (encrypted file, see S2_TEST_SAS_SECRETS) or the SAS Viya MCP
-    server's / CLI's cached sign-in to the same Viya.
+    server's / CLI's cached sign-in to the same Viya – see ``sas_signin_mode`` (S2_TEST_SAS_SIGNIN).
     """
     path = home / "sas.json"
     try:
@@ -183,8 +205,14 @@ def server_env(home: Path, sql_dir: Path, extra: dict[str, str] | None = None) -
         "SINGLESTORE_MCP_SQL_DIR": str(sql_dir),
         "SINGLESTORE_MCP_ALERTS": "0",
         "SINGLESTORE_MCP_METRICS": "0",  # no background metrics sampler (tests take samples with sample_now)
+        # No background SAS session when a view opens (tests that need it pass extra={...: "1"}).
+        "SINGLESTORE_MCP_SAS_PREWARM": "0",
         "PYTHONIOENCODING": "utf-8",
     })
+    if sas_signin_mode() == "own":
+        env["SINGLESTORE_MCP_SAS_IMPORT"] = "0"  # never borrow the SAS Viya MCP server's / CLI's sign-in
+    elif sas_signin_mode() == "import":
+        env.pop("SINGLESTORE_MCP_SAS_IMPORT", None)
     env.update(extra or {})
     return env
 

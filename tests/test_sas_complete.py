@@ -165,7 +165,9 @@ def fake(monkeypatch: pytest.MonkeyPatch) -> FakeViya:
         return self.sid
 
     monkeypatch.setattr(sas_rest.Compute, "session", session)
-    monkeypatch.setattr(ws, "compute", sas_rest.Compute())
+    pair = (sas_rest.Compute(), sas_rest.Cas())
+    monkeypatch.setattr(sas_rest, "sessions", lambda conn=None: pair)
+    f.compute = pair[0]  # type: ignore[attr-defined]
     return f
 
 
@@ -192,7 +194,7 @@ def test_lookup_retries_with_the_librarys_spelling(fake: FakeViya) -> None:
 
 def test_lookup_restarts_an_ended_session_once(fake: FakeViya) -> None:
     fake.gone_once = True
-    ws.compute.sid = "OLD"
+    fake.compute.sid = "OLD"  # type: ignore[attr-defined]
     d = ws.lookup_columns("procsql", [("SASHELP", "CLASS")])
     assert d["session"] == "dev|compute|S1" and not d["tables"][0]["missing"]
 

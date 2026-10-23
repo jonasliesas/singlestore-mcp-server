@@ -45,8 +45,8 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     monkeypatch.setattr(sas_viya, "_http", no_network)
     monkeypatch.setattr("urllib.request.getproxies", lambda: {})  # kernel_env: no proxy route to probe
     monkeypatch.setitem(sas_viya._route, "direct", False)
-    resets: list[float] = []
-    monkeypatch.setattr(sas_rest, "reset", lambda: resets.append(time.time()))
+    resets: list[str | None] = []
+    monkeypatch.setattr(sas_rest, "reset", lambda name=None: resets.append(name))
     sas_viya._pending.clear()
     return {"home": home, "secrets": secrets, "resets": resets, "file": home / "sas.json"}
 
@@ -108,12 +108,11 @@ def test_save_activate_and_settings_follow_the_active_one(env) -> None:
     state = app.sas_connection_activate("B").structured_content
     assert state["active"] == "B" and [c["active"] for c in state["connections"]] == [False, True]
     assert sas_viya.settings()["url"] == URL_B and sas_viya.settings()["compute_context"] == "Other"
-    assert len(env["resets"]) == 1  # the Workspace's SAS sessions restart on the other Viya
+    assert env["resets"] == []  # every connection has its own SAS sessions: nothing restarts
     app.sas_connection_activate("B")
-    assert len(env["resets"]) == 1  # already active: nothing to restart
     with pytest.raises(LookupError):
         app.sas_connection_activate("nope")
-    assert len(env["resets"]) == 1
+    assert env["resets"] == []
     assert sas_viya.kernel_env()["SINGLESTORE_MCP_SAS_URL"] == URL_B
     assert json.loads(sas_viya.kernel_env()["SINGLESTORE_MCP_SAS_TOKEN_CMD"])[-1] == "B"
 
@@ -121,7 +120,7 @@ def test_save_activate_and_settings_follow_the_active_one(env) -> None:
 def test_save_with_activate_and_duplicate_names(env) -> None:
     app.sas_connection_save(_conn("A", URL_A))
     app.sas_connection_save(_conn("B", URL_B), activate=True)
-    assert sas_viya.active_name() == "B" and len(env["resets"]) == 1
+    assert sas_viya.active_name() == "B" and env["resets"] == []
     with pytest.raises(ValueError, match="already exists"):
         sas_viya.save_connection(_conn("A", URL_B))
     with pytest.raises(ValueError, match="name"):
@@ -172,7 +171,7 @@ def test_delete_removes_the_sign_in_and_moves_active(env) -> None:
     state = app.sas_connection_delete("A").structured_content
     assert "sas-viya:A#token" not in env["secrets"]
     assert state["active"] == "B" and [c["name"] for c in state["connections"]] == ["B"]
-    assert len(env["resets"]) == 1  # the active one went away
+    assert env["resets"] == ["A"]  # its sessions end with it
     app.sas_connection_delete("B")
     assert sas_viya.saved() == [] and sas_viya.active_name() is None
     with pytest.raises(LookupError):
@@ -183,11 +182,11 @@ def test_editing_the_active_connection_restarts_the_sessions_only_when_needed(en
     app.sas_connection_save(_conn("A", URL_A))
     app.sas_connection_save(_conn("B", URL_B))
     app.sas_connection_save({**sas_viya.settings("B"), "startup_code": "%put b;"}, original_name="B")
-    assert env["resets"] == []  # not the active one
+    assert env["resets"] == ["B"]  # B's own sessions (a tab may use B without it being active)
     app.sas_connection_save({**sas_viya.settings("A"), "libref": "S2"}, original_name="A")
-    assert env["resets"] == []  # nothing the session depends on
+    assert env["resets"] == ["B"]  # nothing the session depends on
     app.sas_connection_save({**sas_viya.settings("A"), "startup_code": "%put a;"}, original_name="A")
-    assert len(env["resets"]) == 1
+    assert env["resets"] == ["B", "A"]
 
 
 # ------------------------------------------------------------------ the original bug
@@ -261,3 +260,43 @@ def test_unreadable_file_raises_instead_of_reading_as_empty(env, monkeypatch: py
         sas_viya.settings()
     with pytest.raises(OSError):
         sas_viya.save_settings({"startup_code": "x"})
+
+
+# ------------------------------------------------------------------ other SAS tools' sign-ins (and the tests' gating)
+
+def test_foreign_sign_in_is_reused_unless_turned_off(env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Why the SAS tests also pass without S2_TEST_SAS_SECRETS: with no sign-in of its own, token() reuses the SAS
+    Viya MCP server's cached one (when this Viya accepts it). SINGLESTORE_MCP_SAS_IMPORT=0 turns that off."""
+    cache = tmp_path / ".sas-mcp-server" / "credentials.json"
+    cache.parent.mkdir()
+    access = _jwt("jonas", time.time() + 3600)
+    cache.write_text(json.dumps({"Default": {"access-token": access, "refresh-token": "r"}}), encoding="utf-8")
+    monkeypatch.setattr(sas_viya, "_FOREIGN", [(cache, "vscode")])
+    monkeypatch.setattr(sas_viya, "_http", lambda method, url, **k: (200, {"id": "jonas"}))  # @currentUser accepts it
+    sas_viya.save_connection(_conn("Zeus", URL_A))
+    monkeypatch.setenv("SINGLESTORE_MCP_SAS_IMPORT", "0")
+    assert sas_viya.token_info("Zeus")["foreign_available"] is False
+    with pytest.raises(sas_viya.NeedsSignIn):
+        sas_viya.token(name="Zeus")
+    monkeypatch.delenv("SINGLESTORE_MCP_SAS_IMPORT")
+    assert sas_viya.token(name="Zeus") == access
+    assert json.loads(env["secrets"]["sas-viya:Zeus#token"])["source"] == "SAS Viya MCP server sign-in"
+
+
+def test_test_suite_sas_sign_in_modes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import support
+
+    for k in ("S2_TEST_SAS_SIGNIN", "S2_TEST_SAS_SECRETS", "SINGLESTORE_MCP_SAS_IMPORT"):
+        monkeypatch.delenv(k, raising=False)
+    assert support.sas_signin_mode() == "any" and not support._copy_secrets()
+    assert "SINGLESTORE_MCP_SAS_IMPORT" not in support.server_env(tmp_path, tmp_path)
+    monkeypatch.setenv("S2_TEST_SAS_SECRETS", "1")
+    assert support._copy_secrets()
+    monkeypatch.setenv("S2_TEST_SAS_SIGNIN", "import")
+    assert not support._copy_secrets()
+    monkeypatch.setenv("S2_TEST_SAS_SIGNIN", "own")
+    monkeypatch.delenv("S2_TEST_SAS_SECRETS")
+    assert support._copy_secrets() and support.server_env(tmp_path, tmp_path)["SINGLESTORE_MCP_SAS_IMPORT"] == "0"
+    monkeypatch.setenv("S2_TEST_SAS_SIGNIN", "bogus")
+    with pytest.raises(ValueError):
+        support.sas_signin_mode()

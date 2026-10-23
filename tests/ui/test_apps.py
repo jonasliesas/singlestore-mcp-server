@@ -159,6 +159,39 @@ def test_sql_editor_save_as_filter_keeps_focus(workspace) -> None:
     _no_problems(page, errors, "SQL editor Save as filter")
 
 
+def test_notebook_open_save_as_dialog(workspace) -> None:
+    """The Notebook's Open / Save as is the same large dialog as the SQL Editor's; Escape and Cancel close it, the
+    "Discard unsaved changes?" prompt stays inline. Its page came without CodeMirror (the Workspace had it from
+    the SQL Editor's page) and still has a working editor."""
+    page, errors, ws = workspace
+    ws.locator('nav.ws-rail button[aria-label^="Notebook"]').click()
+    nb = find_frame(page, re.compile(r"^Notebook"), 25)
+    assert wait_js(nb, "typeof CM === 'object' && !!CM.EditorView", 20), "CodeMirror missing in the Notebook page"
+    box = "(() => { const p = document.querySelector('.nb-files'); if (!p || p.hidden) return null;" \
+          " const r = p.getBoundingClientRect(); return [p.classList.contains('dialog'), r.width / innerWidth, r.height / innerHeight]; })()"
+    head = nb.locator(".nb-head")
+
+    head.get_by_role("button", name="Open", exact=True).click()
+    shown = wait_js(nb, box, 10)
+    assert shown and shown[0] and shown[1] > 0.85 and shown[2] > 0.85, f"Open isn't the large dialog: {shown}"
+    assert wait_js(nb, "/\\.ipynb|Loading|No .ipynb/.test(document.querySelector('.nb-files').innerText)", 20)
+    page.keyboard.press("Escape")  # the focus is still on the toolbar's Open button
+    assert wait_js(nb, "document.querySelector('.nb-files').hidden", 5), "Escape didn't close Open"
+
+    head.get_by_role("button", name="Save as", exact=True).click()
+    shown = wait_js(nb, box, 10)
+    assert shown and shown[0], f"Save as isn't the large dialog: {shown}"
+    name = nb.get_by_label("File name", exact=True)
+    expect(name).to_be_focused(timeout=10_000)
+    page.keyboard.press("Escape")
+    assert wait_js(nb, "document.querySelector('.nb-files').hidden && !document.querySelector('.nb-files').classList.contains('dialog')", 5)
+
+    head.get_by_role("button", name="Save as", exact=True).click()
+    nb.locator(".nb-files").get_by_role("button", name="Cancel", exact=True).click()
+    assert wait_js(nb, "document.querySelector('.nb-files').hidden", 5), "Cancel didn't close Save as"
+    _no_problems(page, errors, "Notebook Open / Save as")
+
+
 def test_sql_editor_streams_a_big_result(workspace) -> None:
     """LIMIT 100000: the first rows show before the rest has been read (the ROADMAP's "fetches all rows before
     showing any"), the total appears when loading ends, scrolling loads more rows into the grid, and Export CSV

@@ -83,7 +83,7 @@ def collect(min_ms: int = MIN_RUNTIME_MS, hours: float | None = None, limit: int
             " FROM information_schema.MV_TRACE_EVENTS WHERE EVENT_TYPE = 'Query_completion'"
         ),
         # The cluster's clock offset from UTC, so the app can show times in the viewer's time zone.
-        lambda: _query("SELECT TIMESTAMPDIFF(MINUTE, UTC_TIMESTAMP(), NOW()) AS offset_min"),
+        lambda: _query("SELECT TIMESTAMPDIFF(MINUTE, UTC_TIMESTAMP(), NOW()) AS offset_min, NOW() AS now"),
         # Keep the local copy for the Trends tab up to date (only events newer than the last sync).
         history_store.safe_sync,
         trace_status,
@@ -114,15 +114,19 @@ def collect(min_ms: int = MIN_RUNTIME_MS, hours: float | None = None, limit: int
         "tables": history_store.table_names(r["sql_head"], r["db"] or None),
     } for r in rows]
     total = info[0] if info else {}
+    kept = _kept_events(events, total, offset, min_ms, hours, limit)
+    events += kept["events"]
     plan_stats, plan_list = _merge_plans(events, plans, hours)
     return {
         "min_ms": min_ms,
         "hours": hours,
         "limit": limit,
-        "limited": len(events) >= limit,
+        "limited": len(rows) >= limit,
         "events": events,
         "history": {"events": int(total.get("events") or 0), "oldest": jsonable(total.get("oldest")),
                     "newest": jsonable(total.get("newest"))},
+        # Older runs the cluster's trace no longer has (restart, ring buffer), from the local copy of the history.
+        "kept": {"runs": len(kept["events"]), "oldest": kept["oldest"], "error": kept["error"]},
         "utc_offset_min": int(offset[0]["offset_min"]) if offset else 0,
         "enabled_hint": None if total.get("events") else _ENABLE_HINT,
         "trace": trace,
@@ -130,6 +134,45 @@ def collect(min_ms: int = MIN_RUNTIME_MS, hours: float | None = None, limit: int
         "plans": plan_list,
         "plancache_error": None if plans is not None else "The plan cache couldn't be read (MV_PLANCACHE).",
     }
+
+
+def _kept_event(r: dict[str, Any]) -> dict[str, Any]:
+    """A run from the local store, shaped like a live list event. Only the start of its SQL was kept."""
+    sample = r["sample"] or ""
+    try:
+        node_id = int(str(r["key"]).split(":")[0])
+    except ValueError:
+        node_id = 0
+    return {
+        "key": r["key"], "node_id": node_id, "finished": r["finished"], "started": None, "ms": int(r["ms"] or 0),
+        "user": r["user"], "database": r["database"], "category": r["category"], "ok": r["ok"], "rows": r["rows"],
+        "error_code": r["error_code"], "plan_id": r["plan_id"], "pool": None,
+        "sql": sas_ep.masked(sample)[:_LIST_SQL_CHARS], "sql_truncated": len(sample) >= history_store._SAMPLE_CHARS,
+        "shape": r["shape"], "origin": r["origin"], "stmt": r["stmt"] or history_store.statement_key(sample, r["database"]),
+        "tables": r["tables"], "kept": True,
+    }
+
+
+def _kept_events(events: list[dict[str, Any]], total: dict[str, Any], offset: list[dict[str, Any]], min_ms: int,
+                 hours: float | None, limit: int) -> dict[str, Any]:
+    """Stored runs older than the trace's oldest event (in the period), so the list shows what the Usage tab counts."""
+    import datetime as _dt
+
+    oldest = total.get("oldest")
+    before = oldest.isoformat(sep=" ") if isinstance(oldest, _dt.datetime) else (str(oldest) if oldest else None)
+    since = None
+    now = offset[0].get("now") if offset else None
+    if hours and isinstance(now, _dt.datetime):
+        since = (now - _dt.timedelta(hours=float(hours))).isoformat(sep=" ")
+    elif hours:
+        return {"events": [], "oldest": None, "error": None}
+    try:
+        rows = history_store.kept_runs(before, since, min_ms, max(0, limit - len(events)))
+    except Exception as exc:  # noqa: BLE001 - store unreadable: the live list still stands
+        return {"events": [], "oldest": None, "error": str(exc)[:200]}
+    live = {e["key"] for e in events}
+    out = [_kept_event(r) for r in rows if r["key"] not in live]
+    return {"events": out, "oldest": out[-1]["finished"] if out else None, "error": None}
 
 
 # ------------------------------------------------------------------ event trace configuration
@@ -280,6 +323,9 @@ def _event(key: str) -> dict[str, Any]:
     rows = _query("SELECT TIME, DETAILS FROM information_schema.MV_TRACE_EVENTS"
                   " WHERE NODE_ID = %s AND NODE_START_EPOCH_S = %s AND EVENT_ID = %s", (node, epoch, event_id))
     if not rows:
+        kept = _kept_detail(key)
+        if kept:
+            return kept
         raise LookupError("That query is no longer in the query history (the ring buffer has moved on).")
     details = rows[0]["DETAILS"]
     if isinstance(details, str):
@@ -287,6 +333,27 @@ def _event(key: str) -> dict[str, Any]:
 
         details = json.loads(details or "{}")
     return {"key": key, "node_id": node, "finished": jsonable(rows[0]["TIME"]), **(details or {})}
+
+
+_KEPT_NOTE = ("The cluster's query history no longer has this run (it restarted or its ring buffer moved on); the "
+              "Workspace kept it locally with the start of its SQL only.")
+
+
+def _kept_detail(key: str) -> dict[str, Any] | None:
+    """A run only the local store still has, in the trace's DETAILS field names (``kept``: no full SQL)."""
+    try:
+        r = history_store.kept_run(key)
+    except Exception:  # noqa: BLE001 - store unreadable: "no longer in the history"
+        return None
+    if not r:
+        return None
+    truncated = len(r["sample"]) >= history_store._SAMPLE_CHARS
+    return {"key": key, "node_id": int(key.split(":")[0]), "finished": r["finished"], "kept": True,
+            "kept_note": _KEPT_NOTE + (" It was cut there, so the SQL below is incomplete." if truncated else ""),
+            "query_text": sas_ep.masked(r["sample"]), "query_text_truncated": truncated,
+            "duration_ms": r["ms"], "user_name": r["user"], "context_database": r["database"],
+            "success": r["ok"], "error_code": r["error_code"], "query_category": r["category"],
+            "row_count": r["rows"], "plan_id": r["plan_id"]}
 
 
 # ------------------------------------------------------------------ tuning analysis
@@ -598,7 +665,8 @@ def analyze(key: str) -> dict[str, Any]:
 def analyze_event(event: dict[str, Any]) -> dict[str, Any]:
     """Tuning analysis of one query: ``event`` has at least query_text and context_database (a history
     event, or a statement from a workload run with its measured duration_ms)."""
-    target, why_not = _explain_target(event.get("query_text") or "")
+    target, why_not = ((None, "Only the start of this run's SQL was kept, so it can't be explained.")
+                       if event.get("query_text_truncated") else _explain_target(event.get("query_text") or ""))
     database = event.get("context_database") or None
 
     def run_explain() -> dict[str, Any]:
@@ -651,7 +719,7 @@ def analyze_event(event: dict[str, Any]) -> dict[str, Any]:
         "tables": [{k: v for k, v in t.items() if k != "ddl"} | {"ddl": t.get("ddl")} for t in tables],
         "recommendations": recs,
         "stats_tables": _stats_tables(parsed, tables, database),
-        "profile_allowed": _profile_target(event.get("query_text") or "")[0] is not None,
+        "profile_allowed": not event.get("kept") and _profile_target(event.get("query_text") or "")[0] is not None,
         "sas_ep": _ep_card(event, plan),
     }
 
@@ -972,7 +1040,8 @@ def profile_event(key: str, timeout_s: float = 300) -> dict[str, Any]:
     from .. import compare, connections
 
     event = _event(key)
-    target, why_not = _profile_target(event.get("query_text") or "")
+    target, why_not = ((None, "Only the start of this run's SQL was kept locally, so it can't be profiled.")
+                       if event.get("kept") else _profile_target(event.get("query_text") or ""))
     if not target:
         raise ValueError(why_not)
     job = uuid.uuid4().hex[:10]

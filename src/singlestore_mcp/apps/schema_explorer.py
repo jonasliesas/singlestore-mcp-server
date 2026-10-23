@@ -764,6 +764,111 @@ def _skew_summary(d: dict[str, Any]) -> str:
             + " ".join(d["advice"]["notes"][:2]))
 
 
+# Reshard simulation: how the rows would spread with another shard key, without changing anything. The docs'
+# method ("Show the data distribution for a table if you were to reshard on another column or set of columns"):
+# GROUP BY the candidate key reshuffles the groups to the partitions that key hashes to, and the outer GROUP BY
+# PARTITION_ID() (run on the leaves) counts the rows that land on each. It reads the whole table, so the app only
+# runs it on an explicit click; a sample (WHERE RAND() < fraction) reads every row but moves and groups fewer.
+RESHARD_MAX_COLUMNS = 8
+RESHARD_DOCS = SKEW_DOCS  # its section "Show the data distribution for a table if you were to reshard on ..."
+
+
+def reshard_sql(database: str, table: str, columns: list[str], fraction: float | None = None) -> str:
+    """The read-only simulation query for a candidate shard key (``fraction``: sample that share of the rows)."""
+    if not columns:
+        raise ValueError("Pick at least one column for the candidate shard key.")
+    if len(columns) > RESHARD_MAX_COLUMNS:
+        raise ValueError(f"A candidate shard key of at most {RESHARD_MAX_COLUMNS} columns.")
+    if len(set(columns)) != len(columns):
+        raise ValueError("Each column once in the candidate shard key.")
+    fq = f"{quote_identifier(database)}.{quote_identifier(table)}"
+    key = ", ".join(quote_identifier(c) for c in columns)
+    where = ""
+    if fraction is not None:
+        if not 0 < fraction < 1:
+            raise ValueError("The sample fraction must be between 0 and 1.")
+        where = f" WHERE RAND() < {fraction:.6g}"
+    return (f"SELECT WITH(leaf_pushdown=true) SUM(c) AS n_rows, COUNT(*) AS n_keys, PARTITION_ID() AS part"
+            f" FROM (SELECT COUNT(*) AS c FROM {fq}{where} GROUP BY {key}) reshuffle GROUP BY PARTITION_ID()")
+
+
+def reshard_result(current: dict[str, Any], rows: list[dict[str, Any]], columns: list[str],
+                   fraction: float | None) -> dict[str, Any]:
+    """Predicted rows per partition (scaled up from a sample), skew next to the current one, and a reading."""
+    counts = {int(r["part"]): (float(_num(r["n_rows"]) or 0), int(_num(r["n_keys"]) or 0)) for r in rows}
+    parts_now = {p["partition"]: p for p in current.get("partitions") or []}
+    ids = sorted(set(parts_now) | set(counts))
+    scale = 1 / fraction if fraction else 1.0
+    predicted = [{"partition": i, "host": (parts_now.get(i) or {}).get("host"), "rows": round(counts.get(i, (0, 0))[0] * scale),
+                  "keys": counts.get(i, (0, 0))[1], "current_rows": (parts_now.get(i) or {}).get("rows")} for i in ids]
+    stats = skew_stats([{**p, "memory_bytes": 0, "disk_bytes": 0} for p in predicted])
+    sampled_rows = int(sum(c[0] for c in counts.values()))
+    keys = sum(c[1] for c in counts.values())
+    level, cur_rsd, new_rsd = stats["level"], (current.get("rows") or {}).get("rsd_pct"), stats["rows"]["rsd_pct"]
+    notes = []
+    col_txt = ", ".join(columns)
+    if keys and keys < 10 * max(1, len(ids)):
+        notes.append(f"Only {keys:,} distinct value(s) of ({col_txt}){' in the sample' if fraction else ''} for "
+                     f"{len(ids)} partitions: too few to spread evenly - pick more selective columns.")
+    if cur_rsd is not None and new_rsd is not None:
+        better = new_rsd < cur_rsd - 1
+        worse = new_rsd > cur_rsd + 1
+        notes.append(f"Sharding on ({col_txt}) would give {new_rsd} % variation between partitions, against {cur_rsd} % now"
+                     f" ({'more even' if better else 'less even' if worse else 'about the same'}).")
+    if level == "small":
+        notes.append(f"The table has under {SKEW_MIN_ROWS:,} rows, so skew doesn't matter for it either way.")
+    if fraction:
+        notes.append(f"Estimated from a sample of about {fraction * 100:.3g} % of the rows ({sampled_rows:,} rows), scaled up.")
+    return {"columns": columns, "partitions": predicted, "partition_count": len(ids), "rows": stats["rows"],
+            "level": level, "rows_total": stats["rows_total"], "distinct_keys": keys, "sampled_rows": sampled_rows,
+            "fraction": fraction, "largest": stats["largest"], "notes": notes,
+            "current": {"level": current.get("level"), "rows": current.get("rows"), "rows_total": current.get("rows_total")}}
+
+
+def reshard_simulation(database: str, table: str, columns: list[str], sample_rows: int | None = None) -> dict[str, Any]:
+    """Run the reshard simulation for one candidate shard key (read-only)."""
+    if not isinstance(columns, list) or not all(isinstance(c, str) and c for c in columns):
+        raise ValueError("columns must be a list of column names.")
+    current, cols = db.parallel(
+        lambda: table_skew(database, table),
+        lambda: _query("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s",
+                       (database, table)),
+    )
+    known = {r["COLUMN_NAME"] for r in cols}
+    missing = [c for c in columns if c not in known]
+    if missing:
+        raise NotFoundError(f"No column {', '.join(missing)} in {database}.{table} (names are case-sensitive).")
+    if current["kind"] != "distributed":
+        raise ValueError(f"{database}.{table}: {current.get('message') or 'not a distributed table'} Nothing to simulate.")
+    total = current["rows_total"]
+    fraction = None
+    if sample_rows:
+        if sample_rows < 1:
+            raise ValueError("The sample size must be a positive number of rows.")
+        if total and sample_rows < total:
+            fraction = sample_rows / total
+    sql = reshard_sql(database, table, columns, fraction)
+    started = time.monotonic()
+    rows = _query(sql)
+    out = reshard_result(current, rows, columns, fraction)
+    return {"database": database, "table": table, "sql": sql, "elapsed_ms": round((time.monotonic() - started) * 1000),
+            "current_shard": ((current.get("keys") or {}).get("shard") or {}).get("columns") or [],
+            "docs": RESHARD_DOCS, **out}
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=_READ_ONLY)
+def schema_explorer_reshard(database: str, table: str, columns: list[str], sample_rows: int | None = None) -> CallToolResult:
+    """Reshard simulation for the Distribution tab: how a table's rows would spread over the partitions with
+    another shard key (``columns``), next to the current skew - nothing is changed. Uses the docs' query (GROUP BY the
+    candidate key, then GROUP BY PARTITION_ID() on the leaves), which scans the whole table: the app runs it only
+    on an explicit click. ``sample_rows``: estimate from about that many rows (a random sample, scaled up).
+    """
+    d = reshard_simulation(database, table, columns, sample_rows)
+    head = (f"{database}.{table} sharded on ({', '.join(columns)}): {d['level']}, {d['rows']['rsd_pct']} % variation over "
+            f"{d['partition_count']} partitions (now {(d['current']['rows'] or {}).get('rsd_pct')} %).")
+    return tool_result(" ".join([head, *d["notes"]]), d)
+
+
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=_READ_ONLY)
 def schema_explorer_skew(database: str, table: str | None = None) -> CallToolResult:
     """Data skew, for the Schema Explorer's Distribution tab / database "Check skew": rows and data per

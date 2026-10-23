@@ -128,12 +128,27 @@
   .sk-bar.hot { background: var(--s2-err); }
   .sk-lvl-high { color: var(--s2-err); font-weight: 600; } .sk-lvl-moderate { color: var(--s2-warn); font-weight: 600; }
   .sk-lvl-ok { color: var(--s2-ok); } .sk-lvl-small { color: var(--s2-text-3); }
+  .sk-reshard { border-top: 1px solid var(--s2-border-2); padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .sk-reshard p { margin: 0; }
+  .sk-reshard .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .sk-cols { display: flex; flex-wrap: wrap; gap: 4px 12px; max-height: 110px; overflow: auto; font-size: var(--s2-fs-xs); font-family: var(--s2-mono); }
+  .sk-scanwarn { color: var(--s2-warn); }
 
   /* Source switch: SingleStore / SAS libraries / CAS */
   .se-sources { display: flex; border: 1px solid var(--s2-border); border-radius: var(--s2-radius-sm); overflow: hidden; }
   .se-sources button { flex: 1; border: 0; background: transparent; padding: 3px 4px; font-size: 11px; cursor: pointer; color: var(--s2-text-2); white-space: nowrap; }
   .se-sources button + button { border-left: 1px solid var(--s2-border); }
   .se-sources button.on { background: var(--s2-info-bg); color: var(--s2-info); font-weight: 600; }
+  /* SingleStore kinds: SS = SAS SpeedyStore caslib (SingleStore purple), S2 standard connector caslib (grey-blue
+     outline), S2 SAS/ACCESS libname (.col), 9 = SAS 9 library over SAS/CONNECT */
+  .se-ico.ss { background: #820ddf; color: #fff; }
+  .se-ico.s2-std { background: transparent; color: #5b7290; box-shadow: inset 0 0 0 1px #5b7290; }
+  .se-ico.sas9 { background: var(--s2-ok-bg); color: var(--s2-ok); }
+  .s2-badge.ss { background: #820ddf; color: #fff; border-color: #820ddf; }
+  .s2-badge.s2-std { background: transparent; color: #5b7290; border: 1px solid #5b7290; }
+  .se-code { border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); padding: 8px 10px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 6px; }
+  .se-code pre { margin: 0; max-height: 260px; overflow: auto; white-space: pre; }
+  .se-code h3 { margin: 0; font-size: var(--s2-fs-xs); text-transform: uppercase; letter-spacing: .04em; color: var(--s2-text-3); font-weight: 600; }
 
   @media (max-width: 640px) {
     .se { grid-template-columns: minmax(0, 1fr); height: auto; }
@@ -160,6 +175,7 @@ const state = {
   details: new Map(),        // key -> {status, data, error}
   previews: new Map(),       // key -> {status, data, error}
   skew: new Map(),           // key(db, table) -> {status, data, error}: Distribution tab (on demand)
+  reshard: new Map(),        // key(db, table) -> {cols, sample, status, data, error}: reshard simulation (on a click only)
   dbSkew: new Map(),         // db -> {status, data, error}: the database's "Check skew" (on demand)
   banner: null,              // error from the initial tool call
   pending: null,             // tool input args before the result arrives
@@ -534,25 +550,70 @@ function analyzePanel(db, table) {
 // The tree lists libraries → tables; a table shows its columns (type, length, format, label) and a preview.
 // SAS/ACCESS libraries on SingleStore (engine S2 / SSTORE) and SingleStore caslibs show their database
 // with a link to it in the SingleStore source.
-const SOURCES = [["s2", "SingleStore"], ["sas", "SAS libraries"], ["cas", "CAS"]];
+// "SAS 9" (SAS/CONNECT libraries in the same Compute session) only when the active Viya connection has a SAS 9 sign-on.
+const SOURCES = [["s2", "SingleStore"], ["sas", "SAS libraries"], ["cas", "CAS"], ["sas9", "SAS 9"]];
 const sx = {
-  libs: { sas: null, cas: null }, loading: { sas: false, cas: false }, error: { sas: null, cas: null },
+  libs: { sas: null, cas: null, sas9: null }, loading: { sas: false, cas: false, sas9: false }, error: { sas: null, cas: null, sas9: null },
   tables: new Map(),     // "sas|LIB" -> {status, data, error}
   columns: new Map(),    // "sas|LIB\u0000T" -> {status, data, error}
   previews: new Map(),   // same key -> {status, data, error}
-  sel: { sas: null, cas: null },  // {lib, table|null}
+  sel: { sas: null, cas: null, sas9: null },  // {lib, table|null}
   expanded: new Set(),
+  code: new Map(),       // "sas|LIB" -> {status, data, error, open} ("Show code")
 };
+const sas9On = () => { const d = viya.data; const c = d?.connections?.find((x) => x.name === d.active); return !!(c?.sas9_server && c?.sas9_signon?.trim()); };
+// The library's code ("Show code"): the LIBNAME / CASLIB statement rebuilt by the server, passwords as placeholders.
+async function toggleLibCode(src, lib) {
+  const k = skey(src, lib);
+  const cur = sx.code.get(k);
+  if (cur?.open) { cur.open = false; renderRight(); return; }
+  if (cur && cur.status === "ok") { cur.open = true; renderRight(); return; }
+  sx.code.set(k, { status: "loading", open: true });
+  renderRight();
+  try {
+    const data = src === "cas" ? await call("cas_caslib_code", { caslib: lib }) : await call("sas_library_code", { library: lib });
+    sx.code.set(k, { status: "ok", data, open: true });
+  } catch (e) { sx.code.set(k, { status: "error", error: e, open: true }); }
+  renderRight();
+}
+function codeBlock(title, code) {
+  return [title ? h("h3", {}, title) : null, h("pre", { class: "s2-pre s2-mono" }, code),
+    h("div", { class: "s2-toolbar" },
+      h("button", { class: "s2-btn", onclick: () => S2.copy(code, "Code copied") }, "Copy"),
+      h("button", { class: "s2-btn", title: "Open in a new SQL Editor tab (runs as plain SAS code; nothing is run now)",
+        onclick: () => { if (S2.embedded()) S2.openView("sql:new", { sql: code, language: "procsql" }); else S2.copy(code, "Code copied: paste it in the SQL Editor"); } },
+      "Open in SQL Editor"))];
+}
+function libCodePanel(src, lib) {
+  const c = sx.code.get(skey(src, lib));
+  if (!c?.open) return null;
+  let body;
+  if (c.status === "loading") body = [h("div", { class: "s2-small" }, h("span", { class: "s2-spinner" }), " Rebuilding the code…")];
+  else if (c.status === "error") body = [S2.errorBox(c.error)];
+  else if (src === "cas") body = [...codeBlock("CASLIB statement", c.data.statement), ...codeBlock("table.addCaslib (PROC CAS)", c.data.action)];
+  else body = codeBlock(null, c.data.code);
+  return h("div", { class: "se-code", "data-lib-code": lib },
+    h("div", { class: "s2-small s2-faint" }, "Reconstructed from the library's current settings: passwords and tokens are placeholders, never the real values."),
+    ...body);
+}
+const kindText = (m) => (m?.singlestore_kind === "speedystore" ? "SpeedyStore" : m?.singlestore_kind === "standard" ? "SingleStore (standard)" : "SingleStore");
 const skey = (src, lib, t) => (t == null ? `${src}|${lib}` : `${src}|${lib}\u0000${t}`);
 async function loadSasLibs(src = state.source, force = false) {
   loadViya();
   if (sx.loading[src] || (sx.libs[src] && !force)) return;
   sx.loading[src] = true; sx.error[src] = null;
+  sasSession.refresh();
   render();
   try {
-    sx.libs[src] = src === "cas" ? (await call("cas_caslibs", {})).caslibs : (await call("sas_libraries", { refresh: force })).libraries;
+    if (src === "sas9") {
+      const d = await call("sas9_libraries", { refresh: force });
+      sx.libs.sas9 = d.libraries;
+      sx.libs.sas = null;  // the SAS libraries list has them too now
+      if (d.failed?.length) S2.toast(`SAS 9: couldn't assign ${d.failed.join(", ")}`, "err");
+    } else sx.libs[src] = src === "cas" ? (await call("cas_caslibs", {})).caslibs : (await call("sas_libraries", { refresh: force })).libraries;
   } catch (e) { sx.error[src] = e; }
   sx.loading[src] = false;
+  sasSession.refresh();
   render();
 }
 const sasLibMeta = (src, lib) => (sx.libs[src] ?? []).find((l) => l.name === lib) ?? null;
@@ -612,6 +673,9 @@ function setSource(src) {
 // The active SAS Viya connection (Connections → SAS Viya), shown in the header of the SAS sources, with a
 // quick switch when there are several. The list is cheap (no call to Viya).
 const viya = { data: null, loading: false };
+// The active connection's SAS session, started in the background when the Workspace opens (sas_prewarm).
+const sasSessionSlot = h("span", { class: "se-sas-session" });
+const sasSession = S2.sasSessionWatch(() => ({}), (st) => sasSessionSlot.replaceChildren(S2.sasSessionBadge(st) ?? ""));
 async function loadViya(force = false) {
   if (viya.loading || (viya.data && !force)) return;
   viya.loading = true;
@@ -620,9 +684,15 @@ async function loadViya(force = false) {
   render();
 }
 function forgetSas() {
-  for (const src of ["sas", "cas"]) { sx.libs[src] = null; sx.error[src] = null; sx.sel[src] = null; }
-  sx.tables.clear(); sx.columns.clear(); sx.previews.clear(); sx.expanded.clear();
+  for (const src of ["sas", "cas", "sas9"]) { sx.libs[src] = null; sx.error[src] = null; sx.sel[src] = null; }
+  sx.tables.clear(); sx.columns.clear(); sx.previews.clear(); sx.expanded.clear(); sx.code.clear();
 }
+// Another active SingleStore connection: the automatic SingleStore library points elsewhere (re-read the list).
+window.addEventListener("s2:connection-changed", () => {
+  sx.libs.sas = null; sx.code.clear();
+  for (const k of [...sx.tables.keys()]) if (k.startsWith("sas|")) sx.tables.delete(k);
+  if (state.source === "sas") loadSasLibs("sas", true);
+});
 async function switchViya(name, select) {
   if (select) select.disabled = true;
   try { viya.data = await call("sas_connection_activate", { name }); }
@@ -685,7 +755,8 @@ function renderSasTree() {
   const items = [];
   if (sx.error[src]) items.push(h("div", { class: "se-sub" }, S2.errorBox(sx.error[src]), h("button", { class: "s2-btn", onclick: () => loadSasLibs(src, true) }, "Retry")));
   if (!sx.libs[src]) {
-    if (sx.loading[src]) items.push(h("div", { class: "se-sub" }, h("span", { class: "s2-spinner" }), src === "cas" ? "Connecting to CAS…" : "Starting the SAS session (the first time takes a while)…"));
+    if (sx.loading[src]) items.push(h("div", { class: "se-sub" }, h("span", { class: "s2-spinner" }), src === "cas" ? "Connecting to CAS…"
+      : src === "sas9" ? "Signing on to SAS 9 and assigning its libraries…" : "Starting the SAS session (the first time takes a while)…"));
     treeEl.replaceChildren(...items);
     return;
   }
@@ -699,9 +770,10 @@ function renderSasTree() {
     const isSel = sx.sel[src]?.lib === l.name && !sx.sel[src].table;
     const kind = src === "cas" ? l.type : l.engine;
     items.push(h("button", { class: `se-row db${isSel ? " sel" : ""}`, onclick: () => selectSasLib(src, l.name),
-      title: [l.name, kind, l.singlestore ? `SingleStore database ${l.database ?? "?"}` : null, l.path, l.description].filter(Boolean).join("\n") },
-      h("span", { class: `se-caret${open ? " open" : ""}` }, "▶"),
-      h("span", { class: `se-ico${l.singlestore ? " col" : ""}`, title: l.singlestore ? "SingleStore" : kind }, l.singlestore ? "S2" : src === "cas" ? "C" : "L"),
+      title: [l.name, kind, l.badge_title ?? (l.singlestore ? `SingleStore database ${l.database ?? "?"}` : null), l.path, l.description].filter(Boolean).join("\n") },
+      h("span", { class: "se-caret" + (open ? " open" : "") }, "▶"),
+      h("span", { class: `se-ico${l.badge_style && l.badge_style !== "s2" ? ` ${l.badge_style}` : l.singlestore ? " col" : ""}`, "data-badge": l.badge ?? "",
+        title: l.badge_title ?? (l.singlestore ? "SingleStore" : kind) }, l.badge ?? (l.singlestore ? "S2" : src === "cas" ? "C" : "L")),
       h("span", { class: "se-name" }, highlight(l.name, q)),
       h("span", { class: "se-count" }, t?.status === "ok" ? tables.length : kind ?? "")));
     if (!open) continue;
@@ -736,20 +808,28 @@ function renderSasRight() {
     disabled: !meta.database, onclick: () => openS2Database(meta.database) }, `Open ${meta.database ?? "database"} in SingleStore →`) : null;
   const badges = h("div", { class: "se-badges" },
     h("span", { class: "s2-badge plain" }, src === "cas" ? meta?.type ?? "caslib" : `engine ${meta?.engine ?? "?"}`),
-    meta?.singlestore ? h("span", { class: "s2-badge info", title: meta.server ?? "" }, `SingleStore · ${meta.database ?? "?"}`) : null,
+    meta?.singlestore ? h("span", { class: `s2-badge ${meta.badge_style === "ss" || meta.badge_style === "s2-std" ? meta.badge_style : "info"}`,
+      title: meta.badge_title ?? meta.server ?? "" }, `${kindText(meta)} · ${meta.database ?? "?"}`) : null,
+    meta?.auto ? h("span", { class: "s2-badge plain", title: meta.badge_title ?? "" }, `automatic · ${meta.connection ?? ""}`) : null,
+    meta?.sas9 ? h("span", { class: "s2-badge ok", title: meta.badge_title ?? "" }, `SAS 9 · ${meta.remote_server ?? "?"}`) : null,
     meta?.personal ? h("span", { class: "s2-badge plain" }, "personal") : null,
     meta?.path ? h("span", { class: "s2-badge plain s2-mono", title: meta.path }, meta.path.length > 60 ? `…${meta.path.slice(-58)}` : meta.path) : null);
   if (!sel.table) {
     const t = sx.tables.get(skey(src, sel.lib));
+    const codeOpen = sx.code.get(skey(src, sel.lib))?.open;
     const head = h("div", { class: "se-head" }, h("div", { class: "se-titlebox" }, h("h2", {}, sel.lib), badges),
-      h("div", { class: "s2-toolbar" }, s2link, h("button", { class: "s2-btn", onclick: () => loadSasTablesSE(src, sel.lib, true) }, "↻ Refresh")));
-    if (!t || t.status === "loading") return [head, h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Loading tables…")];
-    if (t.status === "error") return [head, S2.errorBox(t.error)];
-    if (t.data.problem) return [head, S2.errorBox(new Error(t.data.problem))];
-    if (!t.data.tables.length) return [head, placeholder("No tables in this library")];
+      h("div", { class: "s2-toolbar" }, s2link,
+        h("button", { class: "s2-btn", "aria-pressed": String(!!codeOpen), title: src === "cas" ? "The CASLIB statement and table.addCaslib for this caslib, rebuilt from its settings"
+          : "The LIBNAME statement for this library, rebuilt from its settings", onclick: () => toggleLibCode(src, sel.lib) }, "</> Show code"),
+        h("button", { class: "s2-btn", onclick: () => loadSasTablesSE(src, sel.lib, true) }, "↻ Refresh")));
+    const code = libCodePanel(src, sel.lib);
+    if (!t || t.status === "loading") return [head, code, h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Loading tables…")];
+    if (t.status === "error") return [head, code, S2.errorBox(t.error)];
+    if (t.data.problem) return [head, code, S2.errorBox(new Error(t.data.problem))];
+    if (!t.data.tables.length) return [head, code, placeholder("No tables in this library")];
     const rows = t.data.tables.map((x) => ({ Name: x.name, Kind: src === "cas" ? (x.loaded ? "in memory" : "source") : (x.type ?? "DATA").toLowerCase(),
       Rows: x.rows ?? null, Label: x.label ?? "" }));
-    return [head, h("div", { class: "s2-small s2-faint", style: { marginBottom: "6px" } }, "Click a row to open the table."),
+    return [head, code, h("div", { class: "s2-small s2-faint", style: { marginBottom: "6px" } }, "Click a row to open the table."),
       S2.dataTable(["Name", "Kind", "Rows", "Label"], rows, { maxHeight: "440px", onRowClick: (r) => selectSasTable(src, sel.lib, r.Name),
         render: { Rows: (v) => (v == null ? "–" : fmt.number(v)) } })];
   }
@@ -786,9 +866,10 @@ function renderSasRight() {
 }
 
 function sourceSwitch() {
-  return h("div", { class: "se-sources", role: "tablist", "aria-label": "Source" }, SOURCES.map(([id, label]) =>
+  return h("div", { class: "se-sources", role: "tablist", "aria-label": "Source" }, SOURCES.filter(([id]) => id !== "sas9" || state.source === id || sas9On()).map(([id, label]) =>
     h("button", { role: "tab", "aria-selected": String(state.source === id), class: state.source === id ? "on" : "",
-      title: id === "s2" ? "SingleStore databases on the active connection" : id === "sas" ? "SAS libraries in your SAS session on Viya (Compute)" : "Caslibs on the CAS server",
+      title: id === "s2" ? "SingleStore databases on the active connection" : id === "sas" ? "SAS libraries in your SAS session on Viya (Compute)"
+        : id === "sas9" ? "SAS 9 libraries through SAS/CONNECT (signs on to the SAS 9 server from your SAS session on Viya)" : "Caslibs on the CAS server",
       onclick: () => setSource(id) }, label)));
 }
 
@@ -954,7 +1035,87 @@ function skewBody(db, table) {
     largest ? h("div", { class: "s2-small" }, h("strong", {}, "Largest partitions: "), largest) : null,
     h("div", {}, h("h3", {}, "Rows per partition (master copies)"), parts),
     h("div", {}, h("h3", {}, "Per leaf"), leaves),
-    h("div", { class: "s2-small s2-faint" }, "From information_schema.TABLE_STATISTICS (rows, memory) and COLUMNAR_SEGMENTS (disk); read when you open this tab."));
+    h("div", { class: "s2-small s2-faint" }, "From information_schema.TABLE_STATISTICS (rows, memory) and COLUMNAR_SEGMENTS (disk); read when you open this tab."),
+    reshardBox(db, table, d));
+}
+
+// Reshard simulation: how the rows would spread with another shard key, nothing changed. The docs' query (GROUP BY the
+// candidate key, then GROUP BY PARTITION_ID()) scans the whole table, so it runs only when the user clicks Simulate.
+const BIG_SCAN_ROWS = 1_000_000;
+function reshardState(db, table) {
+  const k = key(db, table);
+  if (!state.reshard.has(k)) state.reshard.set(k, { cols: [], sample: "", status: null, data: null, error: null });
+  return state.reshard.get(k);
+}
+async function runReshard(db, table) {
+  const r = reshardState(db, table);
+  if (!r.cols.length || r.status === "loading") return;
+  const sample = Number(String(r.sample).replace(/[\s,_]/g, ""));
+  r.status = "loading"; r.error = null;
+  renderRight();
+  try {
+    r.data = await call("schema_explorer_reshard", { database: db, table, columns: [...r.cols], ...(sample > 0 ? { sample_rows: Math.round(sample) } : {}) });
+    r.status = "ok";
+  } catch (e) { r.status = "error"; r.error = e; }
+  if (state.sel?.db === db && state.sel?.table === table && state.tab === "skew") renderRight();
+}
+function reshardBox(db, table, d) {
+  const r = reshardState(db, table);
+  const columns = (state.details.get(key(db, table))?.data?.columns ?? []).map((c) => c.name);
+  const current = new Set(d.advice?.shard_columns?.map((c) => c.replace(/ DESC$/, "")) ?? []);
+  const pick = h("div", { class: "sk-cols", role: "group", "aria-label": "Candidate shard key columns" },
+    columns.map((c) => h("label", { title: current.has(c) ? "In the current shard key" : null },
+      h("input", { type: "checkbox", checked: r.cols.includes(c), onchange: (e) => {
+        r.cols = e.target.checked ? [...r.cols, c] : r.cols.filter((x) => x !== c);
+        renderRight();
+      } }), ` ${c}`, current.has(c) ? h("span", { class: "s2-faint" }, " (now)") : null)));
+  const rows = d.rows_total;
+  const sampleInput = h("input", { class: "s2-input", type: "number", min: "1", step: "1000", value: r.sample, placeholder: "all rows",
+    "aria-label": "Sample size (rows)", style: { width: "130px" }, oninput: (e) => { r.sample = e.target.value; } });
+  const warn = rows >= BIG_SCAN_ROWS
+    ? `This reads all ${fmt.number(rows)} rows of the table and moves them between the leaves (grouped by the candidate key): on a big table it can take a while and load the cluster. A sample size moves and groups fewer rows (every row is still read).`
+    : `This reads all ${fmt.number(rows)} rows of the table (read-only).`;
+  const out = [];
+  if (r.status === "loading") out.push(h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), ` Simulating (${r.cols.join(", ")})…`));
+  else if (r.status === "error") out.push(S2.errorBox(r.error));
+  else if (r.status === "ok") out.push(reshardResult(db, r.data));
+  return h("div", { class: "sk-reshard", role: "region", "aria-label": "Reshard simulation" },
+    h("h3", {}, "Reshard simulation"),
+    h("p", { class: "s2-small" }, "Estimate how the rows would spread over the partitions with another shard key, without changing anything (",
+      docLink(d.docs, "the docs' query"), ": GROUP BY the candidate key, then by PARTITION_ID())."),
+    columns.length ? pick : h("div", { class: "s2-small s2-faint" }, "Loading the columns…"),
+    h("div", { class: "row" },
+      h("span", { class: "s2-small" }, "Candidate key: "), h("code", {}, r.cols.length ? `(${r.cols.join(", ")})` : "pick columns"),
+      h("label", { class: "s2-small" }, "Sample ", sampleInput, " rows (optional)"),
+      h("button", { class: "s2-btn primary", disabled: !r.cols.length || r.status === "loading", title: warn,
+        onclick: () => runReshard(db, table) }, "Simulate")),
+    h("div", { class: `s2-small${rows >= BIG_SCAN_ROWS ? " sk-scanwarn" : " s2-faint"}`, role: rows >= BIG_SCAN_ROWS ? "note" : null }, warn),
+    ...out);
+}
+function reshardResult(db, x) {
+  const now = x.current?.rows ?? {};
+  const stats = h("div", { class: "se-stats" },
+    stat("Predicted", h("span", { class: `sk-lvl-${x.level}` }, LEVEL_TEXT[x.level]), `Sharded on (${x.columns.join(", ")})`),
+    stat("Row variation", `${pct(x.rows.rsd_pct)}`, "Predicted relative standard deviation of the rows per partition"),
+    stat("Now", pct(now.rsd_pct), `Current row variation${x.current_shard?.length ? ` (shard key ${x.current_shard.join(", ")})` : " (keyless)"}`),
+    stat("Largest vs even", x.rows.max_over_avg_pct == null ? "–" : `+${fmt.number(x.rows.max_over_avg_pct, 1)} %`, "Predicted (max − avg) / avg"),
+    stat("Distinct keys", fmt.number(x.distinct_keys), x.fraction ? "In the sample" : "Distinct values of the candidate key"),
+    stat("Took", `${fmt.number(x.elapsed_ms)} ms`));
+  const maxRows = Math.max(...x.partitions.map((p) => Math.max(p.rows, p.current_rows ?? 0)), 0);
+  const hot = (x.rows.avg ?? 0) * 1.5;
+  const table = S2.dataTable(["Partition", "Leaf", "Now", "Predicted", "Keys"],
+    x.partitions.map((p) => ({ Partition: p.partition, Leaf: p.host, Now: p.current_rows, Predicted: p.rows, Keys: p.keys })), {
+      maxHeight: "260px",
+      render: {
+        Leaf: (v) => h("span", { title: v ?? "" }, shortHost(v)),
+        Now: (v) => [bar(v, maxRows, false), fmt.number(v)],
+        Predicted: (v) => [bar(v, maxRows, x.level !== "small" && v > hot), fmt.number(v)],
+      },
+    });
+  return h("div", { class: "sk" }, stats,
+    h("div", { class: `sk-notes ${x.level}` }, x.notes.map((n) => h("p", {}, n)),
+      h("div", { class: "row" }, h("button", { class: "s2-btn", title: x.sql, onclick: () => checkInEditor(db, x.sql) }, "Query in SQL Editor"))),
+    table);
 }
 function dbSkewBox(db) {
   const s = state.dbSkew.get(db);
@@ -1425,8 +1586,9 @@ function render() {
   const cleanup = state.mode === "cleanup";
   const header = h("div", { class: "s2-header" },
     h("h1", { class: "s2-title" }, cleanup ? "Schema Explorer · Clean up" : "Schema Explorer"),
-    h("span", { class: "s2-subtitle" }, cleanup ? "leftover SAS work tables" : state.source === "sas" ? "SAS libraries (Viya Compute)" : state.source === "cas" ? "caslibs (CAS)" : state.dbs ? `${state.dbs.filter((d) => !d.system).length} databases` : ""),
+    h("span", { class: "s2-subtitle" }, cleanup ? "leftover SAS work tables" : state.source === "sas" ? "SAS libraries (Viya Compute)" : state.source === "sas9" ? "SAS 9 libraries (SAS/CONNECT)" : state.source === "cas" ? "caslibs (CAS)" : state.dbs ? `${state.dbs.filter((d) => !d.system).length} databases` : ""),
     !cleanup && state.source !== "s2" ? viyaSwitch() : null,
+    !cleanup && state.source !== "s2" ? sasSessionSlot : null,
     h("span", { class: "s2-spacer" }),
     cleanup
       ? h("button", { class: "s2-btn", onclick: leaveCleanup, title: "Back to browsing the schema" }, "← Schema")

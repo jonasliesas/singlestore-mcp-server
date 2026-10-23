@@ -200,6 +200,19 @@ async function pollAlerts() {
   alertFirstPoll = false;
 }
 
+// ---------------------------------------------------------------- SAS session
+// Once the Workspace has painted, start the active SAS Viya connection's SAS session in the background (sas_prewarm:
+// Compute with the SingleStore library and the startup code, then CAS), so the first PROC SQL doesn't wait for it.
+// Asked again every 4 minutes while the Workspace is open: the server then checks the session (a state request keeps
+// Viya's idle timeout away) and starts a new one if Viya ended it. Never blocks anything and never asks to sign in
+// (the SAS views show the state); off per connection (Connections → SAS Viya → Edit).
+const SAS_PREWARM_MS = 4 * 60 * 1000;
+const sasPrewarm = () => S2.callTool("sas_prewarm", {}).catch(() => {});
+function startSasPrewarm() {
+  setTimeout(sasPrewarm, 1500);
+  setInterval(sasPrewarm, SAS_PREWARM_MS);
+}
+
 // ---------------------------------------------------------------- views
 function openView(view, handoff) {
   // "notebook:new" (from a notebook's New / Open): a fresh notebook tab.
@@ -431,12 +444,27 @@ const prefetched = new Map();  // uri -> Promise<html | null>
 function sharedHead() {
   return ["s2-shared-css", "s2-ext-apps", "s2-shared-js"].map((id) => document.getElementById(id)?.outerHTML ?? "").join("\n");
 }
-async function fetchPage(uri) {
+// Vendor blocks (CodeMirror ~0.5 MB, the function list, charts) from pages already fetched: a later page that has
+// the same block (the Notebook after the SQL Editor) comes without it and gets this copy back (name -> {hash, html}).
+const vendorBlocks = new Map();
+const VENDOR_BLOCK_RE = new RegExp("<" + "script data-s2-vendor=\"([^\"]+)\" data-s2-hash=\"([0-9a-f]+)\"[^>]*>[\\s\\S]*?<" + "/script>", "g");
+const VENDOR_HAVE_RE = new RegExp("<" + "!--S2:VENDOR-HAVE:([\\w.-]+)--" + ">", "g");
+function keepVendors(html) {
+  for (const m of html.matchAll(VENDOR_BLOCK_RE)) if (vendorBlocks.get(m[1])?.hash !== m[2]) vendorBlocks.set(m[1], { hash: m[2], html: m[0] });
+}
+async function fetchPage(uri, { vendors = true } = {}) {
   const known = pages.get(uri);
-  const res = await S2.callTool("app_page", { uri, ...(headHash ? { head: headHash } : {}), ...(known?.build ? { build: known.build } : {}) });
+  const have = vendors ? Object.fromEntries([...vendorBlocks].map(([name, v]) => [name, v.hash])) : {};
+  const res = await S2.callTool("app_page", { uri, ...(headHash ? { head: headHash } : {}), ...(known?.build ? { build: known.build } : {}),
+    ...(Object.keys(have).length ? { vendors: have } : {}) });
   if (!(res.unchanged && known)) {
     let html = res.html;
     if (res.head_omitted) { const head = sharedHead(); html = html.replace(HEAD_MARKER, () => head); }
+    if (res.vendors_omitted?.length) {
+      if (res.vendors_omitted.some((name) => !vendorBlocks.has(name))) return fetchPage(uri, { vendors: false });
+      html = html.replace(VENDOR_HAVE_RE, (_, name) => vendorBlocks.get(name).html);
+    }
+    keepVendors(html);
     pages.set(uri, { build: res.build, html });
   }
   return pages.get(uri).html;
@@ -475,8 +503,9 @@ async function createFrame(view, handoff) {
   } else if (view === "security") {
     if (handoff?.tab) f.args = { tab: handoff.tab };
   } else if (view === "history") {
-    // The SQL Editor's "Find in Query History" (SAS pushdown): open with the search filled in.
-    if (handoff?.search) f.pending.push({ ...handoff, type: "s2-set-sql" });
+    // The SQL Editor's "Find in Query History" (SAS pushdown): open with the search filled in, or on the
+    // statement's plan-cache entry (``plan``) when only the plan cache knows it.
+    if (handoff?.search || handoff?.plan) f.pending.push({ ...handoff, type: "s2-set-sql" });
   } else if (view === "schema") {
     f.args = ws.args.table ? { database: ws.args.database, table: ws.args.table } : ws.args.database ? { database: ws.args.database } : {};
   }
@@ -545,6 +574,13 @@ window.addEventListener("message", async (ev) => {
   // Another active SAS Viya connection (Connections, or a quick switch in the Schema Explorer / SQL Editor): tell the other views.
   if (msg?.type === "s2-sas-connection-changed") { for (const key of Object.keys(ws.frames)) if (key !== view) deliver(key, { type: "s2-sas-connection-changed", name: msg.name }); return; }
   if (msg?.type === "s2-alerts-changed") { pollAlerts(); return; }
+  // A file browser renamed or deleted a file / folder: the open editors follow it (or mark their text unsaved);
+  // the server already updated the tabs that aren't loaded, so the tab bar re-reads them.
+  if (msg?.type === "s2-files-changed") {
+    for (const key of Object.keys(ws.frames)) if (key !== view) deliver(key, { type: "s2-files-changed", change: msg.change });
+    loadSqlTabs(ws.lastSql).then(() => { renderTabs(); pushContext(); });
+    return;
+  }
   // A note for another view without switching to it (e.g. the SQL Editor's "Update in workload" tells an open
   // Workload view); dropped when that view isn't open (it loads the saved state when it opens).
   if (msg?.type === "s2-notify") { if (ws.frames[msg.view]) deliver(msg.view, msg.payload ?? {}); return; }
@@ -640,6 +676,7 @@ await S2.connect({
       buildShell();
       await loadSqlTabs(data.tab_id);  // sql_editor(new_tab=true) made that tab
       openView(viewDef(data.view) ? data.view : "sql");
+      startSasPrewarm();
       if (data.connection_error) S2.toast(`The active connection fails: ${data.connection_error.slice(0, 160)}`, "err");
     } catch (e) {
       root.replaceChildren(S2.errorBox(e));

@@ -43,6 +43,8 @@ from .db import db, quote_identifier
 MARKER = "/* s2-query-history */"
 
 _CALL = re.compile(r"sasepFunction`?\s*\(\s*'(.*)'\s*\)", re.S | re.I)
+# The same call cut short (a run kept locally stores only the start of its SQL): the parameters read so far.
+_CALL_CUT = re.compile(r"sasepFunction`?\s*\(\s*'(.*)$", re.S | re.I)
 _PARAM = re.compile(r"(\w+)\s*=\s*\\?\"((?:[^\"\\]|\\.)*?)\\?\"")
 _BOOKKEEPING = re.compile(r"\b(?:FROM|INTO|UPDATE|JOIN)\s+`?EP`?\s*\.\s*`?sasep", re.I)
 _SECRET = re.compile(r"password|secret|token", re.I)
@@ -96,11 +98,12 @@ def parse(sql: str | None, database: str | None = None) -> dict[str, Any] | None
     queries joining with per-job EP format functions; {"bookkeeping": True} for EP's own EP.sasep… tables."""
     text = history_store.strip_comments(sql or "")
     m = _CALL.search(sql or "")
-    if m:
-        body = m.group(1)
+    cut = None if m else _CALL_CUT.search(sql or "")
+    if m or cut:
+        body = (m or cut).group(1)
         command = (re.match(r"\s*(\w+)", body) or [None, None])[1]
         params = {k: v for k, v in _PARAM.findall(body) if not _SECRET.search(k)}
-        return {"kind": "job", "command": command, "params": params}
+        return {"kind": "job", "command": command, "params": params, **({"truncated": True} if cut else {})}
     fns = [{"name": f.group(1), "args": [a.strip(" `") for a in f.group(2).split(",") if a.strip(" `")]}
            for f in _FORMAT_FN.finditer(text)]
     if fns:
@@ -432,7 +435,10 @@ def analyze(event: dict[str, Any], plan: dict[str, Any] | None) -> dict[str, Any
                             "input": f"{in_db}.{in_table}" if in_db and in_table else None,
                             "output": f"{p.get('outputDatabase') or in_db}.{out_table}" if out_table else None,
                             "duration_ms": ms, "points": []}
-    if not (in_db and in_table):
+    if info.get("truncated"):
+        card["note"] = ("Only the start of this call's SQL was kept (the cluster's query history no longer has it), so "
+                        "parameters after that are unknown" + ("." if in_db and in_table else " and the table-based checks don't apply."))
+    elif not (in_db and in_table):
         card["note"] = "The call names no input table, so the table-based checks don't apply."
 
     call_end = epoch(event.get("finished"))
@@ -949,6 +955,9 @@ def overview(since: str | None = None, live: list[dict[str, Any]] | None = None)
     fixed_ms = sum(r["plateau"] for r in rows) * (pl["fixed_ms"] if pl else 0)
     return {
         "since": since, "calls": len(calls), "ms": round(total_ms), "failed": sum(r["failed"] for r in rows),
+        # Calls under the Queries list's 1 s minimum (failed fast ones, or all EP calls under a lower trace threshold).
+        "short_calls": sum(1 for c in calls if c["ms"] < SHORT_MS),
+        "live_calls": sum(1 for c in live or [] if c["end"] >= cut), "kept_calls": len(calls) - sum(1 for c in live or [] if c["end"] >= cut),
         "plateau": pl, "plateau_calls": sum(r["plateau"] for r in rows), "plateau_ms": round(plateau_ms),
         "plateau_time_share": round(plateau_ms / total_ms, 3) if total_ms else 0.0,
         "fixed_wait_ms": round(fixed_ms), "rows": rows,
@@ -957,6 +966,9 @@ def overview(since: str | None = None, live: list[dict[str, Any]] | None = None)
         "all_jobs": sum(jobs.values()) or None, "traced_jobs": traced_jobs,
         "fit": rows_fit(ok),
     }
+
+
+SHORT_MS = 1000  # the Query History list's minimum runtime
 
 
 _SOURCE_LABEL = {"job": "SAS job (sasepFunction)", "format": "SAS VA / CAS (format function)"}

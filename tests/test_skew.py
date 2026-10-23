@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from singlestore_mcp.apps import schema_explorer as se
 
 
@@ -72,3 +74,28 @@ def test_partitions_from_the_views() -> None:
     p0, p1 = per["t"]["partitions"]
     assert (p0["host"], p0["rows"], p0["memory_bytes"], p0["disk_bytes"]) == ("leaf-0:3306", 10, 5, 100)
     assert p1["disk_bytes"] == 300
+
+
+def test_reshard_query_is_the_docs_one() -> None:
+    sql = se.reshard_sql("SASDP", "Big`T", ["Make", "Model"])
+    assert sql == ("SELECT WITH(leaf_pushdown=true) SUM(c) AS n_rows, COUNT(*) AS n_keys, PARTITION_ID() AS part"
+                   " FROM (SELECT COUNT(*) AS c FROM `SASDP`.`Big``T` GROUP BY `Make`, `Model`) reshuffle GROUP BY PARTITION_ID()")
+    assert "WHERE RAND() < 0.25 GROUP BY `x`" in se.reshard_sql("d", "t", ["x"], 0.25)
+    for cols, frac in (([], None), (["a", "a"], None), ([f"c{i}" for i in range(9)], None), (["a"], 1.0), (["a"], 0)):
+        with pytest.raises(ValueError):
+            se.reshard_sql("d", "t", cols, frac)
+
+
+def test_reshard_result_against_the_current_skew() -> None:
+    current = se.skew_stats(_parts([90_000, 10_000, 10_000, 10_000]))
+    rows = [{"part": 0, "n_rows": "7500", "n_keys": "700"}, {"part": 1, "n_rows": "7400", "n_keys": "690"},
+            {"part": 2, "n_rows": "7600", "n_keys": "710"}, {"part": 3, "n_rows": "7500", "n_keys": "705"}]
+    r = se.reshard_result(current, rows, ["id"], 0.25)  # a 25 % sample, scaled up
+    assert [p["rows"] for p in r["partitions"]] == [30_000, 29_600, 30_400, 30_000]
+    assert [p["current_rows"] for p in r["partitions"]] == [90_000, 10_000, 10_000, 10_000]
+    assert r["level"] == "ok" and r["rows"]["rsd_pct"] < 2 and r["distinct_keys"] == 2805 and r["sampled_rows"] == 30_000
+    assert "against 115.5 % now (more even)" in " ".join(r["notes"]) and "sample" in r["notes"][-1]
+    # A low-cardinality key: partitions without a value still count (0 rows), and the note says so.
+    few = se.reshard_result(current, [{"part": 2, "n_rows": 130_000, "n_keys": 3}], ["status"], None)
+    assert [p["rows"] for p in few["partitions"]] == [0, 0, 130_000, 0] and few["level"] == "high"
+    assert "Only 3 distinct" in few["notes"][0] and "less even" in few["notes"][1]

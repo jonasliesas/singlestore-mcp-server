@@ -114,9 +114,9 @@ The process Claude starts is a small relay ([`supervisor.py`](src/singlestore_mc
 that runs the real server as a child process. The `restart_server` tool (or
 `/singlestore:restart`) replaces that child, replays the MCP handshake and
 tells Claude that the tools, prompts and resources changed, so Python and app
-changes load in a few seconds without touching `/mcp`. Browser links made
-before a restart stop working. Set `SINGLESTORE_MCP_NO_SUPERVISOR=1` to run
-the server without the relay.
+changes load in a few seconds without touching `/mcp`. Browser links and open
+browser tabs keep working across a restart (see [Browser and desktop window](#browser-and-desktop-window)).
+Set `SINGLESTORE_MCP_NO_SUPERVISOR=1` to run the server without the relay.
 
 Restarts are fast because most of a fresh server's start is loading the MCP
 SDK and the database driver, which don't change when this project's code does.
@@ -207,7 +207,10 @@ left switches between its views:
   `PROCESSLIST` that it still runs this statement); the rows so far stay.
   The editor keeps at most 100,000 rows (about 128 MB) of one result
   (`SINGLESTORE_MCP_EDITOR_MAX_ROWS`); a bigger one is marked *cut off at …*
-  and the statement is ended. Writes and SAS runs still return up to 1,000 rows.
+  and the statement is ended. Confirmed writes stream the same way (a statement
+  that returns rows pages like a SELECT; a DML shows its affected rows): they're
+  sent once, never retried after a dropped connection, and run without the
+  session row limit. SAS results page too (see *SAS* below).
 - Results export to CSV: **Export CSV** first loads every row of the result
   (up to that limit) and writes all of them; sorting a column also loads the
   rest first, so it sorts the whole result. The chart uses the rows loaded.
@@ -260,6 +263,35 @@ Viya connection (Connections → SAS Viya, or the Viya picker in a SAS tab).
   the editor asks: **Overwrite** / **Save as…** / **Cancel**. Save as onto an
   existing file asks **Replace it**. A SAS Content file keeps its media type (a
   SAS Studio program stays a SAS program); a new `.sas` file is saved as one.
+- The **Notebook**'s Open / Save as has the same three locations: a notebook on
+  SAS Content or the SAS server is a `.ipynb` file (SAS Content stores it as
+  `application/x-ipynb+json`, up to 20 MB with outputs), with the same version
+  check on Save. The **Security** view's *Save as .sql…* opens the same file
+  browser, so a DBA script can go straight to SAS Content.
+
+**Rename and delete in the file browser**
+
+Hover a file or folder in Open / Save as (This computer, SAS Content, SAS Server;
+SQL Editor, Notebook, Security) for **Rename** and **Delete**:
+
+- One item at a time, in the folder shown: a rename keeps it in its folder (a
+  file without an extension in the new name keeps its own). **Delete** asks
+  first; a folder is only deleted when it's empty and after you type its name.
+- On this computer only the files the browser lists (`.sql` / `.sas`, or
+  `.ipynb`) and folders are touched, and a delete is permanent (no Recycle Bin).
+  The browser's roots and shortcut folders (user folder, SQL folder, Documents,
+  Desktop, Downloads, `SINGLESTORE_MCP_FILE_ROOTS`), My Folder, top-level SAS
+  Content folders, the SAS server's home and lockdown folders – and the folders
+  above them – are never renamed or deleted.
+- Version checks: the item's ETag is sent as `If-Match` (SAS Content and SAS
+  Server), and a file whose modified time changed since the list was read is
+  left alone (*changed since the list was read – Refresh*).
+- SQL Editor tabs that have the file (or a file in the renamed folder) open
+  follow it to the new path, also tabs not loaded right now and **Recent**; a
+  renamed SAS Content file's new version is handed to the tab, so Save keeps
+  working. A **deleted** file's tab keeps its text as unsaved (● untitled). The
+  Notebook does the same for its file. Backend: `files_rename` / `files_delete`
+  and `viya_files_rename` / `viya_files_delete` (app-only).
 - If the active SAS Viya connection changes, a tab with a file from another
   connection shows *⚠ on Viya &lt;name&gt;*, and Save asks whether to save it to
   the same path on the active connection instead.
@@ -342,8 +374,8 @@ Viya connection (Connections → SAS Viya, or the Viya picker in a SAS tab).
 **SAS: Run as PROC SQL, FedSQL or FedSQL in CAS**
 
 The editor also runs SQL in SAS on your SAS Viya (the active SAS Viya
-connection in [Connections](#connections)), so the same SQL can be tried
-SingleStore-native and through SAS side by side.
+connection in [Connections](#connections), or the one the tab is pinned to), so
+the same SQL can be tried SingleStore-native and through SAS side by side.
 
 - **Run as** (next to the database picker) picks what the tab's SQL runs as:
   **SingleStore SQL**, **PROC SQL** or **FedSQL** (SAS libraries, in the
@@ -354,8 +386,14 @@ SingleStore-native and through SAS side by side.
   SingleStore SQL. The language is never guessed from the SQL.
 - You write only the SQL: the editor wraps it (`proc sql; … quit;`,
   `proc fedsql; … quit;`, CAS `fedSql.execDirect`). A SELECT becomes
-  `CREATE TABLE WORK._S2RES AS …` (CASUSER for CAS), whose rows fill the result
-  grid with their SAS formats applied (dates as dates). Statement splitting,
+  `CREATE TABLE WORK._S2R_<tab> AS …` (each tab has its own result table;
+  CASUSER for CAS), whose rows fill the result grid with their SAS formats
+  applied (dates as dates). The first 1,000 rows come with the result; the rest
+  load as you scroll (Compute data API paging / CAS `table.fetch` from–to),
+  with the total in the status line; sorting and **Export CSV** load them all.
+  PROC SQL keeps up to 100,000 rows in the result table (OUTOBS; a bigger
+  result is marked *cut off*). A result can be paged until the tab runs
+  something else. Statement splitting,
   **Ctrl+Enter** and **Run all** work as for SingleStore SQL (SAS rules: no
   `#` comments or backticks).
 - Text that starts with `proc`, `data`, `%`, `libname`, `options` … runs as
@@ -366,9 +404,51 @@ SingleStore-native and through SAS side by side.
   (`options user=`); without one they're WORK tables, as in SAS. FedSQL
   one-level names are WORK tables; in CAS they're in the picked caslib
   (default CASUSER).
-- **⚙** (SAS options, per tab): PROC SQL **OUTOBS** (default: the 1000-row
-  cap), **NOEXEC** and **FEEDBACK**, **Show pushdown** (on by default) and
-  **Restart SAS session**.
+- **⚙** (SAS options, per tab): PROC SQL **OUTOBS** (default: 100,000 rows
+  kept for paging), **NOEXEC** and **FEEDBACK**, **Show pushdown** (on by
+  default), the tab's **SAS Viya connection** and **Restart SAS session**.
+- **Long runs and Stop.** A SAS run goes to the background on the server; the
+  status line shows *Running in SAS… 1 min 12 s* and **Stop**. Stop cancels the
+  job (Compute: the documented `PUT …/jobs/{id}/state?value=canceled` with the
+  job's ETag, or the session's running code if Viya refuses that; CAS: `DELETE
+  …/cas/sessions/{id}/actions`, CAS's cancelAction): the run ends **stopped**
+  with the SAS log up to there, and the SAS session keeps running (libraries,
+  WORK and the startup code stay). If SAS doesn't stop the run (or it still
+  runs 30 s after Stop), the status line offers **Restart SAS session**, which
+  ends that connection's SAS sessions. A single job may run 4 hours
+  (`SINGLESTORE_MCP_SAS_TIMEOUT_MIN`, minutes; `0` = no limit; it was 15
+  minutes).
+- **Several tabs.** Each SAS Viya connection has one Compute and one CAS
+  session, shared by the tabs that use it, running one job at a time. A run
+  that has to wait says so: *Waiting for the SAS run in tab “Report A”
+  (running 2 min)…*; it can be stopped while it waits (nothing reaches SAS).
+  Runs on another connection (or in CAS while Compute is busy) don't wait.
+- **SAS session started in the background.** A cold SAS session (Compute session,
+  automatic SingleStore library, startup code) takes ~15–35 s. So when the
+  Workspace opens, it starts the active SAS Viya connection's sessions in the
+  background (`sas_prewarm`, ~1.5 s after the first paint; Compute first, then
+  CAS), and again when another connection becomes the active one, when the
+  active one is saved or signed in to. The header of the SQL Editor's SAS tabs
+  and of the Schema Explorer's SAS sources shows **SAS session: starting… /
+  ready / not signed in / SAS Viya unreachable**. A run or library list that
+  comes while it starts waits for that same session (*Waiting for the SAS
+  session to start…*) instead of starting a second one. Nothing is asked: a
+  connection that isn't signed in, or a Viya that can't be reached (VPN off),
+  is skipped and the reason shown. While the Workspace is open it asks every
+  4 minutes; the server then reads the session's state (`GET
+  /compute/sessions/{id}/state`, no SAS code; this resets Viya's idle timeout,
+  `sessionInactiveTimeout`, 15 minutes on Zeus) and the CAS session, and starts
+  a new one if Viya ended it anyway. Close the Workspace and the checks stop,
+  so Viya ends the session after its idle timeout. Tabs pinned to another SAS
+  Viya connection aren't warmed (they show its state); the SAS 9 sign-on still
+  waits until the SAS 9 source is opened. Off per connection (Connections → SAS
+  Viya → Edit → *Start the SAS session when the Workspace opens*) or for the
+  server with `SINGLESTORE_MCP_SAS_PREWARM=0`.
+- **Per-tab SAS Viya connection.** A tab can be pinned to a saved SAS Viya
+  connection (⚙, or the *Viya:* picker in the header when there are several):
+  its runs, tree and autocomplete then use that connection's own sessions;
+  *Viya: active (…)* follows the active connection. The pin is saved with the
+  tab; switching the active connection elsewhere doesn't touch a pinned tab.
 - The result pane has **Result**, **Log** (the generated SAS code with
   **Copy code**, then the SAS log with errors, warnings and notes in colour)
   and **Pushdown** tabs. Colour badges show the language everywhere: S2 blue,
@@ -406,6 +486,14 @@ SingleStore-native and through SAS side by side.
     through `table.columnInfo`.
 - The history keeps the language with each statement; **Run** runs it again
   as that language.
+- **The tree** lists SingleStore databases, SAS libraries or caslibs
+  (**SingleStore / SAS / CAS** at its top; it follows the tab's language until
+  you switch it). Using something from a source the tab doesn't run – choosing a
+  library or database, inserting a name, **SELECT columns**, **Top 100** –
+  switches the tab's language (a SAS library → PROC SQL, or FedSQL if the tab
+  runs FedSQL; a caslib → FedSQL in CAS; a database → SingleStore SQL): at once
+  while the tab is empty, otherwise only after **Switch to …** (**Keep …**
+  leaves it), so a tab's SQL is never re-labelled silently.
 
 **Show pushdown**
 
@@ -422,10 +510,25 @@ counted) and a verdict:
 - **Pulled into SAS**: the rows were read into SAS / CAS and processed there;
 - **No SingleStore**: nothing was sent to SingleStore.
 
+**FedSQL** doesn't write the SQL it sends to the SAS log (`sastrace` doesn't
+cover it). The SAS/ACCESS driver trace does: the automatic SingleStore library
+(below) is assigned with `driver_trace=SQL driver_traceoptions=APPEND
+driver_tracefile="<WORK>/_s2trace.log"` (LIBNAME options for PROC FEDSQL / DS2).
+After a FedSQL run the editor reads that file into `WORK._S2TRC` (not through the
+log: long lines would wrap), deletes it, and the Pushdown tab lists the
+statements as SingleStore got them (the `DEFAULT:` lines, names in their own
+case; `WHERE 1=0` probes left out); the verdict still comes from the FedSQL
+plan (`_method`). Libraries assigned elsewhere (startup code) have no trace:
+for them FedSQL shows the plan's verdict only. Tried and not working for FedSQL:
+`options sastrace=',,,d'` / `',,,ds'` (no trace lines) and
+`%log4sas_logger(App.TableServices, 'level=trace')` (nothing in the log).
+
 **Find in Query History** checks whether a statement SingleStore received is in
 the cluster's plan cache or the local query history (with its runs and average
-time) and opens the History view searching for it. FedSQL's plan names what it
-pushed down but not the SQL text, so FedSQL shows the verdict only.
+time) and opens the History view on it: searching for it when the History list
+has its runs, otherwise (every run under the 1 s trace threshold – typical for
+a pushed-down count) on its **plan-cache entry**, listed at the top, selected
+and marked *from the SQL Editor*, with its totals, parameterized text and tuning.
 
 ### Notebook
 
@@ -444,6 +547,11 @@ pushed down but not the SQL text, so FedSQL shows the verdict only.
 - **Shift+Enter** runs and moves on, **Ctrl+Enter** runs, **Alt+Enter** runs
   and adds a cell. The header has **Run all**, interrupt **■** and restart
   **↻**, plus the kernel's status.
+- **Interrupt** stops Python code at once, also a long `time.sleep()` on
+  Windows. A call waiting in C code can't be interrupted on Windows (a
+  network read, a lock, a long numpy / C loop such as `sum(range(10**10))`):
+  if the cell still runs 5 s after ■, the cell offers **Restart kernel**, which
+  stops it (variables are cleared).
 
 **SQL from Python (SingleStore Notebooks compatible)**
 
@@ -459,6 +567,8 @@ pushed down but not the SQL text, so FedSQL shows the verdict only.
 - Several notebooks open as **tabs**, each with its own kernel. **New** opens
   a new tab; **Open** loads into a new tab unless the current one is empty.
   Closing a tab stops its kernel (unsaved tabs need a second click).
+- **Open** and **Save as** are a large dialog over the notebook, as in the SQL
+  Editor; Escape or Close / Cancel closes it.
 - Saved as standard `.ipynb` files, with SQL cells as `%%sql` and SAS cells
   as `%%sas` cells, so they
   open in Jupyter / VS Code and SingleStore Notebooks, and SingleStore's
@@ -566,8 +676,30 @@ Per connection, for SAS in the Workspace:
   It runs with `options nosource nosource2` and its log is never shown or kept
   (only the number of errors and the first error line, passwords masked), so
   the libname files' contents stay hidden. Don't put passwords in the startup
-  code itself. Saving the active connection restarts the Workspace's SAS
-  session; **⚙ → Restart SAS session** in the SQL Editor does too.
+  code itself. Saving a connection with other session settings (address,
+  compute context, CAS server, startup code, SAS 9 sign-on) restarts that
+  connection's SAS sessions; **⚙ → Restart SAS session** in the SQL Editor
+  does too (for the tab's connection). Switching the active connection
+  restarts nothing: every connection has its own SAS sessions.
+- **Automatic SingleStore library** (on by default; a checkbox in Edit): when
+  the Workspace's SAS session starts, it gets the **SingleStore libref** (default
+  `S2`) on the active SingleStore connection and its default database – the
+  same `LIBNAME S2 SSTORE server= port= user= password= database=` the notebook
+  kernels use. It's assigned *before* the startup code (which can override it),
+  and again before the next SAS run when the active SingleStore connection, its
+  settings or its password change. The password comes from the credential
+  store and is submitted with `options nosource nonotes`, so it never appears
+  in the SAS log, the Log tab, the history or tool results (error text is
+  masked; the job is deleted from the session afterwards). Token connections
+  (JWT / Entra ID) use the token as the password and are re-assigned when it's
+  renewed (Entra renews a few minutes before expiry); connections with a URL
+  get no library. It shows in the SAS libraries as an **S2** library marked
+  *automatic*, with its database. On Zeus this replaces the compute context's
+  own `S2`; turn it off to keep that one.
+- **Start the SAS session when the Workspace opens** (on by default; a checkbox
+  in Edit): see *SAS session started in the background* below.
+- **SAS 9 sign-on code**, **SAS 9 server**, **SAS 9 libraries** (optional): SAS 9
+  through SAS/CONNECT, see *Schema Explorer: SAS 9 libraries* below.
 - The Workspace keeps one SAS Compute session and one CAS session and reuses
   them (the first use starts the session, which can take half a minute).
 
@@ -684,13 +816,57 @@ pipeline's batch history and error log.
   **Preview** of the first 50 rows. For caslibs the tree shows tables loaded in
   memory and the source tables behind them (for a SingleStore caslib, the
   tables of its database).
-- SAS/ACCESS libraries on SingleStore (engine S2 / SSTORE) and SingleStore
-  caslibs are marked **S2** and show their SingleStore database, with
-  **Open … in SingleStore** to jump to it in the SingleStore source.
+- SingleStore libraries and caslibs are badged by kind (Schema Explorer tree and
+  SQL Editor tree / library picker), with a tooltip naming the kind and the
+  SingleStore database:
+  - **SS** (SingleStore purple) – caslib type `SingleStore`: the **SAS
+    SpeedyStore** integration, CAS pushes queries down to SingleStore live
+    (no in-memory copy), e.g. `CSASDP` on Zeus;
+  - **S2** (grey-blue outline) – caslib type `singlestore_standard`: the
+    standard SingleStore data connector, CAS loads the tables into memory,
+    e.g. `SASDP` / `SASDPSTD` on Zeus;
+  - **S2** – SAS/ACCESS to SingleStore libnames in Compute (engine SSTORE),
+    including the [automatic one](#connections);
+  - **9** – SAS 9 libraries through SAS/CONNECT.
+
+  They show their database with **Open … in SingleStore** to jump to it in the
+  SingleStore source.
+- **</> Show code** on a library or caslib: the statement that would assign it
+  again, *reconstructed from its current settings* – `LIBNAME` from the
+  session's `dictionary.libnames` (engine, path, server, user, database; SAS
+  doesn't report the port or other engine options), and for a caslib the
+  `CASLIB … datasource=(srctype=… …)` statement plus the `table.addCaslib`
+  equivalent from `caslibInfo` (verbose). Passwords, tokens and authentication
+  domains are placeholders (`password="<set password>"`), never real values.
+  **Copy** or **Open in SQL Editor** (a new tab, runs as plain SAS – nothing is
+  run).
 - **Query in SQL Editor** opens the first 100 rows in the SQL Editor, running as
   PROC SQL (libraries) or FedSQL in CAS (caslibs) in that library.
 - Backend (app-only tools): `sas_sources`, `sas_libraries`, `sas_tables`,
-  `sas_columns`, `cas_caslibs`, `cas_tables`, `cas_columns`.
+  `sas_columns`, `cas_caslibs`, `cas_tables`, `cas_columns`,
+  `sas_library_code`, `cas_caslib_code`, `sas9_libraries` (each takes an
+  optional `connection`: a saved SAS Viya connection, default the active one).
+  The SQL Editor's runs: `sas_query` / `sas_execute` (background run with
+  `run_id`, `wait_ms`, `connection`, `table_rows`), `sas_run_status`,
+  `sas_stop`, `sas_rows` (paging), `sas_session_reset(connection)`.
+
+**Schema Explorer: SAS 9 libraries (SAS/CONNECT)**
+
+- Set up per SAS Viya connection (Connections → SAS Viya → Edit): **SAS 9
+  sign-on code** (e.g. `%include` of the signon file you keep in SAS Content,
+  such as `cauki_signon.sas`), **SAS 9 server** (the remote session name in its
+  `SIGNON`, e.g. `CAUKI`) and optionally **SAS 9 libraries** (remote librefs,
+  `local=REMOTE` to rename; empty = all but SASHELP, WORK, SASUSER, MAPS…).
+- The **SAS 9** source (shown once the active Viya connection has a sign-on)
+  signs on from the Workspace's SAS Compute session – once per session, with
+  `NOSOURCE`/`NONOTES`, its log never shown – and assigns the remote libraries
+  with remote library services (`libname STG server=CAUKI slibref=STG`). A
+  libref already in use in the session is skipped. They're then ordinary SAS
+  libraries: tables, columns, preview, PROC SQL in the SQL Editor, and they
+  also appear under SAS libraries (badge **9**).
+- CAUKI is shut down every evening at 22:00: the sign-on then fails with
+  *Couldn't sign on to SAS 9*, which is expected. **↻ Reload libraries** signs
+  on again.
 
 **Schema Explorer: data skew (Distribution)**
 
@@ -715,6 +891,20 @@ pipeline's batch history and error log.
 - **Check skew** on a database lists every distributed table, worst first,
   plus rows per leaf; click a table for its details. Backend:
   `schema_explorer_skew(database, table?)` (app-only, read-only).
+- **Reshard simulation** (bottom of the Distribution tab): tick the columns of a
+  candidate shard key and press **Simulate** to see how the rows would spread
+  over the partitions – predicted rows per partition next to today's, the
+  predicted row variation against the current one, distinct key values, and a
+  note when the key has too few values. Nothing changes: it is the docs' query
+  (*Detecting and resolving data skew* → reshard on another column), `SELECT
+  WITH(leaf_pushdown=true) SUM(c), PARTITION_ID() FROM (SELECT COUNT(*) c FROM t
+  GROUP BY <key>) GROUP BY PARTITION_ID()`, which hashes each key value to the
+  partition it would land on. It reads the whole table, so it only runs on the
+  click, with the row count shown first (a warning from 1 million rows);
+  **Sample … rows** estimates from a random sample (`WHERE RAND() < f`, scaled
+  up; every row is still read, but fewer are moved and grouped). **Query in SQL
+  Editor** shows the query. Backend: `schema_explorer_reshard(database, table,
+  columns, sample_rows?)` (app-only, read-only).
 
 **Schema Explorer: bottomless and Analyze**
 
@@ -737,6 +927,11 @@ pipeline's batch history and error log.
 
 - **Overview**: the CPU chart beside the node cards (CPU, memory, disk). The
   chart's height follows its width, so it stays readable in a wide window.
+  CPU and disk rates are differences of counters between two reads. The metrics
+  sampler takes a first read in the background about 8 s after the server
+  starts (and keeps it fresh), so opening the Cluster view doesn't wait a
+  second for one; only with the sampler off does the first open measure over
+  a second.
 - **Queries**: *Running now* from the process list, and *Ran in the last 60 s*
   from the aggregators' plan caches, which also shows the many short
   statements that finish between two refreshes (constants shown as `^` / `@`;
@@ -789,7 +984,10 @@ pipeline's batch history and error log.
   sample a minute between them. **Sample now** adds one at once. Settings:
   `SINGLESTORE_MCP_METRICS=0` (off), `SINGLESTORE_MCP_METRICS_INTERVAL`
   (seconds, 15–300, default 60), `SINGLESTORE_MCP_METRICS_RETENTION_DAYS`
-  (1–90, default 7).
+  (1–90, default 7). **Export CSV** saves the range shown (one row per point
+  and node: time in UTC, node, host and the values the charts show). The
+  Alerts view's trend rules (disk full / memory at max_memory within N days)
+  read the same store.
 - **Backups**: per database the last successful backup, its age, type, size
   and how long it took, the number of backups and failures and the last error;
   the backup history (newest first) and backups running now with their
@@ -1168,6 +1366,16 @@ cluster" alert says so.
 | Node memory above **85 %** of `max_memory` | `MV_SYSINFO_MEM`, `MV_NODES` | per node, active while above |
 | Disk above **90 %** | `MV_SYSINFO_DISK` (SingleStore's mounts) | per node and mount, active while above |
 | Node not online | `MV_NODES` | per node, active while not online |
+| Disk projected full within **14 days** | the Cluster Monitor's History (`metrics.db`, local, no cluster query) | per node, active while the projection holds |
+| Memory projected to reach `max_memory` within **3 days** | the same History | per node, active while the projection holds |
+
+The two trend rules fit a straight line through the last 24 hours of History
+samples (one a minute while a server runs) for each node's data mount and
+memory. They only alert on a steady climb (at least 6 hours of samples, fit
+R² ≥ 0.5), so a one-off spike or a load that goes up and down doesn't count;
+the alert says how much it grew per day and when it is full at that rate
+(critical when that is within 2 days, or a third of the rule's days). Without
+History (the sampler off, or less than 6 hours stored) they find nothing.
 
 Every rule can be switched off and its threshold changed in the view. An alert
 is kept once, with first / last seen and a count, so a long-running query or a
@@ -1274,12 +1482,15 @@ Who can do what, and (for users with the right privileges) a GUI to change it.
 Claude's tools only read; every change is made in the view, shows the exact
 SQL first and runs only after you confirm it.
 
-- **Users**: every user with type, lock status, password age and expiry,
-  default resource pool, groups, connections and flags (ALL / SUPER on `*.*`,
-  grant option, host `'%'`, password never expires, locked, unused, i.e. no
-  traced query in the local Query History store for N days). Click a user for
-  their effective privileges with the reason for each (direct, or via role ←
-  group) and `SHOW GRANTS` (password hash hidden).
+- **Users**: every user with type, lock status (and the failed-login lockout
+  setting), password age and expiry, default resource pool, groups,
+  connections and flags (ALL / SUPER on `*.*`, grant option, host `'%'`,
+  password never expires, locked, TLS required, unused, i.e. no traced query
+  in the local Query History store for N days). Click a user for their
+  effective privileges with the reason for each (direct, or via role ← group),
+  `SHOW GRANTS` (password hash hidden) and an **Account** block: status,
+  `REQUIRE SSL` / `NONE`, the failed-login lockout, and (for your own account)
+  whether this app's connection uses TLS.
 - **Roles & groups**: the user → group → role → privileges chain and **Who can
   access …** for a database or table.
 - **Resource pools**: limits, live running and queued queries per pool, the
@@ -1293,7 +1504,10 @@ SQL first and runs only after you confirm it.
 GRANT / REVOKE privileges on `*.*`, a database or a table (picker), revoke all,
 create / drop roles and groups, grant a role to a group and a group to a user,
 create / change / drop resource pools, set a user's default pool and grant pool
-usage. Each change:
+usage, and per user: **change password**, **lock / unlock**, the **failed-login
+lockout**, **REQUIRE SSL / NONE** and **grant columns through a view** (see
+[Passwords, locks, TLS and column grants](#passwords-locks-tls-and-column-grants)).
+Each change:
 
 1. **Preview SQL** shows the exact statements (a password always as
    `'********'`) with warnings and blockers.
@@ -1318,9 +1532,9 @@ make a SQL script of the change instead (below).
 security changes. Under every preview, next to Run:
 
 - **Copy SQL**, **Open in SQL Editor** (a new editor tab with the script; it
-  isn't run) and **Save as .sql…** (into the SQL folder, suggested name
-  `security-<date>-<time>-<what>.sql`; an existing file is only replaced after
-  **Overwrite**).
+  isn't run) and **Save as .sql…** (the file browser with This computer / SAS
+  Content / SAS Server, suggested name `security-<date>-<time>-<what>.sql`; an
+  existing file is only replaced after **Replace it**).
 - **Add to script** collects the change in the **SQL script** basket under the
   panel: reorder (↑ ↓), remove (✕), **Show script**, then Copy SQL / Open in
   SQL Editor / Save as .sql… for all of them at once. The basket lasts for the
@@ -1337,12 +1551,13 @@ built by the same plan builder from the cluster as it is now, with each change
 checked as if the earlier ones had run (names, existing objects, lock-out / last
 admin). Making a script runs nothing and needs none of the change privileges
 (the header notes which privileges whoever runs it needs). **No password is
-ever in a script**: `CREATE USER` gets `IDENTIFIED BY '<set password>'` and a
-`-- WARNING:` to replace it (the password field is never sent for a script).
+ever in a script**: `CREATE USER` and a password change get
+`'<set password>'` and a `-- WARNING:` to replace it (the password field is never sent for a script).
 SingleStore 9.0 also accepts `CREATE USER` without `IDENTIFIED BY`, but that
 makes a user without a password, so it isn't used.
 
-The password is sent once, as a bound parameter of `CREATE USER`, and is never
+The password is sent once, as a bound parameter of `CREATE USER` (or the
+password change), and is never
 shown, logged, returned or stored (not in the plan, the model context or the
 local Query History store, which skips the app's own `/* s2-… */` statements).
 Found on 9.0.40 and handled: `REVOKE ALL PRIVILEGES, GRANT OPTION` needs every
@@ -1351,6 +1566,55 @@ denied"), so "revoke all" revokes what the grantee holds, one statement per
 object; a pool limit can't be set back to "none" (except `MAX_CONCURRENCY = 0`);
 a user's default pool can't be cleared, only set to another pool (e.g.
 `default_pool`).
+
+#### Passwords, locks, TLS and column grants
+
+Buttons in a user's **Account** block (and options in **+ New user**). Checked in
+the SingleStore 9.0 docs and tried on 9.0.40 with `zz_test_` users:
+
+- **Change password** – two masked fields that must match; sent once as a bound
+  parameter of `ALTER USER 'u'@'h' IDENTIFIED BY …`, `'********'` in the preview,
+  `'<set password>'` in a script, never in results, logs or history. Your own
+  password can always be changed: without `ALTER USER` it uses
+  `SET PASSWORD FOR … = PASSWORD(…)` (9.0.40 refuses `ALTER USER` on yourself
+  then). For your own account you type your name to confirm, and if the active
+  saved connection signs in as you, a tick **saves the new password for that
+  connection** (OS credential store) after the change succeeded. The
+  environment-variables connection, a URL or a token login can't be updated
+  that way (the panel says what to do). Open connections keep working; a lock
+  stays.
+- **Lock… / Unlock…** – `ALTER USER … ACCOUNT LOCK / UNLOCK`. Status from
+  `information_schema.USERS.ACCOUNT_STATUS` (`LOCKED` / `OPEN`). Refused: locking
+  yourself, or the last admin that isn't locked. Unlock also clears a lockout
+  after too many failed logins. A locked login gets error 2449; open
+  connections keep working; **a cluster restart clears every lock** (docs).
+- **Failed-login lockout…** – `ALTER USER … SET FAILED_LOGIN_ATTEMPTS = n
+  PASSWORD_LOCK_TIME = s` (seconds). Both above 0 turns it on, both 0 off;
+  SingleStore refuses one without the other (error 2451). `+ New user` can set it
+  too (`CREATE USER … WITH … FAILED_LOGIN_ATTEMPTS = n PASSWORD_LOCK_TIME = s`).
+- **Require TLS (SSL)… / Allow non-TLS logins…** – `ALTER USER … REQUIRE SSL /
+  NONE` (`+ New user`: optional `REQUIRE`). Read from `USER_PRIVILEGES`
+  (`PRIVILEGE_TYPE = 'SSL'`) and `SHOW GRANTS`: `USERS` has no column for it. A
+  non-TLS login then gets error 2455. Requiring SSL for **your own** account when
+  this app's connection doesn't use TLS (`Ssl_cipher` of the session) shows a
+  **lock-out risk** warning and needs the typed name. `X509` / `SUBJECT` aren't
+  offered.
+- **Grant columns (view)…** – 9.0 has **no column-level privileges**: the GRANT
+  reference has only `*.*`, `db.*` and `db.table` ("Table privileges apply to all
+  columns"), and on 9.0.40 `GRANT SELECT (c1, c2) ON db.t` is *accepted but
+  grants SELECT on the whole table* (every column readable; `REVOKE SELECT (c)`
+  likewise revokes the whole table). So the form picks a table and columns and
+  previews two statements: `CREATE VIEW db.v AS SELECT c1, c2 FROM db.t` and
+  `GRANT SELECT ON db.v TO …`. Views run as their creator (`DEFINER`), so the
+  grantee needs nothing on the table; the plan warns when the grantee already
+  has `SELECT` on the table, the database or `*.*` (then the restriction doesn't
+  hold). Remove it later with Revoke on the view or `DROP VIEW`.
+
+Docs: [ALTER USER](https://docs.singlestore.com/db/v9.0/reference/sql-reference/security-management-commands/alter-user/),
+[CREATE USER](https://docs.singlestore.com/db/v9.0/reference/sql-reference/security-management-commands/create-user/),
+[SET PASSWORD](https://docs.singlestore.com/db/v9.0/reference/sql-reference/security-management-commands/set-password/),
+[GRANT](https://docs.singlestore.com/db/v9.0/reference/sql-reference/security-management-commands/grant/),
+[CREATE VIEW](https://docs.singlestore.com/db/v9.0/reference/sql-reference/data-definition-language-ddl/create-view/).
 
 #### Audit log
 
@@ -1435,7 +1699,36 @@ desktop window.
 **↗ Open in browser** reopens the current view full-window in your browser,
 for when the chat column is too narrow. Claude also posts this link under each
 app, and the `browser_link` tool makes one on request. Links work on this
-machine only and stop working when the server restarts.
+machine only (`127.0.0.1`, with a secret token in every link).
+
+**Restarts don't break an open tab.** The link's port and token are kept in
+`~/.singlestore-mcp/browser/` and reused by the next server, which listens on
+them again right at start: after `restart_server`, a crash restart or a
+restart of Claude, the tab's next call reaches the new server. Meanwhile the
+page shows *Reconnecting to the SingleStore MCP server…*, holds the app's
+calls and retries (also at once when the laptop wakes up or the network comes
+back); Cluster Monitor, Query History and alerts then go on refreshing by
+themselves. A call that changes something and was cut off mid-way isn't sent
+twice: the app says it may or may not have run.
+
+If the server doesn't come back within 60 s (`SINGLESTORE_MCP_BROWSER_RECONNECT`),
+or the token is refused, the tab shows **Session ended** instead of the app
+(all polling stops) — reopen the app from Claude or the desktop shortcut, or
+press **Try again** once a server runs again. SQL Editor text that couldn't be
+autosaved meanwhile is kept in that browser tab, can be copied from the
+*Session ended* page, and is saved to its editor tab as soon as the page
+reaches a server again. Database errors (VPN down, cluster unreachable) are
+not this: they show in the app as usual.
+
+Who owns which address: every MCP client connection (Claude Desktop and
+Claude Code each start one server) holds a *slot* (a lock file in that folder)
+for as long as it runs, and its servers always use that slot's address; a
+second client takes the next free slot, so two servers never share a port.
+When Claude restarts, its new server takes the lowest free slot again. If
+another program has taken the port, the server picks a new one (and keeps
+that). The standalone workspace keeps its own address in `workspace.json`.
+**Connections → Reset browser links** gives the server a new token: every open
+tab and earlier link then ends (restarts never change it).
 
 The workspace also runs **without Claude**, in its own window:
 
@@ -1474,10 +1767,14 @@ All optional, as environment variables of the MCP server:
 | `SINGLESTORE_MCP_NO_SUPERVISOR` | off | Run without the restart relay |
 | `SINGLESTORE_MCP_NO_STANDBY` | off | Don't keep a pre-loaded standby process for fast restarts |
 | `SINGLESTORE_MCP_STANDBY_DELAY` | `5` | Seconds after a start before the standby is prepared |
+| `SINGLESTORE_MCP_BROWSER_RECONNECT` | `60` | Seconds an open browser tab keeps trying to reach a restarting server before it shows *Session ended* |
+| `SINGLESTORE_MCP_BROWSER_BIND_WAIT` | `15` | Seconds a new server waits for the previous one to free the browser port |
 | `SINGLESTORE_MCP_METRICS` | on | `0` turns off the Cluster Monitor's background metrics sampler (History tab) |
 | `SINGLESTORE_MCP_METRICS_INTERVAL` | `60` | Seconds between metrics samples (15–300) |
 | `SINGLESTORE_MCP_METRICS_RETENTION_DAYS` | `7` | Days of metrics history kept (1–90) |
-| `SINGLESTORE_MCP_METRICS_DELAY` | `20` | Seconds after a server start before the first metrics sample |
+| `SINGLESTORE_MCP_METRICS_DELAY` | `20` | Seconds after a server start before the first metrics sample (the Cluster Monitor's CPU baseline is read after at most 8 s) |
+| `SINGLESTORE_MCP_SAS_IMPORT` | on | `0`: never reuse the SAS Viya MCP server's / CLI's cached sign-in for a SAS Viya connection |
+| `SINGLESTORE_MCP_SAS_PREWARM` | on | `0`: don't start the Workspace's SAS session in the background when it opens (the first SAS run starts it; the test suite runs with `0`) |
 
 `~/.singlestore-mcp` is used rather than `%LOCALAPPDATA%` because Windows gives
 the Claude desktop app a private copy of that folder, so Claude and the desktop
@@ -1502,6 +1799,11 @@ window would otherwise use different notebook environments.
   without the shared head (the ~0.45 MB ext-apps bundle, `shared.js`,
   `shared.css`; the workspace puts its own copy back), and a page the
   workspace already has (another SQL tab or notebook) is only revalidated.
+  Vendor blocks (CodeMirror ~0.5 MB, the function list, the charts) are marked
+  `data-s2-vendor` / `data-s2-hash`; the workspace keeps the ones it got and
+  asks `app_page` for later pages without them (`vendors`), so opening the
+  Notebook after the SQL Editor doesn't bring CodeMirror a second time.
+  Standalone pages (`resources/read`, the browser view) are whole.
 - Notebook kernels run in the notebook environment through
   [`notebook_bridge.py`](src/singlestore_mcp/notebook_bridge.py), driven by
   [`notebook_kernel.py`](src/singlestore_mcp/notebook_kernel.py).
@@ -1959,7 +2261,8 @@ while Claude has the server's .exe open.
 - `test_workload.py`: placeholders, validation and run comparison (offline), and a real 20 s run (cluster).
 - `test_notebook.py`, `test_compare.py`, `test_assistants.py`, and `ui/test_apps.py` (Workspace views,
   SQL Editor, Query History, Workload, every standalone app). When a UI test fails, a screenshot is saved
-  in `tests/ui/_artifacts/`.
+  in `tests/ui/_artifacts/`. The UI fixtures (`ui`, the screenshot hook) are in `tests/conftest.py`, so one
+  call can mix files from `tests/` and `tests/ui/` (`pytest tests\test_x.py tests\ui\test_y.py`).
 
 **Isolated test home**
 
@@ -1977,10 +2280,24 @@ supervisor) with its own `SINGLESTORE_MCP_HOME` in pytest's temp folder. It does
   the History tests take their samples with `sample_now`.
 
 The tests are read-only on the cluster. Write statements are sent only to check that they are refused or
-need confirmation, and are never confirmed. Scratch names start with `zz`. The SAS Viya sign-in lives in
-an encrypted secrets file that is not copied, so the `sas` tests use the SAS Viya MCP server's / CLI's
-cached sign-in to the same Viya if there is one, and are skipped otherwise. Set `S2_TEST_SAS_SECRETS=1`
-to copy the secrets file too. The test server may then refresh the token in its copy only.
+need confirmation, and are never confirmed. Scratch names start with `zz`.
+
+**Which SAS Viya sign-in the `sas` tests use.** Your own sign-in lives in an encrypted secrets file that is
+not copied by default. With no sign-in in the test home, the test server does what the real one does: it
+reuses the SAS Viya MCP server's (`~/.sas-mcp-server/credentials.json`, from `sas-mcp-login`) or the SAS
+Viya CLI's cached sign-in when that Viya accepts it. That is why the SAS (and SAS notebook) tests pass
+without `S2_TEST_SAS_SECRETS` as long as the SAS Viya MCP server is signed in to Zeus. The `sas` fixture
+prints the sign-in it got ("SAS tests sign in to SAS Viya with: …"). `S2_TEST_SAS_SIGNIN` makes the choice
+explicit:
+
+| `S2_TEST_SAS_SIGNIN` | Sign-in |
+|---|---|
+| `any` (default) | a copy of yours with `S2_TEST_SAS_SECRETS=1`, else another SAS tool's cached sign-in |
+| `own` | only a copy of yours (secrets copied; the test server runs with `SINGLESTORE_MCP_SAS_IMPORT=0`) |
+| `import` | only another SAS tool's cached sign-in (nothing copied) |
+
+The test server may refresh the token in its copy only. `SINGLESTORE_MCP_SAS_IMPORT=0` also works for the
+real server, if it should never reuse another SAS tool's sign-in.
 
 The test home's `sas.json` is written in the current format (an old single-settings file is converted
 there, so the test server never moves the real sign-in). To pick the Viya the `sas` tests use:

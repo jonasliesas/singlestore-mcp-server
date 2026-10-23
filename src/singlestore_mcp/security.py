@@ -229,6 +229,9 @@ def collect_users(unused_days: int = 90) -> dict[str, Any]:
             flags.append("locked")
         if unused:
             flags.append("unused")
+        require_ssl = "SSL" in g["privs"]  # REQUIRE SSL shows as PRIVILEGE_TYPE 'SSL' (USERS has no column for it)
+        if require_ssl:
+            flags.append("require_ssl")
         out.append({
             "user": u["USER"], "host": u["HOST"], "type": u["TYPE"], "connections": int(u["CONNECTIONS"] or 0),
             "is_local": bool(u["IS_LOCAL"]), "created": u["CREATED"], "password_updated": u["PASSWORD_UPDATED"],
@@ -238,7 +241,8 @@ def collect_users(unused_days: int = 90) -> dict[str, Any]:
             "password_lock_time": u["EFFECTIVE_PASSWORD_LOCK_TIME"],
             "account_status": u["ACCOUNT_STATUS"], "default_pool": u["DEFAULT_RESOURCE_POOL"] or None,
             "comment": u["COMMENT"] or None, "groups": groups, "roles": roles,
-            "global_privileges": sorted(g["privs"] - {"USAGE"}), "role_global_privileges": sorted(via_roles),
+            "require_ssl": require_ssl,
+            "global_privileges": sorted(g["privs"] - {"USAGE", "SSL"}), "role_global_privileges": sorted(via_roles),
             "schema_grants": n_schema.get(key, 0), "table_grants": n_table.get(key, 0),
             "last_seen": last_seen, "history_queries": hu["queries"] if hu else 0, "unused": unused,
             "flags": flags,
@@ -305,7 +309,7 @@ def users_summary(d: dict[str, Any]) -> str:
     lines = [f"{len(us)} user(s); connected as {d['me']['user']}@{d['me']['host']}."]
     for flag, label in (("all", "ALL PRIVILEGES on *.*"), ("super", "SUPER"), ("grant_option", "WITH GRANT OPTION on *.*"),
                         ("any_host", "host '%'"), ("no_pw_expiry", "password never expires"), ("locked", "locked"),
-                        ("unused", f"no traced queries in {d['unused_days']} days")):
+                        ("unused", f"no traced queries in {d['unused_days']} days"), ("require_ssl", "REQUIRE SSL")):
         names = [f"{u['user']}@{u['host']}" for u in us if flag in u["flags"]]
         if names:
             lines.append(f"- {label}: {', '.join(names[:30])}{' …' if len(names) > 30 else ''}")
@@ -351,7 +355,8 @@ def user_privileges(user: str, host: str | None = None) -> dict[str, Any]:
                          " WHERE ug.USER = %s", (g,))),
         _soft(lambda: _q(f"SELECT RESOURCE_POOL, PRIVILEGE_TYPE FROM {IS}.RESOURCE_POOL_PRIVILEGES WHERE GRANTEE = %s", (g,))),
         _soft(lambda: show_grants(user, host)),
-        _soft(lambda: _q(f"SELECT TYPE, DEFAULT_RESOURCE_POOL, ACCOUNT_STATUS FROM {IS}.USERS WHERE USER = %s AND HOST = %s",
+        _soft(lambda: _q(f"SELECT TYPE, DEFAULT_RESOURCE_POOL, ACCOUNT_STATUS, EFFECTIVE_FAILED_LOGIN_ATTEMPTS,"
+                         f" EFFECTIVE_PASSWORD_LOCK_TIME, CONNECTIONS FROM {IS}.USERS WHERE USER = %s AND HOST = %s",
                          (user, host))),
     )
     rows: dict[tuple[str, str], dict[str, Any]] = {}
@@ -362,8 +367,11 @@ def user_privileges(user: str, host: str | None = None) -> dict[str, Any]:
             r["how"].append(how)
         r["grantable"] |= grantable
 
+    require_ssl = None if not _ok(glob) else False
     for r in _rows(glob):
-        if r["PRIVILEGE_TYPE"] != "USAGE":
+        if r["PRIVILEGE_TYPE"] == "SSL":  # REQUIRE SSL, not a privilege
+            require_ssl = True
+        elif r["PRIVILEGE_TYPE"] != "USAGE":
             add(r["PRIVILEGE_TYPE"], "*.*", "global", "direct", r["IS_GRANTABLE"] == "YES")
     for r in _rows(schema):
         add(r["PRIVILEGE_TYPE"], _obj(r["TABLE_SCHEMA"]), "database", "direct", r["IS_GRANTABLE"] == "YES")
@@ -394,6 +402,8 @@ def user_privileges(user: str, host: str | None = None) -> dict[str, Any]:
     return {
         "user": user, "host": host, "grantee": g, "type": info_row.get("TYPE"),
         "default_pool": info_row.get("DEFAULT_RESOURCE_POOL") or None, "account_status": info_row.get("ACCOUNT_STATUS"),
+        "require_ssl": require_ssl, "failed_login_attempts": info_row.get("EFFECTIVE_FAILED_LOGIN_ATTEMPTS"),
+        "password_lock_time": info_row.get("EFFECTIVE_PASSWORD_LOCK_TIME"), "connections": info_row.get("CONNECTIONS"),
         "groups": sorted(r["GROUP"] for r in _rows(groups)),
         "chain": sorted({(r["GROUP"], r["ROLE"]) for r in _rows(chain)}),
         "effective": effective,
@@ -404,8 +414,11 @@ def user_privileges(user: str, host: str | None = None) -> dict[str, Any]:
 
 
 def user_privileges_summary(d: dict[str, Any]) -> str:
-    lines = [f"Effective privileges of {d['grantee']} ({d['type'] or '?'}, {d['account_status'] or '?'}); groups: "
+    lines = [f"Effective privileges of {d['grantee']} ({d['type'] or '?'}, {d['account_status'] or '?'}"
+             f"{', REQUIRE SSL' if d.get('require_ssl') else ''}); groups: "
              f"{', '.join(d['groups']) or 'none'}; roles: {', '.join(sorted({r for _, r in d['chain']})) or 'none'}."]
+    if d.get("failed_login_attempts"):
+        lines.append(f"Failed-login lockout: after {d['failed_login_attempts']} failed logins, locked for {d['password_lock_time']} s.")
     by_obj: dict[tuple[str, str], list[str]] = {}
     for r in d["effective"]:
         by_obj.setdefault((r["object"], "; ".join(r["how"])), []).append(r["privilege"] + ("*" if r["grantable"] else ""))
@@ -475,6 +488,12 @@ def roles_summary(d: dict[str, Any]) -> str:
 def list_tables(database: str) -> list[str]:
     rows = _q(f"SELECT TABLE_NAME FROM {IS}.TABLES WHERE TABLE_SCHEMA = %s ORDER BY TABLE_NAME LIMIT 5000", (database,))
     return [r["TABLE_NAME"] for r in rows]
+
+
+def list_columns(database: str, table: str) -> list[str]:
+    rows = _q(f"SELECT COLUMN_NAME FROM {IS}.COLUMNS WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s ORDER BY ORDINAL_POSITION",
+              (database, table))
+    return [r["COLUMN_NAME"] for r in rows]
 
 
 def who_can_access(database: str, table: str | None = None) -> dict[str, Any]:

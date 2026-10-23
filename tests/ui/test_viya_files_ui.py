@@ -5,6 +5,7 @@ at the end."""
 
 from __future__ import annotations
 
+import re
 import secrets
 import time
 from pathlib import Path
@@ -97,6 +98,74 @@ def test_sql_editor_open_save_as_sas_content(ui, app_url, sas: McpSession, conte
     assert wait_js(other, "document.querySelector('.sq-runas')?.value === 'procsql'", 10), "a .sas file should run as PROC SQL"
     assert wait_js(other, "[...document.querySelectorAll('select[aria-label=\"Recent files\"] option')].some((o) => o.textContent === 'other.sas (SAS Content)')", 10), \
         "Recent should list the SAS Content file"
+
+    errs = [e for e in errors.drain() if "favicon" not in e]
+    assert not errs, errs
+
+
+def _content_folder(frame: Any, panel: str, folder: str) -> Any:
+    """In an Open / Save as panel: SAS Content → My Folder → the test folder; returns the browser part."""
+    frame.locator(panel).get_by_role("tab", name="SAS Content").click()
+    browser = frame.locator(f"{panel} .s2-fb").last
+    browser.get_by_role("button", name="My Folder", exact=True).click(timeout=120_000)
+    browser.locator(".item", has_text=folder).first.click(timeout=60_000)
+    assert wait_js(frame, f"[...document.querySelectorAll('{panel} .s2-fb .s2-muted')].some((e) => e.textContent.endsWith({folder!r}))", 60), \
+        "didn't open the test folder: " + text(frame)[-500:]
+    return browser
+
+
+def test_rename_delete_in_sas_content_and_the_tab_follows(ui, app_url, sas: McpSession, content_dir: str) -> None:
+    page, errors = ui
+    folder = content_dir.rsplit("/", 1)[-1]
+    conn = sas.ok("viya_files_browse", {"location": "content", "path": content_dir})["connection"]
+    sas.ok("sql_editor_save_file", {"name": f"sas-content://{conn}{content_dir}/ren.sql", "sql": "select 'ren' as x;\n"})
+    page.goto(app_url("sql_editor", {"database": DB, "view": "sql", "new_tab": True}), wait_until="domcontentloaded")
+    ws = find_frame(page, "SingleStore Workspace", 30)
+    sql = _visible_sql(page)
+    sql.locator(".sq-filebtns").get_by_role("button", name="Open", exact=True).click()
+    _content_folder(sql, ".sq-files", folder).locator(".item", has_text="ren.sql").click()
+    assert wait_js(sql, "(document.querySelector('.sq-file')?.innerText ?? '').startsWith('ren.sql')", 60), text(sql)[-400:]
+    sql = _visible_sql(page)
+
+    # Rename in the browser (Open starts in the file's folder): the tab follows, and Save still works afterwards
+    # (the rename's new version is handed to the editor).
+    sql.locator(".sq-filebtns").get_by_role("button", name="Open", exact=True).click()
+    browser = sql.locator(".sq-files .sq-browser")
+    browser.get_by_role("button", name="Rename ren.sql").click(timeout=60_000)
+    box = browser.get_by_label("New name for ren.sql")
+    box.fill("ren2")
+    box.press("Enter")
+    assert wait_js(sql, "[...document.querySelectorAll('.sq-browser .item')].some((i) => i.innerText.includes('ren2.sql'))", 60), text(sql)[-500:]
+    assert wait_js(ws, "(document.querySelector('.ws-tabs .ws-tab.on')?.innerText ?? '').includes('ren2.sql')", 20), "the tab didn't follow"
+    browser.get_by_role("button", name="Close", exact=True).click()
+    sql.locator(".cm-content").click()
+    page.keyboard.press("Control+End")
+    page.keyboard.type("\n-- after rename")
+    page.keyboard.press("Escape")
+    sql.locator(".sq-filebtns").get_by_role("button", name="Save", exact=True).click()
+    assert wait_js(sql, "!(document.querySelector('.sq-file')?.innerText ?? 'modified').includes('modified')", 60), \
+        "Save after the rename didn't save: " + text(sql)[-500:]
+    ref2 = f"sas-content://{conn}{content_dir}/ren2.sql"
+    assert "-- after rename" in sas.ok("sql_editor_open_file", {"name": ref2, "remember": False})["sql"]
+
+    # Delete it: the tab keeps its text, unsaved.
+    sql.locator(".sq-filebtns").get_by_role("button", name="Open", exact=True).click()
+    browser = sql.locator(".sq-files .sq-browser")
+    browser.get_by_role("button", name="Delete ren2.sql").click(timeout=60_000)
+    browser.get_by_role("button", name="Delete", exact=True).click()
+    assert wait_js(sql, "(document.querySelector('.sq-file')?.innerText ?? '').startsWith('untitled')", 60), text(sql)[-400:]
+    assert sas.call("sql_editor_open_file", {"name": ref2, "remember": False}, timeout=120).is_error
+
+    # The Notebook saves to SAS Content too.
+    ws.locator('nav.ws-rail button[aria-label^="Notebook"]').click()
+    nb = find_frame(page, re.compile(r"^Notebook"), 30)
+    nb.locator(".nb-head").get_by_role("button", name="Save as", exact=True).click()
+    _content_folder(nb, ".nb-files", folder)
+    nb.get_by_label("File name", exact=True).fill("nb_ui")
+    nb.locator(".nb-files").get_by_role("button", name="Save", exact=True).click()
+    assert wait_js(nb, "(document.querySelector('.nb-file, .nb-head')?.innerText ?? '').includes('nb_ui.ipynb')", 60), text(nb)[-500:]
+    opened = sas.ok("notebook_open", {"name": f"sas-content://{conn}{content_dir}/nb_ui.ipynb"})
+    assert opened["notebook"]["cells"]
 
     errs = [e for e in errors.drain() if "favicon" not in e]
     assert not errs, errs

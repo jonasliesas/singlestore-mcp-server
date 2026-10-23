@@ -13,9 +13,10 @@ Every change goes through two steps:
 instead: same statements, safe order, warnings as comments, no password (a ``'<set password>'`` placeholder), and it
 needs none of the change privileges.
 
-Passwords: only ``create_user`` takes one. It is sent to SingleStore as a bound parameter, shown as
-``'********'`` in every statement, result and error text, and never logged or stored. Every statement starts with
-``/* s2-security-change */``; the local Query History store leaves "/* s2-" statements out.
+Passwords: only ``create_user`` and ``change_password`` take one. It is sent to SingleStore as a bound parameter,
+shown as ``'********'`` in every statement, result and error text, and never logged or stored (a script gets the
+``'<set password>'`` placeholder). Every statement starts with ``/* s2-security-change */``; the local Query History
+store leaves "/* s2-" statements out.
 
 Syntax checked against the SingleStore 9.0 docs (CREATE/DROP/ALTER USER, GRANT, REVOKE, CREATE/DROP ROLE,
 CREATE/DROP GROUP, GRANT/REVOKE ROLE, GRANT/REVOKE GROUP, CREATE/ALTER/DROP RESOURCE POOL, "Administer default
@@ -29,6 +30,25 @@ resource pools") and tried on 9.0.40 with zz_test_ objects. Found on 9.0.40, bey
 - ``DROP RESOURCE POOL`` fails while the pool is some user's default pool (error 2289).
 - USER_PRIVILEGES lists WITH GRANT OPTION on *.* as IS_GRANTABLE = YES and an extra PRIVILEGE_TYPE 'GRANT' row;
   ROLE_PRIVILEGES doesn't show a role's grant option.
+
+Security v2 extensions (ALTER USER / SET PASSWORD / CREATE USER / GRANT / CREATE VIEW in the 9.0 docs, tried on 9.0.40
+with zz_test_ users and views):
+- Password: ``ALTER USER u IDENTIFIED BY 'pw'`` (needs ALTER USER or GRANT) and ``SET PASSWORD FOR u = PASSWORD('pw')``
+  both work; a user without ALTER USER can change only its own password, and only with SET PASSWORD (ALTER USER on
+  itself is "Access denied"). PASSWORD_UPDATED changes; a lock stays; open connections keep working.
+  ``IDENTIFIED BY`` together with ``ACCOUNT LOCK/UNLOCK`` is a syntax error (documented).
+- ``ALTER USER u ACCOUNT LOCK / UNLOCK``: USERS.ACCOUNT_STATUS = LOCKED / OPEN; a locked login gets error 2449; open
+  connections keep working; UNLOCK also clears a failed-login lockout. A cluster restart clears every lock (docs).
+- ``ALTER USER u SET FAILED_LOGIN_ATTEMPTS = n PASSWORD_LOCK_TIME = s`` (seconds): both > 0 turns the lockout on,
+  both 0 turns it off; anything else is error 2451. Shown in USERS.EFFECTIVE_FAILED_LOGIN_ATTEMPTS /
+  EFFECTIVE_PASSWORD_LOCK_TIME. CREATE USER takes them after ``WITH`` (with DEFAULT RESOURCE POOL), then ``REQUIRE``.
+- ``ALTER USER u REQUIRE SSL / NONE``: shows as PRIVILEGE_TYPE 'SSL' in USER_PRIVILEGES and "REQUIRE SSL" in SHOW
+  GRANTS (USERS has no column for it); a non-TLS login gets error 2455; open connections keep working; other ALTER
+  USER clauses keep it. X509 / SUBJECT aren't offered here.
+- No column-level privileges: ``GRANT SELECT (c1, c2) ON db.t`` is accepted but grants SELECT on the WHOLE table
+  (TABLE_PRIVILEGES gets the row, COLUMN_PRIVILEGES stays empty, every column is readable), and ``REVOKE SELECT (c)``
+  revokes the whole table privilege. So the column picker creates a view with the chosen columns and grants SELECT
+  on the view: views run as their definer (SECURITY_TYPE DEFINER), so the grantee needs nothing on the base table.
 """
 
 from __future__ import annotations
@@ -86,6 +106,22 @@ ACTIONS = {
     "create_pool": "Create resource pool", "alter_pool": "Change resource pool", "drop_pool": "Drop resource pool",
     "set_default_pool": "Set default resource pool", "grant_pool": "Grant resource pool usage",
     "revoke_pool": "Revoke resource pool usage",
+    "change_password": "Change password", "lock_user": "Lock account", "unlock_user": "Unlock account",
+    "set_login_policy": "Failed-login lockout", "set_require": "Require TLS (SSL)",
+    "grant_view": "Grant columns (through a view)",
+}
+# Actions that take a password (sent as a bound parameter; a script gets SCRIPT_PASSWORD instead).
+PASSWORD_ACTIONS = {"create_user", "change_password"}
+REQUIRE = ("SSL", "NONE")
+INT_MAX = 2147483647  # USERS.EFFECTIVE_FAILED_LOGIN_ATTEMPTS / EFFECTIVE_PASSWORD_LOCK_TIME are INT
+
+_D = "https://docs.singlestore.com/db/v9.0/reference/sql-reference"
+DOCS = {
+    "alter_user": f"{_D}/security-management-commands/alter-user/",
+    "create_user": f"{_D}/security-management-commands/create-user/",
+    "set_password": f"{_D}/security-management-commands/set-password/",
+    "grant": f"{_D}/security-management-commands/grant/",
+    "create_view": f"{_D}/data-definition-language-ddl/create-view/",
 }
 
 _PW = "\x00password\x00"  # where the password goes; names can't hold control characters
@@ -219,8 +255,10 @@ def _my_grants() -> list[str]:
 
 def load_context() -> dict[str, Any]:
     """Everything the checks need, in one parallel batch (each read soft: a missing view gives {"error"})."""
-    (users, uprivs, sprivs, tprivs, ug, gr, roles, groups, rp, pools, poolprivs, dbs, me, grants, my_roles, gvars) = db.parallel(
-        _soft(lambda: _q(f"SELECT USER, HOST, CONNECTIONS, DEFAULT_RESOURCE_POOL FROM {IS}.USERS WHERE IS_DELETED = 0")),
+    (users, uprivs, sprivs, tprivs, ug, gr, roles, groups, rp, pools, poolprivs, dbs, me, grants, my_roles, gvars,
+     tls) = db.parallel(
+        _soft(lambda: _q(f"SELECT USER, HOST, TYPE, CONNECTIONS, DEFAULT_RESOURCE_POOL, ACCOUNT_STATUS,"
+                         f" EFFECTIVE_FAILED_LOGIN_ATTEMPTS, EFFECTIVE_PASSWORD_LOCK_TIME FROM {IS}.USERS WHERE IS_DELETED = 0")),
         _soft(lambda: _q(f"SELECT GRANTEE, PRIVILEGE_TYPE, IS_GRANTABLE FROM {IS}.USER_PRIVILEGES")),
         _soft(lambda: _q(f"SELECT GRANTEE, TABLE_SCHEMA, PRIVILEGE_TYPE, IS_GRANTABLE FROM {IS}.SCHEMA_PRIVILEGES")),
         _soft(lambda: _q(f"SELECT GRANTEE, TABLE_SCHEMA, TABLE_NAME, PRIVILEGE_TYPE, IS_GRANTABLE FROM {IS}.TABLE_PRIVILEGES")),
@@ -235,16 +273,26 @@ def load_context() -> dict[str, Any]:
         sec._current_user,
         _soft(_my_grants),
         _soft(lambda: _q(f"SELECT ROLE FROM {IS}.CURRENT_USER_ROLES")),
-        _soft(lambda: _q("SELECT @@resource_governor_cpu_limit_mode AS cpu_mode, @@privilege_transfer_mode AS transfer_mode")),
+        _soft(lambda: _q("SELECT @@resource_governor_cpu_limit_mode AS cpu_mode, @@privilege_transfer_mode AS transfer_mode,"
+                         " @@sync_permissions AS sync_permissions")),
+        _soft(lambda: _q("SHOW SESSION STATUS LIKE 'Ssl_cipher'")),
     )
     gv = (_rows(gvars) or [{}])[0]
+    cipher = next((r.get("Value") for r in _rows(tls)), None)
     ctx: dict[str, Any] = {
         "me": {"user": me["user"], "host": me["host"]},
         "users": {sec.grantee(u["USER"], u["HOST"]): {"user": u["USER"], "host": u["HOST"],
                                                        "connections": int(u["CONNECTIONS"] or 0),
-                                                       "default_pool": u["DEFAULT_RESOURCE_POOL"] or None}
+                                                       "default_pool": u["DEFAULT_RESOURCE_POOL"] or None,
+                                                       "type": u.get("TYPE"), "status": u.get("ACCOUNT_STATUS"),
+                                                       "failed_login_attempts": u.get("EFFECTIVE_FAILED_LOGIN_ATTEMPTS"),
+                                                       "password_lock_time": u.get("EFFECTIVE_PASSWORD_LOCK_TIME")}
                   for u in _rows(users)},
         "users_readable": isinstance(users, list),
+        "ssl": set(),  # GRANTEEs with REQUIRE SSL (PRIVILEGE_TYPE 'SSL' in USER_PRIVILEGES)
+        # Does this app's connection use TLS? (Ssl_cipher of the session; None = couldn't tell)
+        "my_tls": None if cipher is None else bool(cipher),
+        "sync_permissions": str(gv.get("sync_permissions") or "").upper() or None,
         "global": {}, "grantable": {}, "schema": {}, "table": {},
         "user_groups": {}, "group_roles": {}, "roles": {r["ROLE"] for r in _rows(roles)},
         "groups": {g["GROUPNAME"] for g in _rows(groups)},
@@ -261,6 +309,9 @@ def load_context() -> dict[str, Any]:
         p = str(r["PRIVILEGE_TYPE"]).upper()
         if p == "GRANT":
             ctx["grantable"][r["GRANTEE"]] = True
+            continue
+        if p == "SSL":  # REQUIRE SSL, not a privilege (REVOKE SSL would be a syntax error)
+            ctx["ssl"].add(r["GRANTEE"])
             continue
         ctx["global"].setdefault(r["GRANTEE"], set()).add(p)
         if str(r["IS_GRANTABLE"]).upper() == "YES":
@@ -321,7 +372,8 @@ def capabilities(ctx: dict[str, Any]) -> dict[str, Any]:
         "users": cap(has("CREATE USER"), "Creating and dropping users needs the CREATE USER privilege."),
         "grants": cap(go, "GRANT and REVOKE need the grant option (WITH GRANT OPTION) on a scope that covers the object."),
         "roles": cap(go, "Roles and groups need the GRANT privilege (the grant option on *.*)."),
-        "alter_user": cap(go or has("ALTER USER"), "Setting a user's default pool needs ALTER USER or the grant option."),
+        "alter_user": cap(go or has("ALTER USER"), "Changing a user (default pool, password, lock, failed-login lockout, "
+                          "REQUIRE SSL) needs ALTER USER or the grant option; your own password you can always change."),
         "create_pool": cap(has("CREATE POOL"), "Creating a resource pool needs the CREATE POOL privilege."),
         "alter_pool": cap(has("CREATE POOL") or has("DROP POOL"), "Changing a resource pool needs CREATE POOL or DROP POOL."),
         "drop_pool": cap(has("DROP POOL"), "Dropping a resource pool needs the DROP POOL privilege."),
@@ -331,9 +383,13 @@ def capabilities(ctx: dict[str, Any]) -> dict[str, Any]:
         "pool_settings": {k: {"min": lo, "max": hi, "step": st} for k, (lo, hi, st) in POOL_SETTINGS.items()},
         "builtin_pools": sorted(BUILTIN_POOLS),
         "admins": sorted(admins(ctx)),
+        "tls": ctx.get("my_tls"), "docs": DOCS,
         "pick": {  # for the pickers
         "users": sorted(({"user": u["user"], "host": u["host"], "default_pool": u["default_pool"],
-                          "admin": g in admins(ctx), "me": g == me_g} for g, u in ctx["users"].items()),
+                          "admin": g in admins(ctx), "me": g == me_g, "type": u.get("type"), "status": u.get("status"),
+                          "require_ssl": g in ctx.get("ssl", set()),
+                          "failed_login_attempts": u.get("failed_login_attempts"),
+                          "password_lock_time": u.get("password_lock_time")} for g, u in ctx["users"].items()),
                         key=lambda u: (u["user"].lower(), u["host"])),
         "roles": sorted(ctx["roles"]), "groups": sorted(ctx["groups"]),
         "pools": [{"pool": name, "builtin": name in BUILTIN_POOLS, "config": cfg} for name, cfg in sorted(ctx["pools"].items())],
@@ -347,7 +403,8 @@ _ACTION_CAP = {
     "create_role": "roles", "drop_role": "roles", "create_group": "roles", "drop_group": "roles", "grant_role": "roles",
     "revoke_role": "roles", "grant_group": "roles", "revoke_group": "roles", "create_pool": "create_pool",
     "alter_pool": "alter_pool", "drop_pool": "drop_pool", "set_default_pool": "alter_user", "grant_pool": "pool_grants",
-    "revoke_pool": "pool_grants",
+    "revoke_pool": "pool_grants", "change_password": "alter_user", "lock_user": "alter_user", "unlock_user": "alter_user",
+    "set_login_policy": "alter_user", "set_require": "alter_user", "grant_view": "grants",
 }
 
 
@@ -520,6 +577,94 @@ def _held(ctx: dict[str, Any], action: dict[str, Any], g: str | None) -> list[tu
     return out
 
 
+def _whole(value: Any, what: str) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise ChangeError(f"{what} must be a whole number") from None
+    if isinstance(value, float) and value != n:
+        raise ChangeError(f"{what} must be a whole number")
+    if n < 0 or n > INT_MAX:
+        raise ChangeError(f"{what} must be 0–{INT_MAX}")
+    return n
+
+
+def login_policy(action: dict[str, Any], required: bool = True) -> tuple[int, int] | None:
+    """(FAILED_LOGIN_ATTEMPTS, PASSWORD_LOCK_TIME): both > 0 (lockout on) or both 0 (off); 9.0.40 refuses anything
+    else (error 2451). None when neither is given and ``required`` is False."""
+    a, t = action.get("failed_login_attempts"), action.get("password_lock_time")
+    if (a is None or a == "") and (t is None or t == ""):
+        if required:
+            raise ChangeError("Give FAILED_LOGIN_ATTEMPTS and PASSWORD_LOCK_TIME (both 0 turns the lockout off)")
+        return None
+    a = _whole(a if a not in (None, "") else 0, "FAILED_LOGIN_ATTEMPTS")
+    t = _whole(t if t not in (None, "") else 0, "PASSWORD_LOCK_TIME")
+    if (a == 0) != (t == 0):
+        raise ChangeError("FAILED_LOGIN_ATTEMPTS and PASSWORD_LOCK_TIME go together: both above 0 turns the lockout on, "
+                          "both 0 turns it off (SingleStore refuses anything else, error 2451)")
+    return a, t
+
+
+def _require(value: Any, optional: bool = False) -> str | None:
+    r = str(value or "").strip().upper()
+    if not r and optional:
+        return None
+    if r not in REQUIRE:
+        raise ChangeError("REQUIRE must be SSL or NONE (X509 / SUBJECT aren't offered here)")
+    return r
+
+
+def _status(ctx: dict[str, Any], g: str) -> str:
+    return str(ctx["users"].get(g, {}).get("status") or "").upper()
+
+
+def locked(ctx: dict[str, Any]) -> set[str]:
+    return {g for g in ctx["users"] if _status(ctx, g) == "LOCKED"}
+
+
+def _columns(ctx: dict[str, Any], database: str, table: str, wanted: Any) -> list[str]:
+    """The picked columns, checked against the table (names as the table spells them, in the order picked)."""
+    if isinstance(wanted, str):
+        wanted = [wanted]
+    picked = [_name(c, "column") for c in (wanted or [])]
+    if not picked:
+        raise ChangeError("Pick at least one column")
+    have = ctx.get("columns", {}).get((database, table))
+    if have is None:
+        return list(dict.fromkeys(picked))
+    if not have:
+        raise ChangeError(f"No table {database}.{table} (names are case-sensitive)")
+    by_lower = {c.lower(): c for c in have}
+    out = []
+    for c in picked:
+        real = by_lower.get(c.lower())
+        if real is None:
+            raise ChangeError(f"No column {c} in {database}.{table}")
+        if real not in out:
+            out.append(real)
+    return out
+
+
+def _has_select(ctx: dict[str, Any], action: dict[str, Any], g: str | None, database: str, table: str) -> str | None:
+    """Where the grantee already has SELECT directly (on *.*, the database or the table), or None."""
+    def hit(privs: Any) -> bool:
+        return bool(privs) and bool({"SELECT", "ALL PRIVILEGES", "*"} & set(privs))
+
+    if g is None:
+        rp = ctx["role_privs"].get(action.get("role"), {})
+        for key, where in (((None, None), "*.*"), ((database, None), f"{database}.*"), ((database, table), f"{database}.{table}")):
+            if hit(rp.get(key)):
+                return where
+        return None
+    if hit(ctx["global"].get(g)):
+        return "*.*"
+    if hit(ctx["schema"].get(g, {}).get(database)):
+        return f"{database}.*"
+    if hit(ctx["table"].get(g, {}).get((database, table))):
+        return f"{database}.{table}"
+    return None
+
+
 def build(ctx: dict[str, Any], action: dict[str, Any], password: str | None = None) -> dict[str, Any]:
     """The plan for one action: statements (password masked in "display"), warnings, blockers and the confirmation
     it needs. Pure apart from ``ctx`` (from ``load_context``), so it can be tested offline."""
@@ -542,12 +687,24 @@ def build(ctx: dict[str, Any], action: dict[str, Any], password: str | None = No
         elif len(password) < 8:
             warnings.append("The password is shorter than 8 characters.")
         sql = f"CREATE USER {account(user, host)} IDENTIFIED BY {_PW}"
+        withs = []
         pool = action.get("default_pool")
         if pool:
             pool = _pool_name(pool)
             if ctx["pools"] and pool not in ctx["pools"]:
                 raise ChangeError(f"No resource pool {pool}")
-            sql += f" WITH DEFAULT RESOURCE POOL = {pool}"
+            withs.append(f"DEFAULT RESOURCE POOL = {pool}")
+        policy = login_policy(action, required=False)
+        if policy and policy[0]:
+            withs.append(f"FAILED_LOGIN_ATTEMPTS = {policy[0]} PASSWORD_LOCK_TIME = {policy[1]}")
+            warnings.append(f"After {policy[0]} failed logins the account is locked for {policy[1]} s (or until ACCOUNT UNLOCK).")
+        if withs:
+            sql += " WITH " + " ".join(withs)
+        req = _require(action.get("require"), optional=True)
+        if req:
+            sql += f" REQUIRE {req}"
+            if req == "SSL":
+                warnings.append("REQUIRE SSL: the user can only log in over TLS (a non-TLS login gets error 2455).")
         if host == "%":
             warnings.append("Host '%' lets the user connect from any host.")
         stmts.append(_stmt(sql, password or ""))
@@ -763,6 +920,145 @@ def build(ctx: dict[str, Any], action: dict[str, Any], password: str | None = No
         phrase = pool
         refresh = ["pools", "users"]
 
+    elif kind == "change_password":
+        user, host, g = _user_target(ctx, action)
+        u = ctx["users"].get(g, {})
+        me = _is_me(ctx, g)
+        if str(u.get("type") or "").upper() == "JWT":
+            blockers.append(f"{user}@{host} signs in with a JWT token: there is no password to change.")
+        if not password:
+            blockers.append("Enter the new password.")
+        elif len(password) < 8:
+            warnings.append("The password is shorter than 8 characters.")
+        if me and not capabilities(ctx)["alter_user"]["ok"]:
+            # Without ALTER USER, a user can change only its own password, and only with SET PASSWORD (9.0.40).
+            sql = f"SET PASSWORD FOR {account(user, host)} = PASSWORD({_PW})"
+            if ctx.get("sync_permissions") == "OFF":
+                warnings.append("SET PASSWORD changes the password on this node only while sync_permissions is OFF (docs).")
+        else:
+            sql = f"ALTER USER {account(user, host)} IDENTIFIED BY {_PW}"
+        stmts.append(_stmt(sql, password or ""))
+        if me:
+            typed = True
+            warnings.append("This changes your own password: open connections keep working, but every new connection "
+                            "(this app's pool, notebooks, other tools) needs the new password.")
+        elif g in admins(ctx):
+            typed = True
+            warnings.append(f"This changes an admin account ({user}@{host}).")
+        if _status(ctx, g) == "LOCKED":
+            warnings.append("The account is locked: a new password doesn't unlock it (use Unlock).")
+        if u.get("connections"):
+            warnings.append(f"{user}@{host} has {u['connections']} open connection(s): they keep working with the old login.")
+        phrase = user
+
+    elif kind in ("lock_user", "unlock_user"):
+        user, host, g = _user_target(ctx, action)
+        status = _status(ctx, g)
+        if kind == "lock_user":
+            if _is_me(ctx, g):
+                blockers.append(f"You are connected as {user}@{host}: locking your own account would lock you out "
+                                "(every new connection, including this app's, would be refused).")
+            others = admins(ctx) - locked(ctx) - {g}
+            if g in admins(ctx) and not others:
+                blockers.append(f"{user}@{host} is the last admin that isn't locked: refused.")
+            if status == "LOCKED":
+                blockers.append(f"{user}@{host} is already locked.")
+            stmts.append(_stmt(f"ALTER USER {account(user, host)} ACCOUNT LOCK"))
+            conns = ctx["users"].get(g, {}).get("connections", 0)
+            warnings.append("New logins are refused (error 2449)" + (
+                f"; its {conns} open connection(s) keep working until they disconnect or are killed." if conns else
+                "; connections that are already open keep working."))
+            warnings.append("A cluster restart clears every lock (docs): lock it again after a restart.")
+            if g in admins(ctx):
+                typed = True
+                warnings.append(f"{user}@{host} is an admin. Admins left unlocked: {len(others)}.")
+        else:
+            if status and status != "LOCKED":
+                blockers.append(f"{user}@{host} isn't locked (ACCOUNT_STATUS = {status}).")
+            stmts.append(_stmt(f"ALTER USER {account(user, host)} ACCOUNT UNLOCK"))
+            warnings.append("Clears a lock set with ACCOUNT LOCK and a lockout after too many failed logins (docs).")
+        phrase = user
+
+    elif kind == "set_login_policy":
+        user, host, g = _user_target(ctx, action)
+        att, lt = login_policy(action)
+        u = ctx["users"].get(g, {})
+        if (u.get("failed_login_attempts"), u.get("password_lock_time")) == (att, lt):
+            blockers.append(f"{user}@{host} already has FAILED_LOGIN_ATTEMPTS = {att}, PASSWORD_LOCK_TIME = {lt}.")
+        stmts.append(_stmt(f"ALTER USER {account(user, host)} SET FAILED_LOGIN_ATTEMPTS = {att} PASSWORD_LOCK_TIME = {lt}"))
+        if att:
+            warnings.append(f"After {att} failed logins the account is locked for {lt} s (or until ACCOUNT UNLOCK); a cluster "
+                            "restart clears lockouts (docs).")
+            if _is_me(ctx, g):
+                typed = True
+                warnings.append("This is your own account: mistyped passwords from any client (scripts, other tools) can "
+                                "lock you out for that time.")
+        else:
+            warnings.append("Turns the failed-login lockout off for this user (both 0).")
+        phrase = user
+
+    elif kind == "set_require":
+        user, host, g = _user_target(ctx, action)
+        req = _require(action.get("require"))
+        has = g in ctx.get("ssl", set())
+        if ctx["users_readable"] and g in ctx["users"] and has == (req == "SSL"):
+            blockers.append(f"{user}@{host} already has REQUIRE {req}.")
+        stmts.append(_stmt(f"ALTER USER {account(user, host)} REQUIRE {req}"))
+        if req == "SSL":
+            warnings.append("New logins without TLS are refused (error 2455); connections that are already open keep working.")
+            if _is_me(ctx, g):
+                typed = True
+                tls = ctx.get("my_tls")
+                if tls is False:
+                    warnings.insert(0, "LOCK-OUT RISK: this app's connection doesn't use TLS, so after this every new "
+                                       "connection it opens as you would be refused. Turn TLS on in the connection first.")
+                elif tls is None:
+                    warnings.insert(0, "Couldn't tell whether this app's connection uses TLS: check it before requiring "
+                                       "SSL for your own account.")
+                else:
+                    warnings.append("This app's connection uses TLS, so it keeps working.")
+        else:
+            warnings.append("TLS becomes optional for this user: clients that don't use TLS send the login unencrypted.")
+            if _is_me(ctx, g):
+                typed = True
+                warnings.append("This changes your own account.")
+        phrase = user
+
+    elif kind == "grant_view":
+        database = _name(action.get("database"), "database")
+        table = _name(action.get("table"), "table")
+        if ctx["databases"] and database not in ctx["databases"]:
+            raise ChangeError(f"No database {database} (names are case-sensitive)")
+        objects = ctx.get("objects", {}).get(database)
+        if objects is not None and table not in objects:
+            raise ChangeError(f"No table {database}.{table} (names are case-sensitive)")
+        cols = _columns(ctx, database, table, action.get("columns"))
+        view = _name(action.get("view"), "view name")
+        if view == table:
+            raise ChangeError("The view needs a name of its own")
+        if objects is not None and view in objects:
+            blockers.append(f"{database}.{view} already exists: pick another view name.")
+        target, label, g = _grantee_sql(ctx, action)
+        stmts.append(_stmt(f"CREATE VIEW {bt(database)}.{bt(view)} AS SELECT {', '.join(bt(c) for c in cols)} "
+                           f"FROM {bt(database)}.{bt(table)}"))
+        stmts.append(_stmt(f"GRANT SELECT ON {bt(database)}.{bt(view)} TO {target}"))
+        warnings.append("SingleStore 9.0 has no column-level privileges: GRANT SELECT (col, …) ON a table is accepted but "
+                        "grants the whole table (checked on 9.0.40). So a view with the chosen columns is created and "
+                        "SELECT is granted on the view.")
+        me = f"{ctx['me']['user']}@{ctx['me']['host']}"
+        warnings.append(f"The view runs with its creator's rights (DEFINER = {me}): {label} needs nothing on "
+                        f"{database}.{table}. If {me} loses SELECT on it or is dropped, the view stops working. Creating "
+                        f"it needs CREATE VIEW on {database}.")
+        where = _has_select(ctx, action, g, database, table)
+        if where:
+            warnings.insert(0, f"{label} already has SELECT on {where} directly, so it can still read every column of "
+                               f"{database}.{table}: revoke that for the column restriction to hold.")
+        warnings.append("Runs as two statements: if the GRANT fails, the view stays (drop it with DROP VIEW).")
+        if g and (_is_me(ctx, g) or g in admins(ctx)):
+            warnings.append(f"{label} is {'you' if _is_me(ctx, g) else 'an admin'}: admins can usually read the table anyway.")
+        phrase = view
+        refresh = ["users", "roles"]
+
     lk = lockout_checks(ctx, {**action, "privileges": [" ".join(str(p).upper().split()) for p in action.get("privileges") or []]})
     blockers += lk["blockers"]
     warnings += lk["warnings"]
@@ -788,21 +1084,84 @@ def public(plan_: dict[str, Any]) -> dict[str, Any]:
     return {**plan_, "statements": [s["display"] for s in plan_["statements"]]}
 
 
-def _allowed(ctx: dict[str, Any], kind: str) -> dict[str, Any]:
-    cap = capabilities(ctx).get(_ACTION_CAP.get(kind, ""), {"ok": True})
+def _own_password(ctx: dict[str, Any], action: dict[str, Any]) -> bool:
+    if action.get("action") != "change_password" or not action.get("user"):
+        return False
+    host = action.get("host") if action.get("host") is not None else "%"
+    return _is_me(ctx, sec.grantee(str(action["user"]).strip(), str(host)))
+
+
+def _allowed(ctx: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    if _own_password(ctx, action):  # SET PASSWORD for yourself needs no privilege
+        return {"ok": True, "reason": None}
+    cap = capabilities(ctx).get(_ACTION_CAP.get(action.get("action", ""), ""), {"ok": True})
     return {"ok": bool(cap["ok"]), "reason": None if cap["ok"] else cap["reason"]}
 
 
-def _check_allowed(ctx: dict[str, Any], kind: str) -> None:
-    a = _allowed(ctx, kind)
+def _check_allowed(ctx: dict[str, Any], action: dict[str, Any]) -> None:
+    a = _allowed(ctx, action)
     if not a["ok"]:
         raise ChangeError(f"Not allowed for {ctx['me']['user']}@{ctx['me']['host']}: {a['reason']}")
 
 
+def _enrich(ctx: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    """Reads only a grant_view needs: the table's columns and the database's table/view names (once per context)."""
+    if action.get("action") != "grant_view":
+        return ctx
+    d, t = action.get("database"), action.get("table")
+    if not d or not isinstance(d, str):
+        return ctx
+    objects = ctx.setdefault("objects", {})
+    columns = ctx.setdefault("columns", {})
+    need_t = isinstance(t, str) and t and (d, t) not in columns
+    if d in objects and not need_t:
+        return ctx
+    names, cols = db.parallel(
+        _soft(lambda: _q(f"SELECT TABLE_NAME FROM {IS}.TABLES WHERE TABLE_SCHEMA = %s", (d,))),
+        _soft(lambda: _q(f"SELECT COLUMN_NAME FROM {IS}.COLUMNS WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s"
+                         " ORDER BY ORDINAL_POSITION", (d, t)) if need_t else []),
+    )
+    if isinstance(names, list):
+        objects[d] = {r["TABLE_NAME"] for r in names}
+    if need_t and isinstance(cols, list):
+        columns[(d, t)] = [r["COLUMN_NAME"] for r in cols]
+    return ctx
+
+
+def _active_profile() -> Any:
+    try:
+        from . import connections
+
+        return connections.active()
+    except Exception:  # noqa: BLE001 - informational
+        return None
+
+
+def connection_info(ctx: dict[str, Any]) -> dict[str, Any]:
+    """For changing your own password: is the active saved connection this account, and can its stored password be
+    updated after the change (only a saved password connection, not the SINGLESTORE_* one, a URL or a token login)?"""
+    p = _active_profile()
+    if p is None:
+        return {"name": None, "uses_account": False, "can_update": False, "reason": "No saved connection is active."}
+    info = {"name": p.name, "uses_account": p.user == ctx["me"]["user"], "can_update": False, "reason": None}
+    if not info["uses_account"]:
+        info["reason"] = f"The active connection {p.name} signs in as {p.user}, not as this account."
+    elif p.builtin:
+        info["reason"] = f"{p.name} comes from the SINGLESTORE_* settings: update SINGLESTORE_PASSWORD there yourself."
+    elif p.url:
+        info["reason"] = f"{p.name} uses a connection URL that holds the password: edit it in Connections."
+    elif p.auth != "password":
+        info["reason"] = f"{p.name} signs in with a token ({p.auth}), not a password."
+    else:
+        info["can_update"] = True
+    return info
+
+
 def _plan_on(ctx: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
-    """The plan without a password: CREATE USER shows it masked; the "enter a password" checks are left out."""
-    p = build(ctx, action, password="********" if action.get("action") == "create_user" else None)
-    p["blockers"] = [b for b in p["blockers"] if not b.startswith("Enter a password")]
+    """The plan without a password: a password shows masked; the "enter a password" checks are left out."""
+    _enrich(ctx, action)
+    p = build(ctx, action, password="********" if action.get("action") in PASSWORD_ACTIONS else None)
+    p["blockers"] = [b for b in p["blockers"] if not b.startswith(("Enter a password", "Enter the new password"))]
     p["warnings"] = [w for w in p["warnings"] if not w.startswith("The password is shorter")]
     return p
 
@@ -825,7 +1184,9 @@ def plan(action: dict[str, Any], pending: list[dict[str, Any]] | None = None) ->
         p["needs_script"] = True
         p["warnings"].insert(0, "Uses objects that changes earlier in the script create: it can go into the script, "
                                 "but can't run on its own now.")
-    p["allowed"] = _allowed(ctx, action.get("action", ""))
+    p["allowed"] = _allowed(ctx, action)
+    if _own_password(ctx, action):
+        p["connection"] = connection_info(ctx)
     return public(p)
 
 
@@ -837,13 +1198,15 @@ def plan(action: dict[str, Any], pending: list[dict[str, Any]] | None = None) ->
 SCRIPT_PASSWORD = "'<set password>'"
 # Safe order: creates (pools before the users that use them, roles and groups before grants), then grants and
 # changes, then revokes, then drops (users before the groups, roles and pools they use).
-_SCRIPT_ORDER = [
-    "create_pool", "create_role", "create_group", "create_user",
-    "alter_pool", "grant", "grant_role", "grant_group", "grant_pool", "set_default_pool",
-    "revoke", "revoke_all", "revoke_role", "revoke_group", "revoke_pool",
-    "drop_user", "drop_group", "drop_role", "drop_pool",
+_SCRIPT_PHASES = [
+    ["create_pool", "create_role", "create_group", "create_user"],
+    ["alter_pool", "grant", "grant_view", "grant_role", "grant_group", "grant_pool", "set_default_pool", "change_password",
+     "set_require", "set_login_policy", "unlock_user", "lock_user"],
+    ["revoke", "revoke_all", "revoke_role", "revoke_group", "revoke_pool"],
+    ["drop_user", "drop_group", "drop_role", "drop_pool"],
 ]
-_PHASE = {k: (0 if i < 4 else 1 if i < 10 else 2 if i < 15 else 3) for i, k in enumerate(_SCRIPT_ORDER)}
+_SCRIPT_ORDER = [k for phase in _SCRIPT_PHASES for k in phase]
+_PHASE = {k: n for n, phase in enumerate(_SCRIPT_PHASES) for k in phase}
 _PHASE_RANK = {k: i for i, k in enumerate(_SCRIPT_ORDER)}
 MAX_SCRIPT_ITEMS = 200
 
@@ -873,14 +1236,28 @@ def script_order(actions: list[dict[str, Any]], keep_order: bool = False) -> lis
 
 def _advance(ctx: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
     """The context after the action ran (for the checks of later changes in the same script)."""
-    c = {**ctx, **copy.deepcopy({k: ctx[k] for k in ("users", "global", "grantable", "schema", "table", "user_groups",
-                                                     "group_roles", "roles", "groups", "role_privs", "pools", "pool_grants")})}
+    keys = ("users", "global", "grantable", "schema", "table", "user_groups", "group_roles", "roles", "groups", "role_privs",
+            "pools", "pool_grants", "ssl", "objects")
+    c = {**ctx, **copy.deepcopy({k: ctx[k] for k in keys if k in ctx})}
+    c.setdefault("ssl", set())
     kind = action["action"]
     user = action.get("user")
     host = action.get("host") if action.get("host") is not None else "%"
     g = sec.grantee(str(user).strip(), host) if user else None
     if kind == "create_user" and g:
-        c["users"][g] = {"user": str(user).strip(), "host": host, "connections": 0, "default_pool": action.get("default_pool") or None}
+        policy = login_policy(action, required=False) or (0, 0)
+        c["users"][g] = {"user": str(user).strip(), "host": host, "connections": 0, "default_pool": action.get("default_pool") or None,
+                         "status": "OPEN", "failed_login_attempts": policy[0], "password_lock_time": policy[1]}
+        if _require(action.get("require"), optional=True) == "SSL":
+            c["ssl"].add(g)
+    elif kind in ("lock_user", "unlock_user") and g in c["users"]:
+        c["users"][g]["status"] = "LOCKED" if kind == "lock_user" else "OPEN"
+    elif kind == "set_login_policy" and g in c["users"]:
+        c["users"][g]["failed_login_attempts"], c["users"][g]["password_lock_time"] = login_policy(action)
+    elif kind == "set_require" and g:
+        (c["ssl"].add if _require(action.get("require")) == "SSL" else c["ssl"].discard)(g)
+    elif kind == "grant_view" and isinstance(c.get("objects", {}).get(action.get("database")), set):
+        c["objects"][action["database"]].add(str(action.get("view")).strip())
     elif kind == "create_role":
         c["roles"].add(str(action.get("role")).strip())
     elif kind == "create_group":
@@ -951,8 +1328,9 @@ def _script_statements(p: dict[str, Any]) -> list[str]:
     out = []
     for s in p["statements"]:
         text = s["display"]
-        if p["action"] == "create_user":
-            text = text.replace(f"IDENTIFIED BY {MASK}", f"IDENTIFIED BY {SCRIPT_PASSWORD}")
+        if p["action"] in PASSWORD_ACTIONS:
+            text = text.replace(f"IDENTIFIED BY {MASK}", f"IDENTIFIED BY {SCRIPT_PASSWORD}").replace(
+                f"PASSWORD({MASK})", f"PASSWORD({SCRIPT_PASSWORD})")
         out.append(text)
     return out
 
@@ -1002,12 +1380,12 @@ def script(actions: list[dict[str, Any]], keep_order: bool = False, now: Any = N
             raise ChangeError(f"Change {i + 1} ({title}): {exc}") from None
         if p["blockers"]:
             raise ChangeError(f"Change {i + 1} ({title}) is blocked: " + " ".join(p["blockers"]))
-        allowed = _allowed(ctx, a["action"])
+        allowed = _allowed(ctx, a)
         statements = _script_statements(p)
         warnings = list(p["warnings"])
-        if a["action"] == "create_user":
-            warnings.insert(0, "Replace '<set password>' with the new user's password before running (the "
-                               "script never holds a real password).")
+        if a["action"] in PASSWORD_ACTIONS:
+            whose = "the new user's password" if a["action"] == "create_user" else "the new password"
+            warnings.insert(0, f"Replace '<set password>' with {whose} before running (the script never holds a real password).")
         items.append({"n": n, "index": i, "action": a["action"], "title": p["title"], "statements": statements,
                       "warnings": warnings, "summary": f"{p['title']}: {_one_line(statements[0].rstrip(';'), 90)}" if statements else p["title"],
                       "allowed": allowed})
@@ -1028,6 +1406,8 @@ def script(actions: list[dict[str, Any]], keep_order: bool = False, now: Any = N
     ]
     if any(it["action"] == "create_user" for it in items):
         head.append("-- WARNING: CREATE USER has the placeholder '<set password>': set a real password before running.")
+    if any(it["action"] == "change_password" for it in items):
+        head.append("-- WARNING: the password change has the placeholder '<set password>': set the new password before running.")
     lacking = sorted({it["allowed"]["reason"] for it in items if not it["allowed"]["ok"]})
     if lacking:
         head.append(f"-- NOTE: {me} can't run all of this; whoever runs it needs: " + " ".join(lacking))
@@ -1039,7 +1419,7 @@ def script(actions: list[dict[str, Any]], keep_order: bool = False, now: Any = N
     text = "\n".join(head + body) + "\n"
     if len(items) == 1:
         a = acts[items[0]["index"]]
-        obj = next((a[k] for k in ("user", "role", "group", "pool") if a.get(k)), "")
+        obj = next((a[k] for k in ("view", "user", "role", "group", "pool") if a.get(k)), "")
         what = _slug(f"{a['action'].replace('_', '-')}-{obj}")
     else:
         what = f"{len(items)}-changes"
@@ -1051,16 +1431,21 @@ def script(actions: list[dict[str, Any]], keep_order: bool = False, now: Any = N
     }
 
 
-def apply(action: dict[str, Any], confirm: bool = False, typed: str | None = None, password: str | None = None) -> dict[str, Any]:
-    """Run one change after the user confirmed its plan. Builds the plan again from fresh cluster state."""
+def apply(action: dict[str, Any], confirm: bool = False, typed: str | None = None, password: str | None = None,
+          update_connection: bool = False) -> dict[str, Any]:
+    """Run one change after the user confirmed its plan. Builds the plan again from fresh cluster state.
+
+    ``update_connection`` (your own password change only): after it succeeded, also store the new password for the
+    active saved connection in the OS credential store, so the app's next connections use it."""
     kind = action.get("action", "")
     if not confirm:
         raise ChangeError("Refused: this changes users, privileges or resource pools on the shared cluster. Show the user "
                           "the plan (security_change_plan) and call again with confirm=True only after they confirmed.")
-    if kind != "create_user":
+    if kind not in PASSWORD_ACTIONS:
         password = None
     ctx = load_context()
-    _check_allowed(ctx, kind)
+    _check_allowed(ctx, action)
+    _enrich(ctx, action)
     p = build(ctx, action, password=password)
     if p["blockers"]:
         raise ChangeError("Refused: " + " ".join(p["blockers"]))
@@ -1078,17 +1463,34 @@ def apply(action: dict[str, Any], confirm: bool = False, typed: str | None = Non
         except s2.Error as exc:
             failed = True
             results.append({"statement": s["display"], "status": "error", "error": mask_sql(str(exc), password)[:500]})
-    return {
+    out = {
         "action": kind, "title": p["title"], "results": results,
         "ok": not failed, "ran": sum(r["status"] == "ok" for r in results), "refresh": p["refresh"],
         "warnings": p["warnings"],
     }
+    if kind == "change_password" and _own_password(ctx, action) and not failed:
+        info = connection_info(ctx)
+        out["connection"] = {"name": info["name"], "updated": False, "note": info["reason"]}
+        if update_connection and info["can_update"] and password:
+            try:
+                from . import connections
+
+                connections.set_password(info["name"], password)
+                out["connection"].update(updated=True, note=f"The new password is saved for the connection {info['name']}.")
+            except Exception as exc:  # noqa: BLE001 - the password itself changed; say what to do
+                out["connection"]["note"] = (f"The password changed, but saving it for {info['name']} failed "
+                                             f"({mask_sql(str(exc), password)[:200]}): update it in Connections.")
+        elif info["can_update"]:
+            out["connection"]["note"] = f"Update the password of the connection {info['name']} in Connections."
+    return out
 
 
 def summary(d: dict[str, Any]) -> str:
     if "results" in d:
         lines = [f"{d['title']}: {'done' if d['ok'] else 'failed'} ({d['ran']} of {len(d['results'])} statement(s) ran)."]
         lines += [f"- {r['status']}: {r['statement']}" + (f" -> {r['error']}" if r.get("error") else "") for r in d["results"]]
+        if d.get("connection", {}).get("note"):
+            lines.append(d["connection"]["note"])
         return "\n".join(lines)
     lines = [f"Plan for {d['title']} (nothing ran):"] + [f"  {s}" for s in d["statements"]]
     lines += [f"Blocked: {b}" for b in d["blockers"]] + [f"Warning: {w}" for w in d["warnings"]]

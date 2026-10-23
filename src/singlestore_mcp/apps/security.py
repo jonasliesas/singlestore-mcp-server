@@ -172,9 +172,12 @@ def security_change_plan(action: dict, pending: list[dict] | None = None) -> Cal
     Args:
         action: {"action": one of create_user, drop_user, grant, revoke, revoke_all, create_role, drop_role,
             create_group, drop_group, grant_role, revoke_role, grant_group, revoke_group, create_pool, alter_pool,
-            drop_pool, set_default_pool, grant_pool, revoke_pool, plus its fields: user, host, role, group,
+            drop_pool, set_default_pool, grant_pool, revoke_pool, change_password, lock_user, unlock_user,
+            set_login_policy, set_require, grant_view, plus its fields: user, host, role, group,
             grantee_type ("user"/"role"), privileges, database, table, with_grant_option, grant_option, pool,
-            settings, default_pool}. Never a password.
+            settings, default_pool, failed_login_attempts, password_lock_time (seconds; both 0 = off),
+            require ("SSL"/"NONE"), columns and view (grant_view: a view with these columns of database.table,
+            SELECT granted on it – 9.0 has no column-level grants)}. Never a password.
         pending: The changes already in the script basket (same shape), for a change that needs objects they
             create (the plan then says ``needs_script``).
     """
@@ -189,7 +192,7 @@ def security_change_script(actions: list[dict], keep_order: bool = False) -> Cal
     earlier ones had run), in a safe order (creates, grants, revokes, drops) unless ``keep_order``, with a header
     (connection, connected user, time, one line per change) and each change's warnings as ``-- WARNING:``
     comments. Runs nothing and needs none of the change privileges. Never takes or writes a password: CREATE USER
-    gets ``IDENTIFIED BY '<set password>'`` to fill in.
+    and a password change get ``'<set password>'`` to fill in.
 
     Args:
         actions: The changes, each the same object as for security_change_plan.
@@ -201,23 +204,33 @@ def security_change_script(actions: list[dict], keep_order: bool = False) -> Cal
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=WRITE)
 def security_change_apply(action: dict, confirm: bool = False, typed_confirmation: str | None = None,
-                          password: str | None = None) -> CallToolResult:
+                          password: str | None = None, update_connection: bool = False) -> CallToolResult:
     """Run one previewed change (users, roles, groups, grants, resource pools) on the cluster.
 
     Refuses unless ``confirm`` is true: call it only after the user saw the plan (security_change_plan) and
     explicitly confirmed. Where the plan asks for it (DROP, revoke all, the connected user or an admin user),
     ``typed_confirmation`` must be the name the user typed. The plan is rebuilt from fresh cluster state first,
-    and blockers (lock-out, last admin) refuse the change. ``password`` (create_user only) is sent as a bound
-    parameter and never returned, logged or stored.
+    and blockers (lock-out, last admin) refuse the change. ``password`` (create_user, change_password) is sent as a
+    bound parameter and never returned, logged or stored.
 
     Args:
         action: The same action object as for security_change_plan.
         confirm: Must be true: the user's explicit confirmation.
         typed_confirmation: The object name the user typed, when the plan requires it.
-        password: The new user's password (create_user only).
+        password: The new user's password (create_user) or the new password (change_password).
+        update_connection: Changing your own password: after it succeeded, also save the new password for the
+            active saved connection in the OS credential store.
     """
-    data = adm.apply({k: v for k, v in (action or {}).items() if k != "password"}, confirm, typed_confirmation, password)
+    data = adm.apply({k: v for k, v in (action or {}).items() if k != "password"}, confirm, typed_confirmation, password,
+                     bool(update_connection))
     return tool_result(adm.summary(data), data)
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def security_columns(database: str, table: str) -> CallToolResult:
+    """Columns of one table, for the column picker of "Grant columns (through a view)". Read-only."""
+    cols = sec.list_columns(database, table)
+    return tool_result(f"{len(cols)} columns", {"columns": cols})
 
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)

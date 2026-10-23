@@ -35,10 +35,15 @@ LOCATIONS = ("content", "server")
 _SCHEMES = {"content": "sas-content://", "server": "sas-server://"}
 LABELS = {"content": "SAS Content", "server": "SAS Server"}
 MAX_FILE_BYTES = 2_000_000
+MAX_NOTEBOOK_BYTES = 20_000_000  # a notebook keeps its outputs (tables, charts), as a local one does
 MAX_LISTED = 1000
 SQL_SUFFIXES = (".sql", ".sas")
+NOTEBOOK_SUFFIXES = (".ipynb",)
+KINDS = {"sql": SQL_SUFFIXES, "notebook": NOTEBOOK_SUFFIXES}
+IPYNB_MEDIA_TYPE = "application/x-ipynb+json"
 _COLLECTION = "application/vnd.sas.collection+json, application/json"
 _FOLDER_JSON = "application/vnd.sas.content.folder+json"
+_FILE_JSON = "application/vnd.sas.file+json"
 _FILE_PROPS = "application/vnd.sas.compute.file.properties+json"
 _LOCKDOWN = re.compile(r"""lockdown\s+path\s*=\s*(['"])(.+?)\1""", re.I)
 
@@ -103,11 +108,11 @@ def check_name(name: str) -> str:
     return name
 
 
-def with_suffix(path: str) -> str:
-    """A file name without any extension gets .sql (as a local save does)."""
+def with_suffix(path: str, suffix: str = ".sql") -> str:
+    """A file name without any extension gets .sql (as a local save does; a notebook gets .ipynb)."""
     parent, name = split(path)
     if "." not in name.strip("."):
-        name += ".sql"
+        name += suffix
     return posixpath.join(parent, name)
 
 
@@ -116,8 +121,12 @@ def display(ref: str) -> str:
     return f"{LABELS[loc]} ({conn}): {path}"
 
 
-def wanted(name: str, show_all: bool) -> bool:
-    return show_all or name.lower().endswith(SQL_SUFFIXES)
+def wanted(name: str, show_all: bool, kind: str = "sql") -> bool:
+    return show_all or name.lower().endswith(KINDS.get(kind, SQL_SUFFIXES))
+
+
+def max_bytes(path: str) -> int:
+    return MAX_NOTEBOOK_BYTES if str(path).lower().endswith(NOTEBOOK_SUFFIXES) else MAX_FILE_BYTES
 
 
 def decode(raw: bytes) -> str:
@@ -137,8 +146,12 @@ def epoch(ts: Any) -> float | None:
 
 
 def media_type(name: str) -> str:
-    """Media type of a new SAS Content file: SAS programs as SAS Studio saves them, anything else as text."""
-    return "application/vnd.sas.studio.programfile" if name.lower().endswith(".sas") else "text/plain"
+    """Media type of a new SAS Content file: SAS programs as SAS Studio saves them, notebooks as Jupyter's
+    ``application/x-ipynb+json``, anything else as text."""
+    low = name.lower()
+    if low.endswith(".sas"):
+        return "application/vnd.sas.studio.programfile"
+    return IPYNB_MEDIA_TYPE if low.endswith(".ipynb") else "text/plain"
 
 
 def content_disposition(name: str) -> str:
@@ -274,7 +287,7 @@ def _file_details(ids: list[str]) -> dict[str, dict[str, Any]]:
     return out
 
 
-def content_browse(path: str | None, show_all: bool = False) -> dict[str, Any]:
+def content_browse(path: str | None, show_all: bool = False, kind: str = "sql") -> dict[str, Any]:
     my = _my_folder()
     shortcuts = [s for s in ({"label": "My Folder", "path": my} if my else None,
                              {"label": "Public", "path": "/Public"}, {"label": "All folders", "path": "/"}) if s]
@@ -291,7 +304,7 @@ def content_browse(path: str | None, show_all: bool = False) -> dict[str, Any]:
             name = m.get("name") or ""
             if _is_folder(m) and name:
                 folders.append({"name": name, "path": posixpath.join(path, name)})
-        listed = [m for m in members if _is_file(m) and wanted(m.get("name") or "", show_all)][:MAX_LISTED]
+        listed = [m for m in members if _is_file(m) and wanted(m.get("name") or "", show_all, kind)][:MAX_LISTED]
         details = _file_details([m["uri"].rsplit("/", 1)[-1] for m in listed])
         for m in listed:
             d = details.get(m["uri"].rsplit("/", 1)[-1], {})
@@ -322,8 +335,8 @@ def content_read(path: str) -> dict[str, Any]:
     status, meta, _ = _http("GET", member["uri"])
     if status != 200 or not isinstance(meta, dict):
         raise _fail(status, meta, f"read {path}")
-    if (meta.get("size") or 0) > MAX_FILE_BYTES:
-        raise ValueError(f"{path} is larger than {MAX_FILE_BYTES // 1_000_000} MB.")
+    if (meta.get("size") or 0) > max_bytes(path):
+        raise ValueError(f"{path} is larger than {max_bytes(path) // 1_000_000} MB.")
     status, raw, headers = _http("GET", member["uri"] + "/content", accept="*/*", raw=True)
     if status != 200:
         raise _fail(status, raw, f"read {path}")
@@ -333,8 +346,8 @@ def content_read(path: str) -> dict[str, Any]:
 def content_write(path: str, text: str, expected: str | None = None, overwrite: bool = False) -> dict[str, Any]:
     path = norm_path(path)
     data = text.encode("utf-8")
-    if len(data) > MAX_FILE_BYTES:
-        raise ValueError(f"The text is larger than {MAX_FILE_BYTES // 1_000_000} MB.")
+    if len(data) > max_bytes(path):
+        raise ValueError(f"The text is larger than {max_bytes(path) // 1_000_000} MB.")
     folder, member = _content_member(path)
     name = posixpath.basename(path)
     if member is not None and not _is_file(member):
@@ -430,7 +443,7 @@ def _server_info() -> dict[str, Any]:
     return info
 
 
-def server_browse(path: str | None, show_all: bool = False) -> dict[str, Any]:
+def server_browse(path: str | None, show_all: bool = False, kind: str = "sql") -> dict[str, Any]:
     info = _server_info()
     shortcuts: list[dict[str, str]] = []
     for label, p in [("Home", info["home"]), *[(posixpath.basename(x.rstrip("/")) or x, x) for x in info["lockdown"]],
@@ -452,7 +465,7 @@ def server_browse(path: str | None, show_all: bool = False) -> dict[str, Any]:
         full = posixpath.join(path, name)
         if i.get("isDirectory"):
             folders.append({"name": name, "path": full, "read_only": bool(i.get("readOnly"))})
-        elif wanted(name, show_all):
+        elif wanted(name, show_all, kind):
             files.append({"name": name, "path": full, "size": i.get("size"), "modified": epoch(i.get("modifiedTimeStamp")),
                           "read_only": bool(i.get("readOnly"))})
     folders.sort(key=lambda f: f["name"].lower())
@@ -477,8 +490,8 @@ def server_read(path: str) -> dict[str, Any]:
         raise LookupError(f"{path} doesn't exist on the SAS server (or the SAS session can't read it).")
     if props.get("isDirectory"):
         raise ValueError(f"{path} is a folder.")
-    if (props.get("size") or 0) > MAX_FILE_BYTES:
-        raise ValueError(f"{path} is larger than {MAX_FILE_BYTES // 1_000_000} MB.")
+    if (props.get("size") or 0) > max_bytes(path):
+        raise ValueError(f"{path} is larger than {max_bytes(path) // 1_000_000} MB.")
     status, raw, headers = _srv("GET", path, "/content", accept="*/*", raw=True)
     if status != 200:
         raise _fail(status, raw, f"read {path}")
@@ -488,8 +501,8 @@ def server_read(path: str) -> dict[str, Any]:
 def server_write(path: str, text: str, expected: str | None = None, overwrite: bool = False) -> dict[str, Any]:
     path = norm_path(path)
     data = text.encode("utf-8")
-    if len(data) > MAX_FILE_BYTES:
-        raise ValueError(f"The text is larger than {MAX_FILE_BYTES // 1_000_000} MB.")
+    if len(data) > max_bytes(path):
+        raise ValueError(f"The text is larger than {max_bytes(path) // 1_000_000} MB.")
     split(path)
     props, current = _server_props(path)
     if props is not None and props.get("isDirectory"):
@@ -523,7 +536,7 @@ def server_mkdir(parent: str, name: str) -> dict[str, Any]:
 
 
 def server_delete(path: str) -> bool:
-    """Delete one file or empty folder (the tests' cleanup only; the editor never deletes)."""
+    """Delete one file or empty folder without the file browser's checks (the tests' cleanup)."""
     props, etag = _server_props(path)
     if props is None:
         return False
@@ -533,19 +546,188 @@ def server_delete(path: str) -> bool:
     return True
 
 
+# ------------------------------------------------------------------ rename and delete (the file browser)
+# Only one item at a time, by its path in the folder the browser shows: a rename keeps the item in its folder (the
+# new name is a plain name), a folder is only deleted when it's empty, and top-level folders, My Folder, the SAS
+# server's home and lockdown folders (and the folders above them) are never renamed or deleted. Each change reads
+# the item's version first and sends it as If-Match, so an item changed meanwhile isn't touched (412 ->
+# ``conflict``); ``expected_modified`` (the modified time the browser listed) also catches a file changed between
+# listing and clicking.
+
+
+class Protected(ValueError):
+    """An item the file browser never renames or deletes."""
+
+
+def changed_since(listed: float | None, current: float | None) -> bool:
+    """The item's modified time differs from the one the browser listed (both epoch seconds)."""
+    return listed is not None and current is not None and abs(float(listed) - float(current)) >= 1
+
+
+def check_target(path: str, protected: list[str]) -> str:
+    """The path to rename / delete: not the root, not a top-level item, not a protected folder or one above it."""
+    path = norm_path(path)
+    parent, _ = split(path)
+    if parent == "/":
+        raise Protected(f"{path} is a top-level item: it can't be renamed or deleted here.")
+    for p in protected:
+        p = norm_path(p)
+        if path == p or p.startswith(path + "/"):
+            raise Protected(f"{path} can't be renamed or deleted here (it is or holds {p}).")
+    return path
+
+
+def new_sibling(path: str, new_name: str) -> str:
+    """The renamed path: same folder, a plain new name (a file keeps its extension when the new name has none)."""
+    parent, name = split(path)
+    new_name = check_name((new_name or "").strip())
+    if not name.startswith(".") and "." in name.strip(".") and "." not in new_name.strip("."):
+        new_name += posixpath.splitext(name)[1]
+    return posixpath.join(parent, new_name)
+
+
+def _content_protected() -> list[str]:
+    my = _my_folder()
+    return [my] if my else []
+
+
+def _content_item(path: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    folder, member = _content_member(path)
+    if member is None:
+        raise LookupError(f"{path} doesn't exist in SAS Content (refresh the list).")
+    if not (_is_file(member) or _is_folder(member)):
+        raise ValueError(f"{path} is a {member.get('contentType') or 'item'} (a report or another kind of SAS Content "
+                         "item): only files and folders can be renamed or deleted here.")
+    return folder, member
+
+
+def _content_meta(member: dict[str, Any], path: str) -> tuple[dict[str, Any], str | None]:
+    accept = f"{_FOLDER_JSON}, application/json" if _is_folder(member) else f"{_FILE_JSON}, application/json"
+    status, meta, headers = _http("GET", member["uri"], accept=accept)
+    if status != 200 or not isinstance(meta, dict):
+        raise _fail(status, meta, f"read {path}")
+    return meta, headers.get("etag")
+
+
+def content_rename(path: str, new_name: str, expected_modified: float | None = None) -> dict[str, Any]:
+    path = check_target(path, _content_protected())
+    new = new_sibling(path, new_name)
+    folder, member = _content_item(path)
+    is_folder = _is_folder(member)
+    if new == path:
+        return {"renamed": False, "unchanged": True, "path": path, "new_path": new, "folder": is_folder}
+    if any(m.get("name") == posixpath.basename(new) for m in _members(folder["id"])):
+        return {"renamed": False, "exists": True, "path": path, "new_path": new, "folder": is_folder}
+    meta, etag = _content_meta(member, path)
+    if not is_folder and changed_since(expected_modified, epoch(meta.get("modifiedTimeStamp"))):
+        return {"renamed": False, "conflict": True, "path": path, "folder": False,
+                "modified": epoch(meta.get("modifiedTimeStamp")), "modified_by": meta.get("modifiedBy")}
+    body = {k: v for k, v in meta.items() if k != "links"}
+    body["name"] = posixpath.basename(new)
+    ctype = _FOLDER_JSON if is_folder else _FILE_JSON
+    status, out, rh = _http("PUT", member["uri"], body=body, content_type=ctype, accept=f"{ctype}, application/json",
+                            headers={"If-Match": etag or "*"})
+    if status == 412:
+        return {"renamed": False, "conflict": True, "path": path, "folder": is_folder}
+    if status == 409:
+        return {"renamed": False, "exists": True, "path": path, "new_path": new, "folder": is_folder}
+    if status not in (200, 204):
+        raise _fail(status, out, f"rename {path}")
+    # A file's version (ETag) changes with the rename: an editor that had the old one gets the new one.
+    versions = {} if is_folder else {"old_version": etag, "version": rh.get("etag")}
+    return {"renamed": True, "path": path, "new_path": new, "folder": is_folder, **versions}
+
+
+def content_delete(path: str, expected_modified: float | None = None) -> dict[str, Any]:
+    path = check_target(path, _content_protected())
+    _, member = _content_item(path)
+    is_folder = _is_folder(member)
+    meta, etag = _content_meta(member, path)
+    if is_folder:
+        inside = _members(member["uri"].rsplit("/", 1)[-1])
+        if inside:
+            return {"deleted": False, "not_empty": True, "path": path, "folder": True, "items": len(inside)}
+    elif changed_since(expected_modified, epoch(meta.get("modifiedTimeStamp"))):
+        return {"deleted": False, "conflict": True, "path": path, "folder": False,
+                "modified": epoch(meta.get("modifiedTimeStamp")), "modified_by": meta.get("modifiedBy")}
+    status, body, _ = _http("DELETE", member["uri"], headers={"If-Match": etag} if etag else None)
+    if status == 412:
+        return {"deleted": False, "conflict": True, "path": path, "folder": is_folder}
+    if status == 409 and is_folder:
+        return {"deleted": False, "not_empty": True, "path": path, "folder": True}
+    if status not in (200, 204):
+        raise _fail(status, body, f"delete {path}")
+    return {"deleted": True, "path": path, "folder": is_folder}
+
+
+def _server_protected() -> list[str]:
+    info = _server_info()
+    return [p for p in [info.get("home"), *info.get("lockdown", [])] if p]
+
+
+def server_rename(path: str, new_name: str, expected_modified: float | None = None) -> dict[str, Any]:
+    path = check_target(path, _server_protected())
+    new = new_sibling(path, new_name)
+    props, etag = _server_props(path)
+    if props is None:
+        raise LookupError(f"{path} doesn't exist on the SAS server (refresh the list).")
+    is_folder = bool(props.get("isDirectory"))
+    if new == path:
+        return {"renamed": False, "unchanged": True, "path": path, "new_path": new, "folder": is_folder}
+    if _server_props(new)[0] is not None:
+        return {"renamed": False, "exists": True, "path": path, "new_path": new, "folder": is_folder}
+    if not is_folder and changed_since(expected_modified, epoch(props.get("modifiedTimeStamp"))):
+        return {"renamed": False, "conflict": True, "path": path, "folder": False, "modified": epoch(props.get("modifiedTimeStamp"))}
+    body = {"name": posixpath.basename(new), "path": posixpath.dirname(path)}
+    status, out, rh = _srv("PUT", path, body=body, content_type=_FILE_PROPS, accept=f"{_FILE_PROPS}, application/json",
+                           headers={"If-Match": etag or "*"})
+    if status == 412:
+        return {"renamed": False, "conflict": True, "path": path, "folder": is_folder}
+    if status not in (200, 201, 204):
+        raise _fail(status, out, f"rename {path}")
+    versions = {} if is_folder else {"old_version": etag, "version": rh.get("etag")}
+    return {"renamed": True, "path": path, "new_path": new, "folder": is_folder, **versions}
+
+
+def server_remove(path: str, expected_modified: float | None = None) -> dict[str, Any]:
+    path = check_target(path, _server_protected())
+    props, etag = _server_props(path)
+    if props is None:
+        raise LookupError(f"{path} doesn't exist on the SAS server (refresh the list).")
+    is_folder = bool(props.get("isDirectory"))
+    if is_folder:
+        status, body, _ = _srv("GET", path, "/members?limit=1", accept=_COLLECTION)
+        if status != 200:
+            raise _fail(status, body, f"list {path}")
+        if _items(body):  # hidden (dot) files count too
+            return {"deleted": False, "not_empty": True, "path": path, "folder": True}
+    elif changed_since(expected_modified, epoch(props.get("modifiedTimeStamp"))):
+        return {"deleted": False, "conflict": True, "path": path, "folder": False, "modified": epoch(props.get("modifiedTimeStamp"))}
+    status, body, _ = _srv("DELETE", path, headers={"If-Match": etag or "*"})
+    if status == 412:
+        return {"deleted": False, "conflict": True, "path": path, "folder": is_folder}
+    if status not in (200, 204):
+        raise _fail(status, body, f"delete {path}")
+    return {"deleted": True, "path": path, "folder": is_folder}
+
+
 # ------------------------------------------------------------------ the editor's entry points
 
 
-def browse(location: str, path: str | None = None, show_all: bool = False) -> dict[str, Any]:
+def browse(location: str, path: str | None = None, show_all: bool = False, kind: str = "sql") -> dict[str, Any]:
     if location not in LOCATIONS:
         raise ValueError(f"location must be one of {', '.join(LOCATIONS)}")
+    if kind not in KINDS:
+        raise ValueError(f"kind must be one of {', '.join(KINDS)}")
     conn = active_connection()
-    data = (content_browse if location == "content" else server_browse)(path, show_all)
+    data = (content_browse if location == "content" else server_browse)(path, show_all, kind)
     prefix = _SCHEMES[location] + conn
     for f in data["files"]:
         f["ref"] = prefix + f["path"]
+    for f in data["folders"]:
+        f["ref"] = prefix + f["path"]
     return {**data, "location": location, "label": LABELS[location], "connection": conn, "ref_prefix": prefix,
-            "show_all": show_all}
+            "show_all": show_all, "kind": kind, "manage": True}
 
 
 def mkdir(location: str, parent: str, name: str) -> dict[str, Any]:
@@ -564,7 +746,7 @@ def read(ref: str) -> dict[str, Any]:
 
 
 def write(ref: str, text: str, *, expected: str | None = None, overwrite: bool = False,
-          use_active: bool = False) -> dict[str, Any]:
+          use_active: bool = False, suffix: str = ".sql") -> dict[str, Any]:
     """Save to a ref. ``use_active``: save a file of another connection to the same path on the active one (it's
     a different file there, so the version opened elsewhere doesn't apply)."""
     loc, conn, path = parse_ref(ref)
@@ -575,8 +757,30 @@ def write(ref: str, text: str, *, expected: str | None = None, overwrite: bool =
                 "active": exc.active, "message": str(exc)}
     if active != conn:
         expected = None
-    path = with_suffix(path)
+    path = with_suffix(path, suffix)
     ref = make_ref(loc, active, path)
     out = (content_write if loc == "content" else server_write)(path, text, expected, overwrite)
     return {**out, "ref": make_ref(loc, active, out.get("path", path)), "name": posixpath.basename(path),
             "location": loc, "connection": active, "display": display(ref)}
+
+
+def rename(location: str, path: str, new_name: str, expected_modified: float | None = None) -> dict[str, Any]:
+    """Rename a file or folder in its folder on the active connection (``check_target`` says what's refused).
+    ``from_ref`` / ``to_ref``: the refs before and after, for the editors that have the file (or a file in the
+    folder) open."""
+    if location not in LOCATIONS:
+        raise ValueError(f"location must be one of {', '.join(LOCATIONS)}")
+    conn = active_connection()
+    out = (content_rename if location == "content" else server_rename)(path, new_name, expected_modified)
+    prefix = _SCHEMES[location] + conn
+    return {**out, "location": location, "connection": conn, "from_ref": prefix + out["path"],
+            "to_ref": prefix + out["new_path"] if out.get("new_path") else None}
+
+
+def remove(location: str, path: str, expected_modified: float | None = None) -> dict[str, Any]:
+    """Delete one file, or one empty folder, on the active connection."""
+    if location not in LOCATIONS:
+        raise ValueError(f"location must be one of {', '.join(LOCATIONS)}")
+    conn = active_connection()
+    out = (content_delete if location == "content" else server_remove)(path, expected_modified)
+    return {**out, "location": location, "connection": conn, "from_ref": _SCHEMES[location] + conn + out["path"]}

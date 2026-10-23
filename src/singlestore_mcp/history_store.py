@@ -31,6 +31,18 @@ MARKER_PREFIX = "/* s2-"
 _MARKER = "/* s2-history-store */"
 SHAPE_CHARS = 400          # a shape is identified by the first 400 characters of the SQL
 _SAMPLE_CHARS = 300
+# Password-like parameters (e.g. sasepFunction's databasePassword="…", libname pwd=…) are never stored.
+_SECRET_KEY = r"""(\b\w*(?:password|passwd|pwd|secret|token)\w*(?:\\?["'])?\s*[=:]\s*)"""  # key= / "key": / \"key\":
+_SECRET_QUOTED = re.compile(_SECRET_KEY + r"""(\\?["'])(.*?)(?<!\\)\2""", re.I)  # key="…" / key='…' / key=\"…\"
+_SECRET_BARE = re.compile(_SECRET_KEY + r"""([^\s,;)"'\\]+)""", re.I)          # key=value
+
+
+def mask_secrets(text: str | None) -> str | None:
+    """The text with the values of password-like parameters replaced by ***."""
+    if not text:
+        return text
+    text = _SECRET_QUOTED.sub(lambda m: f"{m.group(1)}{m.group(2)}***{m.group(2)}", text)
+    return _SECRET_BARE.sub(lambda m: m.group(0) if m.group(2) == "***" else f"{m.group(1)}***", text)
 _MIN_SYNC_GAP_S = 20
 _OVERLAP_S = 120           # re-read a little before the newest stored event (clock jitter between nodes)
 
@@ -293,6 +305,7 @@ _SAS_EP = re.compile(r"`?sasepFunction`?\s*\(|\b(?:FROM|JOIN|INTO|UPDATE)\s+`?EP
 SAS_WORK_TABLE = re.compile(r"^(?:_dm|_flw|SASTMP)", re.I)
 # Bump when origin() changes, so stored rows are labelled again (see _migrate). 1: VA / CAS EP format functions.
 _ORIGIN_RULES = 1
+_SECRETS_MASKED = 2  # user_version from which stored samples / plan texts have their secrets masked
 
 
 _WORKLOAD = re.compile(r"\s*/\* workload:(.+?) stmt:[\w\-]+ \*/")
@@ -382,6 +395,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.executemany("UPDATE plans SET origin = ? WHERE rowid = ?",
                          [(origin(r["text"]), r["rowid"]) for r in conn.execute("SELECT rowid, text FROM plans").fetchall()])
         conn.execute(f"PRAGMA user_version = {_ORIGIN_RULES}")
+    # Rows saved before secrets were masked: mask them once (and compact the file so the old text is gone).
+    if conn.execute("PRAGMA user_version").fetchone()[0] < _SECRETS_MASKED:
+        conn.executemany("UPDATE runs SET sample = ? WHERE rowid = ?",
+                         [(mask_secrets(r["sample"]), r["rowid"]) for r in conn.execute("SELECT rowid, sample FROM runs").fetchall()
+                          if r["sample"] and mask_secrets(r["sample"]) != r["sample"]])
+        conn.executemany("UPDATE plans SET text = ? WHERE rowid = ?",
+                         [(mask_secrets(r["text"]), r["rowid"]) for r in conn.execute("SELECT rowid, text FROM plans").fetchall()
+                          if r["text"] and mask_secrets(r["text"]) != r["text"]])
+        conn.execute(f"PRAGMA user_version = {_SECRETS_MASKED}")
+        conn.commit()
+        conn.execute("VACUUM")
     conn.commit()
 
 
@@ -446,7 +470,7 @@ def sync(force: bool = False, min_ms: int = 1000) -> dict[str, Any]:
                 r["TIME"].isoformat(sep=" ") if hasattr(r["TIME"], "isoformat") else str(r["TIME"]),
                 int(r["ms"] or 0), r["user"], dbname, 0 if r["ok"] in (0, False) else 1,
                 r["error_code"] or None, r["category"], None if r["row_count"] is None else int(r["row_count"]),
-                shape_of(head), " ".join(head.split())[:_SAMPLE_CHARS], origin(head),
+                shape_of(head), mask_secrets(" ".join(head.split())[:_SAMPLE_CHARS]), origin(head),
                 json.dumps(table_names(head, dbname)), None if r["plan_id"] in (None, -1) else int(r["plan_id"]),
                 statement_key(head, dbname),
             ))
@@ -560,7 +584,8 @@ def save_plans(plans: list[dict[str, Any]], force: bool = False) -> dict[str, An
             f"INSERT INTO plans ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})"
             " ON CONFLICT (source, plan_key) DO UPDATE SET "
             + ", ".join(f"{c} = excluded.{c}" for c in (*_PLAN_COLUMNS, "seen") if c not in ("node_id", "plan_id", "first_load")),
-            [(src, p["plan_key"], *[json.dumps(p[c]) if c == "tables" else p[c] for c in _PLAN_COLUMNS], seen)
+            [(src, p["plan_key"], *[json.dumps(p[c]) if c == "tables" else mask_secrets(p[c]) if c == "text" else p[c]
+               for c in _PLAN_COLUMNS], seen)
              for p in plans])
         added = 0
         if sample:
@@ -669,6 +694,51 @@ def bucket_runs(bucket: str, failed_only: bool = False, limit: int = 500) -> dic
                       "database": r["database"], "ok": bool(r["ok"]), "error_code": r["error_code"],
                       "category": r["category"], "rows": r["rows"], "sql": r["sample"], "origin": r["origin"],
                       "shape": r["shape"]} for r in rows]}
+
+
+_KEPT_COLUMNS = ("event_key, finished, ms, user, database, ok, error_code, category, rows, sample, origin, shape,"
+                 " tables, plan_id, stmt")
+
+
+def _kept(r: sqlite3.Row) -> dict[str, Any]:
+    try:
+        tables = json.loads(r["tables"] or "[]")
+    except ValueError:
+        tables = []
+    return {"key": r["event_key"], "finished": r["finished"], "ms": r["ms"], "user": r["user"], "database": r["database"],
+            "ok": bool(r["ok"]), "error_code": r["error_code"], "category": r["category"], "rows": r["rows"],
+            "sample": r["sample"] or "", "origin": r["origin"], "shape": r["shape"], "tables": tables,
+            "plan_id": r["plan_id"], "stmt": r["stmt"]}
+
+
+def kept_runs(before: str | None, since: str | None = None, min_ms: int = 1000, limit: int = 5000) -> list[dict[str, Any]]:
+    """Stored runs the cluster's query history no longer has: finished before ``before`` (its oldest event; None:
+    the trace is empty, so every stored run), from ``since`` on, at least ``min_ms``; newest first."""
+    cond, params = ["source = ?", "ms >= ?"], [source_id(), int(min_ms)]
+    if before:
+        cond.append("finished < ?")
+        params.append(before)
+    if since:
+        cond.append("finished >= ?")
+        params.append(since)
+    conn = connect()
+    try:
+        rows = conn.execute(f"SELECT {_KEPT_COLUMNS} FROM runs WHERE {' AND '.join(cond)} ORDER BY finished DESC LIMIT ?",
+                            (*params, max(0, int(limit)))).fetchall()
+    finally:
+        conn.close()
+    return [_kept(r) for r in rows]
+
+
+def kept_run(event_key: str) -> dict[str, Any] | None:
+    """One stored run by its event key ("node:epoch:id"), or None."""
+    conn = connect()
+    try:
+        r = conn.execute(f"SELECT {_KEPT_COLUMNS} FROM runs WHERE source = ? AND event_key = ?",
+                         (source_id(), event_key)).fetchone()
+    finally:
+        conn.close()
+    return _kept(r) if r else None
 
 
 def trends(days: int = 30, now: str | None = None) -> dict[str, Any]:

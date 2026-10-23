@@ -107,7 +107,9 @@ function rulesPanel() {
     "seconds" in r ? [h("input", { class: "s2-input", type: "number", min: "1", value: val(name, "seconds"), "aria-label": `${r.label} (seconds)`,
       onchange: (e) => set(name, "seconds", Number(e.target.value)) }), "s"]
       : "percent" in r ? [h("input", { class: "s2-input", type: "number", min: "1", max: "100", value: val(name, "percent"), "aria-label": `${r.label} (percent)`,
-        onchange: (e) => set(name, "percent", Number(e.target.value)) }), "%"] : null));
+        onchange: (e) => set(name, "percent", Number(e.target.value)) }), "%"]
+      : "days" in r ? [h("input", { class: "s2-input", type: "number", min: "1", max: "365", value: val(name, "days"), "aria-label": `${r.label} (days)`,
+        onchange: (e) => set(name, "days", Number(e.target.value)) }), "days"] : null));
   const interval = state.draftSettings?.interval_s ?? d.settings.interval_s;
   return h("section", { class: "s2-card al-rules", "aria-label": "Alert rules" },
     h("h2", {}, "Rules"),

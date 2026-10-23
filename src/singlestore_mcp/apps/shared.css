@@ -146,3 +146,20 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 .s2-toast.ok { background: var(--s2-ok-bg); color: var(--s2-ok); }
 .s2-toast.err { background: var(--s2-err-bg); color: var(--s2-err); }
+
+/* File browser (S2.fileBrowser / S2.fileLocations); apps can style .list / .item further */
+.s2-fb .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.s2-fb .row + .row, .s2-fb .list + .row { margin-top: 6px; }
+.s2-fb .list { margin-top: 6px; max-height: 220px; overflow: auto; border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius-sm); background: var(--s2-bg); }
+.s2-fb .item { display: flex; gap: 10px; width: 100%; border: 0; background: none; text-align: left; padding: 4px 8px; cursor: pointer; font: inherit; color: inherit; }
+.s2-fb .item:hover, .s2-fb .item:focus-visible { background: var(--s2-info-bg); }
+.s2-fb .item .n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--s2-mono); }
+.s2-fb .item .m { color: var(--s2-text-3); white-space: nowrap; }
+.s2-fb .warn { color: var(--s2-warn); }
+.s2-fb-row { display: flex; align-items: center; }
+.s2-fb-row > .item { flex: 1; min-width: 0; }
+.s2-fb-row:hover { background: var(--s2-info-bg); }
+.s2-fb-acts { display: flex; gap: 2px; padding-right: 4px; opacity: 0; }
+.s2-fb-row:hover .s2-fb-acts, .s2-fb-row:focus-within .s2-fb-acts { opacity: 1; }
+.s2-fb-acts .s2-btn { padding: 0 6px; font-size: 11px; }
+.s2-fb-locs { margin-bottom: 6px; }

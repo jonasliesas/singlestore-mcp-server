@@ -355,6 +355,8 @@ class Database:
         max_rows: int | None = None,
         chunk: int = 1000,
         on_connection: Any = None,
+        write: bool = False,
+        on_rowcount: Any = None,
     ) -> Iterator[tuple[list[str], list[dict[str, Any]]]]:
         """Run one statement and yield its result in chunks as it arrives: first ``(columns, [])``, then
         ``(columns, rows)`` per chunk of up to ``chunk`` rows. Nothing is buffered beyond one chunk, so the
@@ -362,6 +364,8 @@ class Database:
 
         ``max_rows`` sets sql_select_limit as in ``execute`` (an explicit LIMIT in the SQL overrides it).
         ``on_connection(connection_id)`` is called before the statement is sent (for a KILL QUERY).
+        ``write``: a statement that may change data (confirmed in the editor): never sent a second time, even when
+        the connection drops right after sending it. ``on_rowcount(n)``: the affected-rows count, once it's known.
 
         Stop early by closing the generator (``close()`` / leaving a ``for`` loop): the rest of the result
         is read and dropped in the background for a few seconds so the connection can go back to the
@@ -397,7 +401,11 @@ class Database:
                 finally:
                     if _SESSION_CHANGE.match(sql):
                         pc.database = pc.select_limit = _UNKNOWN
+                if write:
+                    state = "executed"  # a write that ran is never sent again
                 columns = [d[0] for d in sscur.description] if sscur.description is not None else []
+                if on_rowcount is not None and not columns:
+                    on_rowcount(getattr(sscur, "rowcount", None))
                 state = "yielding"
                 yield columns, []
                 while columns:
@@ -413,11 +421,11 @@ class Database:
             except (s2.Error, OSError) as exc:
                 if _is_connection_error(exc):
                     self._drop_idle()
-                    if attempt == 0 and state in ("start", "sent"):
+                    if attempt == 0 and (state == "start" or (state == "sent" and not write)):
                         state = "retry"
                         continue
                 # A plain SQL error (syntax, unknown table) before any row leaves the connection usable.
-                state = "error_ok" if state in ("start", "sent") and not _is_connection_error(exc) else "failed"
+                state = "error_ok" if state in ("start", "sent", "executed") and not _is_connection_error(exc) else "failed"
                 raise
             except BaseException:
                 state = "failed"

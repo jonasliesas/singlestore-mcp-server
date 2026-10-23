@@ -162,3 +162,17 @@ def test_browser_view_allows_every_tool_an_app_calls(page: str) -> None:
     missing = sorted(called - allowed)
     assert not missing, (f"{page} calls tool(s) the browser view refuses ('not available in the browser view'): {missing}. "
                          "Make them app tools or add them to _EXTRA_TOOLS in apps/browser_view.py.")
+
+
+def test_ui_fixtures_reach_ui_tests_in_a_mixed_call() -> None:
+    """``pytest tests/x.py tests/ui/y.py tests/z.py tests/ui/w.py`` used to fail with "fixture 'ui' not found" for w:
+    pytest 9 builds a second ``tests/ui`` node for the later file, and fixtures of tests/ui/conftest.py were bound to
+    the first one. The UI fixtures now live in tests/conftest.py. A UI test whose closure has ``ui`` (so ``page``)
+    is parametrized by pytest-playwright ("[chromium]"): collection shows it without running anything."""
+    pytest.importorskip("pytest_playwright")
+    files = ["tests/test_static.py", "tests/ui/test_cluster_monitor_ui.py", "tests/test_compare.py", "tests/ui/test_apps.py"]
+    out = subprocess.run([sys.executable, "-m", "pytest", "--co", "-q", "-p", "no:cacheprovider", *files],
+                         cwd=REPO, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stdout[-2000:] + out.stderr[-2000:]
+    ui_ids = [line for line in out.stdout.splitlines() if line.startswith("tests/ui/test_apps.py::test_workspace_every_view_loads")]
+    assert ui_ids == ["tests/ui/test_apps.py::test_workspace_every_view_loads[chromium]"], ui_ids

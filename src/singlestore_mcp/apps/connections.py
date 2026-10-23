@@ -14,7 +14,7 @@ from typing import Any
 from mcp.types import CallToolResult, ToolAnnotations
 
 from .. import connections, sas_viya
-from ._core import APP_ONLY, apps, register_app, tool_result, with_browser_link
+from ._core import APP_ONLY, apps, browser_url, register_app, reset_browser_links, tool_result, with_browser_link
 
 URI = "ui://singlestore/connections.html"
 READ_ONLY = ToolAnnotations(readOnlyHint=True)
@@ -139,33 +139,50 @@ def sas_connections_state() -> CallToolResult:
     return tool_result(_sas_summary(state), state)
 
 
-_SESSION_KEYS = ("url", "compute_context", "cas_server", "startup_code", "ssl_verify", "client_id")
+# (libref / auto_libname need no restart: the automatic library follows them before the next run)
+_SESSION_KEYS = ("url", "compute_context", "cas_server", "startup_code", "ssl_verify", "client_id",
+                 "sas9_signon", "sas9_server", "sas9_libraries")
 
 
 def _reset_if_active_changes(name: str | None, values: dict[str, Any]) -> None:
-    """End the Workspace's SAS sessions before connection ``name``'s session settings change, if it's the active
-    one (so they're closed on the Viya they were started on, with its sign-in)."""
+    """End the Workspace's SAS sessions of connection ``name`` before its session settings change (so they're
+    closed on the Viya they were started on, with its sign-in), or before it's renamed. Every connection has its
+    own sessions (SQL Editor tabs can use one that isn't active)."""
     from .. import sas_rest
 
-    act = sas_viya.active_name()
-    if not act or name != act:
+    if not name:
         return
-    cur = sas_viya.settings(act)
-    if any(k in values and values[k] is not None and values[k] != cur[k] for k in _SESSION_KEYS):
-        sas_rest.reset()
+    try:
+        cur = sas_viya.settings(name)
+    except LookupError:
+        return
+    renamed = bool(values.get("name")) and values.get("name") != name
+    if renamed or any(k in values and values[k] is not None and values[k] != cur[k] for k in _SESSION_KEYS):
+        sas_rest.reset(name)
+
+
+def _prewarm_active(name: str | None) -> None:
+    """Start the active SAS Viya connection's SAS session in the background (it was switched to, saved or signed in
+    to); another connection's sessions stay lazy. Never fails the caller."""
+    from .. import sas_prewarm
+
+    try:
+        if name and name == sas_viya.active_name():
+            sas_prewarm.prewarm(name)
+    except Exception:  # noqa: BLE001 - pre-warming is a convenience
+        pass
 
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=CHANGES)
 def sas_connection_save(connection: dict[str, Any], original_name: str | None = None, activate: bool = False) -> CallToolResult:
     """Create or update a saved SAS Viya connection (name, Viya address, compute context, client ID, certificate
     check, SingleStore libref, CAS server, startup code). ``activate`` also makes it the active one."""
-    from .. import sas_rest
 
     _reset_if_active_changes(original_name, connection)
     c = sas_viya.save_connection(connection, original_name)
     if activate and sas_viya.active_name() != c["name"]:
-        sas_rest.reset()
-        sas_viya.activate(c["name"])
+        sas_viya.activate(c["name"])  # its own sessions: the other connection's keep running for tabs that use it
+    _prewarm_active(c["name"])
     return tool_result(f"Saved {c['name']}", _sas_state())
 
 
@@ -174,22 +191,21 @@ def sas_connection_delete(name: str) -> CallToolResult:
     """Delete a saved SAS Viya connection and its sign-in."""
     from .. import sas_rest
 
-    if sas_viya.active_name() == name:
-        sas_rest.reset()
+    sas_viya.settings(name)  # LookupError before ending anything
+    sas_rest.reset(name)
     sas_viya.delete_connection(name)
     return tool_result(f"Deleted {name}", _sas_state())
 
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=CHANGES)
 def sas_connection_activate(name: str) -> CallToolResult:
-    """Make a saved SAS Viya connection the active one: the Workspace's SAS sessions restart on it, and new
-    notebook kernels use it."""
-    from .. import sas_rest
-
+    """Make a saved SAS Viya connection the active one: the Workspace's SAS views and new notebook kernels use it.
+    Each connection has its own SAS sessions, so nothing is restarted (SQL Editor tabs pinned to the other
+    connection keep theirs)."""
     if sas_viya.active_name() != name:
-        sas_viya.settings(name)  # LookupError before ending any session
-        sas_rest.reset()
+        sas_viya.settings(name)  # LookupError for an unknown name
         sas_viya.activate(name)
+    _prewarm_active(name)
     return tool_result(f"Active SAS Viya connection: {name}", _sas_state())
 
 
@@ -206,6 +222,7 @@ def sas_viya_save(settings: dict[str, Any]) -> CallToolResult:
     blanks the saved one). Without any connection, an address creates one."""
     _reset_if_active_changes(sas_viya.active_name(), settings)
     sas_viya.save_settings(settings)
+    _prewarm_active(sas_viya.active_name())
     return tool_result("saved", sas_viya.status())
 
 
@@ -216,6 +233,7 @@ def sas_viya_sign_in(code: str | None = None, name: str | None = None) -> CallTo
     if not code:
         return tool_result("Sign in in the browser, then paste the code.", sas_viya.sign_in_start(name))
     info = sas_viya.sign_in_finish(code, name)
+    _prewarm_active(info.get("name"))
     return tool_result("Signed in to SAS Viya.", {**info, "state": _sas_state()})
 
 
@@ -224,8 +242,7 @@ def sas_viya_sign_out(name: str | None = None) -> CallToolResult:
     """Forget the sign-in of a SAS Viya connection (default: the active one)."""
     from .. import sas_rest
 
-    if name is None or name == sas_viya.active_name():
-        sas_rest.reset()
+    sas_rest.reset(name or sas_viya.active_name())
     sas_viya.sign_out(name)
     return tool_result("Signed out.", _sas_state())
 
@@ -256,3 +273,14 @@ def connection_helios_ca() -> CallToolResult:
             raise ValueError("The download from SingleStore didn't look like a certificate bundle.")
         path.write_bytes(pem)
     return tool_result(f"CA bundle at {path}", {"path": str(path)})
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=CHANGES)
+def browser_reset_links() -> CallToolResult:
+    """Give the browser view a new secret token: every open browser tab and every browser link made before stops
+    working (the tab shows "Session ended"). Restarts keep the token; this is the way to change it."""
+    if not reset_browser_links():
+        raise ValueError("This server has no browser view.")
+    url = browser_url("connections_window", {})
+    return tool_result("Browser links reset: open browser tabs show \"Session ended\"; get new links from Claude.",
+                       {"reset": True, "browser_url": url})

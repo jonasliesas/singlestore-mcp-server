@@ -27,9 +27,10 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
+from . import browser_address
 from . import workload as workload_mod
 from .apps import apps
-from .apps._core import set_browser_url_factory, surface_errors
+from .apps._core import set_browser_reset, set_browser_url_factory, surface_errors
 from .apps.browser_view import BrowserView
 from .apps.sql_editor import deliver_reply
 from .db import InvalidIdentifierError, db, quote_identifier
@@ -342,8 +343,10 @@ def test_pipeline(pipeline_name: str, database: str | None = None, limit: int | 
     return _exec(sql, database=database)
 
 
-browser_view = BrowserView(mcp)
-set_browser_url_factory(browser_view.url)
+# The address is kept per MCP client (browser_address), so open tabs reconnect after a restart.
+browser_view = BrowserView(mcp, store=browser_address.store_for_this_process)
+set_browser_url_factory(lambda tool, arguments: browser_view.url(tool, arguments))
+set_browser_reset(lambda: browser_view.rotate_token())
 
 
 @tool(annotations=ToolAnnotations(readOnlyHint=True))
@@ -352,7 +355,8 @@ def browser_link(tool: str, arguments: dict[str, Any] | None = None) -> dict[str
 
     Use this when the user wants an app bigger than the chat allows or in
     their browser. Give the user the returned URL as a clickable link. It
-    works on this machine only, until the MCP server restarts.
+    works on this machine only; it keeps working across restart_server (an
+    open tab reconnects by itself).
 
     Args:
         tool: The app tool: pipeline_monitor, query_grid, schema_explorer, cluster_monitor or sql_editor.
@@ -422,8 +426,8 @@ def use_connection(name: str) -> dict[str, Any]:
 def restart_server() -> dict[str, Any]:
     """Restart the SingleStore MCP server so code and app changes load, without reconnecting.
 
-    Open apps keep working after a reload of the app; browser links made
-    before the restart stop working.
+    Open apps keep working after a reload of the app; open browser tabs and
+    browser links reconnect to the new server by themselves.
     """
     # The supervisor (singlestore_mcp.supervisor) answers this call itself;
     # reaching this function means the server runs without it.
@@ -600,6 +604,7 @@ def run_stdio() -> None:
     from . import metrics_store
 
     metrics_store.start()  # metrics history for the Cluster Monitor, from ~20 s after start (SINGLESTORE_MCP_METRICS=0: off)
+    browser_view.start_early()  # listen on the kept browser address at once: tabs open across a restart reconnect
     try:
         mcp.run(transport="stdio")
     finally:

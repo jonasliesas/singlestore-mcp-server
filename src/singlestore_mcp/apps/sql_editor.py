@@ -24,7 +24,7 @@ from mcp.types import CallToolResult, ToolAnnotations
 from .. import assistant, fileio, result_stream, sas_viya, viya_files
 from .. import sql_editor_state as editor_state
 from ..db import db
-from ._core import APP_ONLY, apps, head_hash, jsonable_rows, page_parts, register_app, tool_result, with_browser_link
+from ._core import APP_ONLY, apps, head_hash, page_parts, register_app, tool_result, with_browser_link, without_vendors
 from .query_grid import MAX_ROWS_LIMIT, ReadOnlyViolation, check_read_only
 
 URI = "ui://singlestore/sql-editor.html"
@@ -53,7 +53,8 @@ register_app(
 
 
 @apps.tool(resource_uri=WORKSPACE_URI, visibility=APP_ONLY, annotations=READ_ONLY)
-def app_page(uri: str, head: str | None = None, build: str | None = None) -> CallToolResult:
+def app_page(uri: str, head: str | None = None, build: str | None = None,
+             vendors: dict[str, str] | None = None) -> CallToolResult:
     """HTML of one of this server's app pages (the workspace loads its views with this).
 
     Tool results aren't cached by hosts, unlike resources/read, so views pick
@@ -62,7 +63,10 @@ def app_page(uri: str, head: str | None = None, build: str | None = None) -> Cal
     ``head``: the caller's shared-head hash (its ``s2-head`` meta); when it matches,
     the page comes without the shared head (``head_omitted``; the caller puts its own
     copy in at SHARED_HEAD_MARKER). ``build``: the build the caller already has; when
-    it matches, only ``unchanged`` comes back.
+    it matches, only ``unchanged`` comes back. ``vendors``: vendor blocks the caller
+    already has (name -> data-s2-hash, e.g. CodeMirror from the SQL Editor's page);
+    matching ones are left out (``vendors_omitted``; the caller puts its copy in at
+    each VENDOR_HAVE_MARKER).
     """
     parts = page_parts(uri)
     if parts is None:
@@ -71,9 +75,9 @@ def app_page(uri: str, head: str | None = None, build: str | None = None) -> Cal
     if build and build == page_build:
         return tool_result(f"{uri} unchanged", {"uri": uri, "build": page_build, "unchanged": True})
     omit = bool(head) and head == head_hash()
-    page = lite if omit else html
+    page, left_out = without_vendors(lite if omit else html, vendors)
     return tool_result(f"{uri} ({len(page) // 1024} KB)",
-                       {"uri": uri, "build": page_build, "html": page, "head_omitted": omit})
+                       {"uri": uri, "build": page_build, "html": page, "head_omitted": omit, "vendors_omitted": left_out})
 
 
 def _databases() -> list[str]:
@@ -146,13 +150,6 @@ def sql_editor(
     return tool_result(summary, data)
 
 
-def _record_failure(sql: str, database: str | None, kind: str, started: float, exc: Exception,
-                    source: dict[str, Any]) -> None:
-    message = str(exc).replace("\n", " ") or type(exc).__name__
-    editor_state.add_history(sql, database, ok=False, kind=kind, error=message, source=source,
-                             elapsed_ms=round((time.perf_counter() - started) * 1000, 1))
-
-
 def _stream_columns(stream: result_stream.Stream, rows: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
     """Column names and warnings: singlestoredb keys a repeated column name as "table.col", so the row
     keys are the reliable column list then (as in query_grid.run_query)."""
@@ -171,7 +168,7 @@ def _stream_data(stream: result_stream.Stream, rows: list[dict[str, Any]], offse
     columns, warnings = _stream_columns(stream, rows)
     return {
         **st,
-        "sql": stream.sql, "database": stream.database, "kind": "read",
+        "sql": stream.sql, "database": stream.database, "kind": "write" if stream.write else "read",
         "columns": columns, "has_result_set": bool(stream.columns),
         "rows": rows, "offset": offset,
         # Compatibility with the non-streamed result: row_count = rows read so far (the total once done).
@@ -271,34 +268,36 @@ def sql_editor_classify(statements: list[str]) -> CallToolResult:
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=WRITES)
 def sql_editor_execute(sql: str, database: str | None = None, max_rows: int = 1000, tab_id: str | None = None,
-                       tab: str | None = None, file: str | None = None) -> CallToolResult:
-    """Run any single statement the user confirmed in the SQL Editor app (writes and DDL included)."""
+                       tab: str | None = None, file: str | None = None, stream_id: str | None = None,
+                       replaces: str | None = None) -> CallToolResult:
+    """Run any single statement the user confirmed in the SQL Editor app (writes and DDL included).
+
+    Streamed like sql_editor_query: returns the first ``max_rows`` rows of a statement that returns rows (or
+    the affected-rows count) and the rest pages through sql_editor_rows; ``stream_id`` / Stop as there. The
+    statement is sent once (never retried after a dropped connection)."""
     max_rows = max(1, min(int(max_rows), MAX_ROWS_LIMIT))
     source = {"tab_id": tab_id, "tab": tab, "file": file}
-    started = time.perf_counter()
-    try:
-        columns, rows, rowcount = db.execute(sql, database=database, max_rows=max_rows + 1)
-    except Exception as exc:
-        _record_failure(sql, database, "write", started, exc, source)
-        raise
-    elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
-    data = {
-        "kind": "write",
-        "sql": sql,
-        "database": database,
-        "columns": list(dict.fromkeys(columns)),
-        "has_result_set": bool(columns),
-        "rows": jsonable_rows(rows[:max_rows]),
-        "row_count": min(len(rows), max_rows),
-        "truncated": len(rows) > max_rows,
-        "affected_rows": rowcount if rowcount is not None and rowcount >= 0 else None,
-        "elapsed_ms": elapsed_ms,
-        "max_rows": max_rows,
-        "warnings": [],
-    }
-    editor_state.add_history(sql, database, ok=True, kind="write", elapsed_ms=elapsed_ms, source=source,
-                             rows=data["row_count"] if columns else None, affected=data["affected_rows"])
-    return tool_result(f"Statement ran in {elapsed_ms} ms; {data['affected_rows']} row(s) affected", data)
+
+    def record(s: result_stream.Stream) -> None:
+        if s.error is not None:
+            editor_state.add_history(sql, database, ok=False, kind="write", error=_error_text(s.error), source=source,
+                                     elapsed_ms=s.total_ms)
+        else:
+            editor_state.add_history(sql, database, ok=True, kind="write", elapsed_ms=s.total_ms, source=source,
+                                     rows=len(s.rows) if s.columns else None, affected=s.affected)
+
+    stream = result_stream.start(sql, database, stream_id=stream_id, replaces=replaces, on_finish=record, write=True)
+    stream.wait_first(max_rows)
+    if stream.done:
+        stream.finished.wait(5)
+    if stream.error is not None and not stream.rows:
+        raise ToolError(_error_text(stream.error))
+    data = _stream_data(stream, stream.page(0, max_rows))
+    data["affected_rows"] = stream.affected if not data["has_result_set"] else None
+    more = "" if data["done"] else "; more loading"
+    return tool_result(f"Statement ran in {data['elapsed_ms']} ms; "
+                       + (f"{data['loaded']} row(s){more}" if data["has_result_set"] else f"{data['affected_rows']} row(s) affected"),
+                       data)
 
 
 # ---------------------------------------------------------------- SQL files
@@ -522,15 +521,15 @@ def sql_editor_save_file(name: str, sql: str, overwrite: bool = False, expected_
 # services) and "SAS Server" (the file system of the Workspace's Compute session). See
 # singlestore_mcp.viya_files; opening and saving go through sql_editor_open_file / _save_file with a ref.
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
-def viya_files_browse(location: str, path: str | None = None, show_all: bool = False) -> CallToolResult:
+def viya_files_browse(location: str, path: str | None = None, show_all: bool = False, kind: str = "sql") -> CallToolResult:
     """List a folder on SAS Viya for the SQL Editor's Open / Save as: subfolders and .sql / .sas files
-    (``show_all``: every file) with size and modified time.
+    (``kind="notebook"``: .ipynb, for the Notebook; ``show_all``: every file) with size and modified time.
 
     ``location``: "content" (SAS Content; starts in My Folder, shortcuts Public and all folders) or "server" (the
     SAS Compute server's file system, in the Workspace's SAS session; starts in the first lockdown path, else the
     session's home). Each file has ``ref``, the name sql_editor_open_file / _save_file take.
     """
-    data = viya_files.browse(location, path, show_all)
+    data = viya_files.browse(location, path, show_all, kind)
     return tool_result(f"{len(data['folders'])} folder(s), {len(data['files'])} file(s) in {data['label']} {data['path']}", data)
 
 

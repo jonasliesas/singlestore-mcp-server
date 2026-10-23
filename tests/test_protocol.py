@@ -189,6 +189,26 @@ def test_app_page_leaves_out_the_shared_head_the_workspace_has(mcp: McpSession) 
     assert same["unchanged"] and "html" not in same
 
 
+def test_app_page_leaves_out_vendor_blocks_the_workspace_has(mcp: McpSession) -> None:
+    """CodeMirror (~0.5 MB) is in both the SQL Editor's and the Notebook's page: the Workspace keeps the vendor blocks of
+    the first page and asks for the next without them; putting its copies back gives exactly the whole page."""
+    sql = mcp.ok("app_page", {"uri": "ui://singlestore/sql-editor.html"})["html"]
+    blocks = {m.group(1): (m.group(2), m.group(0)) for m in re.finditer(
+        r'<script data-s2-vendor="([^"]+)" data-s2-hash="([0-9a-f]+)"[^>]*>[\s\S]*?</script>', sql)}
+    assert {"codemirror-bundle.js", "singlestore_functions.json"} <= set(blocks), list(blocks)
+    uri = "ui://singlestore/notebook.html"
+    full = mcp.ok("app_page", {"uri": uri})
+    lite = mcp.ok("app_page", {"uri": uri, "vendors": {n: h for n, (h, _) in blocks.items()}})
+    assert set(lite["vendors_omitted"]) == {"codemirror-bundle.js", "singlestore_functions.json"}, lite["vendors_omitted"]
+    assert len(full["html"]) - len(lite["html"]) > 450_000
+    rebuilt = re.sub(r"<!--S2:VENDOR-HAVE:([\w.-]+)-->", lambda m: blocks[m.group(1)][1], lite["html"])
+    assert rebuilt == full["html"]
+    # A block of another version (a hash the server doesn't have) is sent again; nothing omitted without ``vendors``.
+    stale = mcp.ok("app_page", {"uri": uri, "vendors": {"codemirror-bundle.js": "000000000000"}})
+    assert stale["vendors_omitted"] == [] and stale["html"] == full["html"]
+    assert full["vendors_omitted"] == []
+
+
 def test_restart_uses_the_standby_and_keeps_working(test_home, sql_dir) -> None:
     """restart_server hands over to the pre-loaded standby process; the server answers right after."""
     env = server_env(test_home, sql_dir, {"SINGLESTORE_MCP_STANDBY_DELAY": "0.2"})
@@ -203,3 +223,42 @@ def test_restart_uses_the_standby_and_keeps_working(test_home, sql_dir) -> None:
             after = s.call("alerts_badge", timeout=60)
             assert not after.is_error, after.text
         assert any("from the standby" in m for m in messages), messages
+
+
+def _ping(base: str) -> int | None:
+    try:
+        with urllib.request.urlopen(base + "ping", timeout=5) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+    except OSError:
+        return None
+
+
+def test_browser_link_keeps_working_across_restart(test_home, sql_dir) -> None:
+    """The browser view's port and token are kept per MCP client: after restart_server (the standby takes over)
+    the new server listens on the same address at once, so an open tab's next call reaches it."""
+    env = server_env(test_home, sql_dir, {"SINGLESTORE_MCP_STANDBY_DELAY": "0.2"})
+    with McpSession(env, read_timeout=120) as s:
+        url = s.ok("browser_link", {"tool": "alerts", "arguments": {}})["url"]
+        parts = urllib.parse.urlsplit(url)
+        base, origin = f"{parts.scheme}://{parts.netloc}{parts.path}", f"{parts.scheme}://{parts.netloc}"
+        assert _ping(base) == 200
+        for _ in range(2):
+            time.sleep(3)  # let the standby load (either way the address must survive)
+            r = s.call("restart_server", timeout=90)
+            assert not r.is_error and r.data["restarted"], r.text
+            # Nobody asks for a link: the new server listens on the kept address by itself.
+            deadline = time.monotonic() + 30
+            while _ping(base) != 200 and time.monotonic() < deadline:
+                time.sleep(0.2)
+            assert _ping(base) == 200, "the old browser link doesn't reach the restarted server"
+            status, body = _post(base, "alerts_badge", {}, origin)
+            assert status == 200 and isinstance(body, dict) and not body.get("isError"), body
+        assert s.ok("browser_link", {"tool": "alerts", "arguments": {}})["url"] == url
+        assert _ping(f"{origin}/{'x' * 32}/") == 404  # another token is still refused
+    # The client went away: so did its server and the address.
+    deadline = time.monotonic() + 20
+    while _ping(base) is not None and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert _ping(base) is None

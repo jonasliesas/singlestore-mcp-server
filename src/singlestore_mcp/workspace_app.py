@@ -8,6 +8,10 @@ app window (or the default browser with --browser). A second launch reuses
 the running server and just opens another window. The server shuts down a
 few minutes after the last window closes (open pages ping it every 30 s).
 
+Its address (port and token) is kept in ``workspace.json`` and reused by the
+next start, so a window left open while the server was replaced (newer code)
+reconnects by itself. "Reset browser links" (Connections) gives it a new token.
+
 Reads the same SINGLESTORE_* environment variables as the MCP server. The
 editor's chat works through the in-editor assistant (Claude Code); "send to
 the Claude chat" isn't available here.
@@ -28,6 +32,7 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
+from . import fileio
 from .paths import data_dir
 
 DEFAULT_PORT = 8790
@@ -73,6 +78,32 @@ def _stop(state: dict) -> None:
 
 def _state_file() -> Path:
     return data_dir() / "workspace.json"
+
+
+def _previous() -> dict:
+    """The address the last workspace server used (kept after it stopped), or {}."""
+    try:
+        state = json.loads(_state_file().read_text(encoding="utf-8"))
+        port, token = state.get("port"), state.get("token")
+        if isinstance(port, int) and isinstance(token, str) and len(token) >= 16:
+            return {"port": port, "token": token}
+    except (OSError, ValueError, AttributeError):
+        pass
+    return {}
+
+
+class _StateStore:
+    """Keeps a new token (Reset browser links) in workspace.json."""
+
+    def __init__(self, state: dict) -> None:
+        self.state = state
+
+    def load(self) -> None:
+        return None
+
+    def save(self, port: int, token: str) -> None:
+        self.state.update(port=port, token=token)
+        fileio.write_text(_state_file(), json.dumps(self.state))
 
 
 def _running() -> dict | None:
@@ -156,7 +187,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Open the SingleStore Workspace in a browser window.")
     parser.add_argument("--database", help="database to start in")
     parser.add_argument("--view", default="sql", choices=["sql", "notebook", "schema", "pipelines", "cluster", "history", "security", "config", "alerts", "workload", "connections"])
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--port", type=int, default=None, help=f"default: the last one used, else {DEFAULT_PORT}")
     parser.add_argument("--browser", action="store_true", help="open in the default browser instead of an Edge app window")
     parser.add_argument("--no-open", action="store_true", help="start the server and print the URL, without opening a window")
     opts = parser.parse_args()
@@ -175,8 +206,12 @@ def main() -> None:
     # page, the database connections open in the background, and the server
     # code loads meanwhile (the slowest part: the MCP SDK). The page switches
     # to the workspace as soon as the server answers.
-    token = secrets.token_urlsafe(24)
-    port = _free_port(opts.port)
+    # The last server's address again (open windows reconnect), unless another port is asked for.
+    previous = _previous()
+    preferred = opts.port or previous.get("port") or DEFAULT_PORT
+    token = previous.get("token") if previous.get("port") == preferred else None
+    token = token or secrets.token_urlsafe(24)
+    port = _free_port(preferred)
     state = {"port": port, "token": token, "pid": os.getpid(), "build": build}
     if opts.no_open:
         pass
@@ -185,25 +220,32 @@ def main() -> None:
     threading.Thread(target=_warm_database, name="db-warm-early", daemon=True).start()
 
     # Importing the server registers every tool and app page; no MCP client needed.
+    from . import server_impl
+    from .apps._core import set_browser_reset, set_browser_url_factory
     from .apps.browser_view import BrowserView
     from .server_impl import mcp
 
+    store = _StateStore(state)
     try:
-        view = BrowserView(mcp, port=port, token=token)
+        view = BrowserView(mcp, port=port, token=token, store=store)
         view.url("sql_editor", {})  # starts the HTTP server
     except OSError:  # the port was taken in the meantime: use any free port (the splash can't follow; reopen)
-        view = BrowserView(mcp, port=0, token=token)
+        view = BrowserView(mcp, port=0, token=token, store=store)
         state["port"] = urllib.parse.urlsplit(view.url("sql_editor", {})).port
         if not opts.no_open:
             _open_window(_workspace_url(state, args), opts.browser)
     view.allow_shutdown = True
+    # Browser links and "Reset browser links" in this process use this view (not a second server on an MCP slot).
+    server_impl.browser_view = view
+    set_browser_url_factory(view.url)
+    set_browser_reset(view.rotate_token)
     from . import alerts
 
     alerts.start()  # background alert checks while the workspace server runs
     from . import metrics_store
 
     metrics_store.start()  # metrics history for the Cluster Monitor (SINGLESTORE_MCP_METRICS=0 turns it off)
-    _state_file().write_text(json.dumps(state), encoding="utf-8")
+    fileio.write_text(_state_file(), json.dumps(state))
     if opts.no_open:
         print(_workspace_url(state, args), flush=True)
 
@@ -211,10 +253,13 @@ def main() -> None:
         while time.time() - view.last_activity < IDLE_SHUTDOWN_SECONDS and not view.shutdown_requested:
             time.sleep(1)
     finally:
+        # The file stays (its port and token are reused by the next start); only the pid goes.
         try:
-            if json.loads(_state_file().read_text(encoding="utf-8")).get("pid") == os.getpid():
-                _state_file().unlink()
-        except (OSError, ValueError):
+            kept = json.loads(_state_file().read_text(encoding="utf-8"))
+            if kept.get("pid") == os.getpid():
+                kept.pop("pid", None)
+                fileio.write_text(_state_file(), json.dumps(kept))
+        except (OSError, ValueError, AttributeError):
             pass
         from . import assistant
 
