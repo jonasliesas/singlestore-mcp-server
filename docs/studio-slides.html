@@ -319,6 +319,20 @@ aside.n { display: none; }
 </section>
 
 <section class="slide" id="s11">
+  <div class="head"><span class="eyebrow">Live demo</span><h2>From a question to a result, without leaving the Studio</h2></div>
+  <div class="body">
+    <div class="cols four">
+      <div class="card step acc"><span class="n">1</span><h4>Ask</h4><p>A question in plain words in the Studio's panel. Claude reads the schema and answers with SQL that uses the real table and column names.</p><div class="out"><b>You see:</b> the assistant working inside the editor, read-only.</div></div>
+      <div class="card step s2"><span class="n">2</span><h4>Run</h4><p>Insert the SQL and run it in SingleStore. Then switch Run as to PROC SQL and run the same query through SAS Viya.</p><div class="out"><b>You see:</b> result, SAS log and what was pushed down.</div></div>
+      <div class="card step viya"><span class="n">3</span><h4>Explore</h4><p>Take the result into a notebook: a Python chart in the next cell, or a SAS cell reading the table through the S2 library.</p><div class="out"><b>You see:</b> the data stays in the database.</div></div>
+      <div class="card step"><span class="n">4</span><h4>Operate</h4><p>Open Pipelines and Cluster: the load that fed the table, the batches behind it, and what the query cost the nodes.</p><div class="out"><b>You see:</b> the whole platform from one rail.</div></div>
+    </div>
+    <div class="note"><b>Same four steps, whatever the data.</b> The dataset and the story are chosen closer to the event; the path from ask to operate is what the Studio is for.</div>
+  </div>
+  <aside class="n">Keep the demo to ten minutes. If anything fails live, the fallback is the recorded run; the four steps are the script either way.</aside>
+</section>
+
+<section class="slide" id="s12">
   <div class="head"><span class="eyebrow">Takeaways</span><h2>Three things to remember</h2></div>
   <div class="body">
     <div class="cols">
@@ -330,7 +344,7 @@ aside.n { display: none; }
   <aside class="n">These are the three takeaways from the session abstract, word for word, so the audience leaves with what they were promised.</aside>
 </section>
 
-<section class="slide title" id="s12">
+<section class="slide title" id="s13">
   <div class="top">
     <span class="eyebrow">Thank you</span>
     <h1>Talk to your data platform</h1>
@@ -347,7 +361,7 @@ aside.n { display: none; }
     <span class="hint">&larr; &rarr; or click to move &middot; N notes &middot; F fullscreen</span>
     <div class="btns">
       <button type="button" id="btnPrev" aria-label="Previous slide">&larr;</button>
-      <span class="count" id="count">1 / 12</span>
+      <span class="count" id="count">1 / 13</span>
       <button type="button" id="btnNext" aria-label="Next slide">&rarr;</button>
       <button type="button" id="btnNotes" aria-pressed="false">Notes</button>
       <button type="button" id="btnFull">Full screen</button>
