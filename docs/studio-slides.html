@@ -1,0 +1,429 @@
+<title>SAS SpeedyStore Studio</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a 1280x720 stage scaled to the viewport, one slide shown at a time; arrow keys, space, click, swipe and the
+   buttons move; #s<n> opens a slide; N shows the speaker notes, F fullscreen. Same tokens and hues as overview.html. */
+:root {
+  --bg: #f4f6f9; --surface: #ffffff; --surface-2: #eaeef4; --fg: #1a212e; --muted: #5a6478; --line: #d6dce6;
+  --sas: #0b5fd1; --viya: #0a8585; --s2: #6f3be0; --accent: #6f3be0; --accent-soft: #efe9fc;
+  --ok: #1f9153; --warn: #c97a00; --bad: #c93b3b;
+  --display: "Sora", "Segoe UI", system-ui, sans-serif;
+  --body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", Consolas, "Courier New", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1319; --surface: #171c25; --surface-2: #1f2633; --fg: #e7ebf3; --muted: #9ba5b8; --line: #2b3444;
+    --sas: #63a4ff; --viya: #3fc4c4; --s2: #b08cff; --accent: #b08cff; --accent-soft: #2a2140;
+    --ok: #4fcb82; --warn: #f0b43c; --bad: #f27070; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1319; --surface: #171c25; --surface-2: #1f2633; --fg: #e7ebf3; --muted: #9ba5b8; --line: #2b3444;
+  --sas: #63a4ff; --viya: #3fc4c4; --s2: #b08cff; --accent: #b08cff; --accent-soft: #2a2140;
+  --ok: #4fcb82; --warn: #f0b43c; --bad: #f27070; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; overflow: hidden; }
+body { background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 20px; line-height: 1.45; }
+a { color: var(--accent); }
+h1, h2, h3, h4 { font-family: var(--display); text-wrap: balance; line-height: 1.12; margin: 0; }
+h1 { font-size: 54px; font-weight: 700; letter-spacing: -0.01em; }
+h2 { font-size: 40px; font-weight: 600; }
+h3 { font-size: 24px; font-weight: 600; }
+h4 { font-size: 20px; font-weight: 600; }
+p { margin: 0; }
+ul { margin: 0; padding-left: 1.1em; } li { margin-block: 5px; } li::marker { color: var(--accent); }
+code, .mono { font-family: var(--mono); font-size: 0.88em; }
+code { background: var(--surface-2); padding: 0.05em 0.3em; border-radius: 4px; }
+.eyebrow { font-family: var(--display); font-size: 15px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent); }
+.muted { color: var(--muted); }
+
+.deck { position: fixed; inset: 0; padding-left: max(0px, env(safe-area-inset-left, 0px)); padding-right: max(0px, env(safe-area-inset-right, 0px)); padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+.viewport { position: absolute; inset: 0; }
+.stage { position: absolute; left: 50%; top: 50%; width: 1280px; height: 720px; transform: translate(-50%, -50%) scale(var(--k, 1)); transform-origin: center; background: var(--surface); border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,0.12); overflow: hidden; }
+.slide { position: absolute; inset: 0; padding: 52px 72px 60px; display: none; grid-template-rows: auto 1fr; gap: 22px; align-content: start; }
+.slide.active { display: grid; }
+.slide .head { display: grid; gap: 6px; }
+.slide .body { min-height: 0; display: grid; gap: 18px; align-content: start; }
+.slide .body.fig { grid-template-rows: 1fr; align-content: stretch; }
+.slide .body.fig figure { margin: 0; min-height: 0; display: grid; grid-template-rows: 1fr auto; gap: 10px; }
+.slide .body.fig svg { width: 100%; height: 100%; max-width: 100%; min-height: 0; display: block; }
+.slide .body:not(.fig) figure svg { width: 100%; height: auto; max-width: 100%; display: block; }
+figcaption { font-size: 17px; color: var(--muted); }
+.svg-text { font-family: var(--body); }
+
+.title { padding: 0; grid-template-rows: 1fr auto; gap: 0; }
+.title .top { padding: 72px 80px 0; display: grid; gap: 22px; align-content: center; }
+.title .bottom { padding: 24px 80px 44px; display: flex; justify-content: space-between; align-items: end; border-top: 1px solid var(--line); font-size: 17px; color: var(--muted); }
+.title .lead { font-size: 24px; color: var(--muted); max-width: 30em; }
+.divider { place-content: center; text-align: left; }
+.divider .num { font-family: var(--display); font-size: 18px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); }
+.divider h2 { font-size: 64px; }
+.divider p { font-size: 24px; color: var(--muted); max-width: 32em; }
+
+.cols { display: grid; gap: 18px; grid-template-columns: repeat(3, 1fr); }
+.cols.two { grid-template-columns: repeat(2, 1fr); }
+.cols.four { grid-template-columns: repeat(4, 1fr); }
+.cols.five { grid-template-columns: repeat(5, 1fr); }
+.cols > * { min-width: 0; }
+.card { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; display: grid; gap: 8px; align-content: start; font-size: 18px; }
+.card.sas { border-top: 4px solid var(--sas); } .card.viya { border-top: 4px solid var(--viya); } .card.s2 { border-top: 4px solid var(--s2); } .card.acc { border-top: 4px solid var(--accent); }
+.card p, .card li { color: var(--fg); }
+.card .out { font-size: 16px; color: var(--muted); border-top: 1px dashed var(--line); padding-top: 8px; }
+.card .out b { color: var(--fg); }
+.step .n { font-family: var(--display); font-weight: 700; font-size: 30px; color: var(--accent); line-height: 1; }
+.chip { display: inline-block; justify-self: start; font-family: var(--display); font-size: 13px; font-weight: 600; letter-spacing: 0.04em; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.chip.sas { color: var(--sas); border-color: var(--sas); } .chip.viya { color: var(--viya); border-color: var(--viya); } .chip.s2 { color: var(--s2); border-color: var(--s2); }
+.chip.ok { color: var(--ok); border-color: var(--ok); } .chip.warn { color: var(--warn); border-color: var(--warn); } .chip.bad { color: var(--bad); border-color: var(--bad); }
+.verdict { border-left: 6px solid var(--line); }
+.verdict.ok { border-left-color: var(--ok); } .verdict.warn { border-left-color: var(--warn); } .verdict.bad { border-left-color: var(--bad); }
+.verdict .v { font-family: var(--mono); font-weight: 500; font-size: 22px; }
+.verdict.ok .v { color: var(--ok); } .verdict.warn .v { color: var(--warn); } .verdict.bad .v { color: var(--bad); }
+.note { background: var(--accent-soft); border-radius: 10px; padding: 14px 18px; font-size: 18px; }
+table { border-collapse: collapse; width: 100%; font-size: 18px; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-family: var(--display); font-size: 13px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+td { font-variant-numeric: tabular-nums; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; font-size: 17px; margin: 0; }
+.kv dt { font-family: var(--mono); font-size: 15px; color: var(--accent); padding-top: 2px; }
+.kv dd { margin: 0; color: var(--muted); }
+pre { background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin: 0; font-family: var(--mono); font-size: 15px; line-height: 1.45; overflow: hidden; }
+
+/* chrome */
+.progress { position: absolute; left: 0; top: 0; height: 4px; width: 0; background: var(--accent); z-index: 3; }
+.hud { position: absolute; left: 0; right: 0; bottom: 0; padding: 10px max(16px, env(safe-area-inset-right, 0px)) max(10px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 13px; color: var(--muted); z-index: 3; pointer-events: none; }
+.hud > * { pointer-events: auto; }
+.hud .hint { font-family: var(--display); font-weight: 500; }
+.hud button { font: inherit; font-family: var(--display); font-weight: 600; color: var(--fg); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+.hud button:hover { background: var(--surface-2); }
+.hud button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.hud .btns { display: flex; gap: 6px; align-items: center; }
+.hud .count { font-family: var(--mono); font-variant-numeric: tabular-nums; min-width: 5ch; text-align: center; }
+.notes { position: absolute; left: 0; right: 0; bottom: 0; height: 0; overflow: auto; background: var(--surface-2); border-top: 1px solid var(--line); padding: 0 max(20px, env(safe-area-inset-left, 0px)); font-size: 16px; color: var(--fg); z-index: 2; }
+body.notes-on .notes { height: 28vh; min-height: 150px; padding-block: 14px 60px; }
+body.notes-on .hud { background: linear-gradient(transparent, var(--surface-2) 40%); }
+body.notes-on .viewport { bottom: max(28vh, 150px); }
+.notes .label { font-family: var(--display); font-size: 12px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent); margin-bottom: 6px; }
+.notes p { max-width: 90ch; }
+aside.n { display: none; }
+@media (max-width: 700px) { .hud .hint { display: none; } }
+</style>
+
+<div class="deck">
+  <div class="progress" id="progress"></div>
+  <div class="viewport" id="viewport">
+    <div class="stage" id="stage">
+
+
+<section class="slide title" id="s1">
+  <div class="top">
+    <span class="eyebrow">SAS SpeedyStore &middot; SAS Viya &middot; Claude</span>
+    <h1>SAS SpeedyStore Studio</h1>
+    <p class="lead">Talk to your data platform. One workspace for SQL, notebooks, pipelines and the cluster, with SAS Viya built in and an AI assistant at your side.</p>
+  </div>
+  <div class="bottom"><span>Jonas Lie-Nielsen &middot; SAS</span><span>SAS Innovate 2027</span></div>
+  <aside class="n">Open with the one sentence: everything you need to work with SAS SpeedyStore is in one window, and the assistant sits inside it instead of in a separate chat. The first half is for everyone; the last slides are for the people who will install it.</aside>
+</section>
+
+<section class="slide" id="s2">
+  <div class="head"><span class="eyebrow">The problem</span><h2>Five windows for one job</h2></div>
+  <div class="body">
+    <div class="cols five">
+      <div class="card s2"><span class="chip s2">Window 1</span><h4>SQL client</h4><p>Write and run SQL against SingleStore. Knows the syntax, not your schema.</p></div>
+      <div class="card s2"><span class="chip s2">Window 2</span><h4>Notebook</h4><p>Python for the analysis, a copy of the data pulled across for each try.</p></div>
+      <div class="card s2"><span class="chip s2">Window 3</span><h4>Pipeline and cluster consoles</h4><p>Loads from Kafka and S3, node health, slow queries. Each in its own tool.</p></div>
+      <div class="card sas"><span class="chip sas">Window 4</span><h4>SAS Studio</h4><p>The SAS side of the same data: libraries, caslibs, PROC SQL, FedSQL.</p></div>
+      <div class="card acc"><span class="chip">Window 5</span><h4>The AI chat</h4><p>Helpful, but blind: it never sees your tables, and you paste its answer somewhere else.</p></div>
+    </div>
+    <div class="note"><b>The cost.</b> Context is lost at every switch. The assistant guesses column names, the notebook copies data that should stay in the database, and nobody sees the whole picture.</div>
+  </div>
+  <aside class="n">Ask the room how many windows they have open for a normal day with SpeedyStore and Viya. Five is a conservative count.</aside>
+</section>
+
+<section class="slide" id="s3">
+  <div class="head"><span class="eyebrow">The idea</span><h2>One workspace, with the assistant inside it</h2></div>
+  <div class="body fig">
+    <figure>
+      <svg viewBox="0 0 1136 440" role="img" aria-label="The Studio sits between the person and the systems: a workspace with SQL, Notebook, Schema, Pipelines and Cluster views; an assistant inside it; the Model Context Protocol connecting it to SingleStore and SAS Viya.">
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--muted)"/></marker>
+        </defs>
+        <g class="svg-text">
+          <circle cx="90" cy="190" r="26" fill="var(--surface-2)" stroke="var(--line)" stroke-width="2"/>
+          <path d="M50 262 a40 40 0 0 1 80 0" fill="var(--surface-2)" stroke="var(--line)" stroke-width="2"/>
+          <text x="90" y="300" text-anchor="middle" font-size="18" fill="var(--fg)" font-weight="600">You</text>
+          <text x="90" y="324" text-anchor="middle" font-size="15" fill="var(--muted)">analyst, engineer, DBA</text>
+        </g>
+        <rect x="200" y="40" width="470" height="360" rx="16" fill="var(--bg)" stroke="var(--accent)" stroke-width="2.5"/>
+        <text x="224" y="78" font-size="20" font-weight="700" fill="var(--fg)" class="svg-text" font-family="Sora, sans-serif">SAS SpeedyStore Studio</text>
+        <text x="224" y="102" font-size="15" fill="var(--muted)" class="svg-text">one window, a rail of views, state kept between them</text>
+        <g class="svg-text" font-size="15" fill="var(--fg)">
+          <rect x="224" y="124" width="112" height="152" rx="10" fill="var(--surface)" stroke="var(--line)"/>
+          <text x="280" y="150" text-anchor="middle" font-weight="600">SQL</text>
+          <text x="280" y="174" text-anchor="middle" font-weight="600">Notebook</text>
+          <text x="280" y="198" text-anchor="middle" font-weight="600">Schema</text>
+          <text x="280" y="222" text-anchor="middle" font-weight="600">Pipelines</text>
+          <text x="280" y="246" text-anchor="middle" font-weight="600">Cluster</text>
+          <text x="280" y="268" text-anchor="middle" font-size="13" fill="var(--muted)">+ 4 more views</text>
+        </g>
+        <rect x="352" y="124" width="296" height="152" rx="10" fill="var(--surface)" stroke="var(--line)"/>
+        <g class="svg-text" font-family="IBM Plex Mono, monospace" font-size="14" fill="var(--fg)">
+          <text x="368" y="152"><tspan fill="var(--s2)">SELECT</tspan> region, sum(amount)</text>
+          <text x="368" y="174"><tspan fill="var(--s2)">FROM</tspan> SASDP.Sales</text>
+          <text x="368" y="196"><tspan fill="var(--s2)">GROUP BY</tspan> region;</text>
+          <text x="368" y="236" font-size="13" fill="var(--muted)" font-family="IBM Plex Sans, sans-serif">Run as: SingleStore SQL, PROC SQL,</text>
+          <text x="368" y="256" font-size="13" fill="var(--muted)" font-family="IBM Plex Sans, sans-serif">FedSQL or FedSQL in CAS. Grid, chart, log.</text>
+        </g>
+        <rect x="224" y="290" width="424" height="86" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+        <g class="svg-text" font-size="15" fill="var(--fg)">
+          <text x="240" y="316" font-weight="600">Claude, in the panel</text>
+          <text x="240" y="338" fill="var(--muted)">reads the schema, runs read-only queries, and writes</text>
+          <text x="240" y="358" fill="var(--muted)">SQL, Python or SAS code you insert with one click</text>
+        </g>
+        <line x1="130" y1="190" x2="196" y2="190" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
+        <g class="svg-text" font-size="13" fill="var(--muted)">
+          <line x1="672" y1="150" x2="856" y2="150" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
+          <line x1="672" y1="300" x2="856" y2="300" stroke="var(--muted)" stroke-width="2" marker-end="url(#arr)"/>
+          <text x="764" y="138" text-anchor="middle">SQL, pipelines, monitoring</text>
+          <text x="764" y="288" text-anchor="middle">REST: Compute, CAS, files</text>
+          <text x="764" y="222" text-anchor="middle" font-size="14" font-weight="600" fill="var(--accent)">Model Context Protocol</text>
+          <text x="764" y="242" text-anchor="middle">tools an assistant can use</text>
+        </g>
+        <rect x="860" y="96" width="252" height="110" rx="12" fill="var(--surface)" stroke="var(--s2)" stroke-width="2.5"/>
+        <g class="svg-text" fill="var(--fg)">
+          <text x="986" y="130" text-anchor="middle" font-size="19" font-weight="700" font-family="Sora, sans-serif">SAS SpeedyStore</text>
+          <text x="986" y="156" text-anchor="middle" font-size="14" fill="var(--muted)">SingleStore, self-managed or Helios</text>
+          <text x="986" y="180" text-anchor="middle" font-size="14" fill="var(--muted)">databases, pipelines, nodes</text>
+        </g>
+        <rect x="860" y="246" width="252" height="110" rx="12" fill="var(--surface)" stroke="var(--viya)" stroke-width="2.5"/>
+        <g class="svg-text" fill="var(--fg)">
+          <text x="986" y="280" text-anchor="middle" font-size="19" font-weight="700" font-family="Sora, sans-serif">SAS Viya</text>
+          <text x="986" y="306" text-anchor="middle" font-size="14" fill="var(--muted)">Compute and CAS sessions</text>
+          <text x="986" y="330" text-anchor="middle" font-size="14" fill="var(--muted)">SAS Content, libraries, caslibs</text>
+        </g>
+        <path d="M986 246 V206" stroke="var(--viya)" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arr)"/>
+        <g class="svg-text" font-size="12" fill="var(--muted)"><text x="1000" y="224">SAS/ACCESS,</text><text x="1000" y="238">CAS pushdown</text></g>
+      </svg>
+      <figcaption>The Studio is the person's workbench. The assistant is a helper inside it, with read-only tools; you review and run what it suggests.</figcaption>
+    </figure>
+  </div>
+  <aside class="n">Three things to point at: the rail on the left, the assistant panel inside the window, and the two systems on the right. MCP is how one assistant reaches both, with tools that are read-only by default.</aside>
+</section>
+
+<section class="slide" id="s4">
+  <div class="head"><span class="eyebrow">Write and run</span><h2>A SQL editor that knows your schema and your SAS</h2></div>
+  <div class="body">
+    <div class="cols two">
+      <div class="card s2"><span class="chip s2">SingleStore</span><h3>SQL with the schema at hand</h3><ul><li>Autocomplete for SingleStore SQL, built-in functions with signatures, your databases, tables, columns and procedures</li><li>Ctrl+Enter runs the statement under the cursor; Run all runs a whole script and gives each statement its own result tab</li><li>Reads run at once; statements that change data or schema ask first</li><li>Results grid, sorting and CSV export, a chart from the result, run history, tabs with their own database and file</li></ul></div>
+      <div class="card viya"><span class="chip viya">SAS Viya</span><h3>The same SQL, through SAS</h3><ul><li><b>Run as</b> picks the language: SingleStore SQL, PROC SQL, FedSQL or FedSQL in CAS, with the matching tree of databases, libraries or caslibs</li><li>Result, the SAS log and a <b>Pushdown</b> tab that shows what SAS handed to SingleStore</li><li>Open and save <code>.sql</code> and <code>.sas</code> files on this computer, in SAS Content or on the SAS server, with a version check so nobody's work is overwritten</li><li>Long runs go to the background with a Stop button</li></ul></div>
+    </div>
+    <div class="note"><b>Try it both ways.</b> The same query native in SingleStore and through SAS side by side, with the pushdown visible. That is the SpeedyStore conversation in one tab.</div>
+  </div>
+  <aside class="n">The pushdown tab is the demo moment for SAS people: they see which part of their PROC SQL SingleStore executed.</aside>
+</section>
+
+<section class="slide" id="s5">
+  <div class="head"><span class="eyebrow">Explore and analyse</span><h2>A notebook where the data stays in the database</h2></div>
+  <div class="body">
+    <div class="cols">
+      <div class="card s2"><span class="chip s2">SQL cells</span><p>Run against SingleStore; the result becomes a pandas DataFrame in the next cell. <code>%sql</code> and <code>%%sql</code> magics for the Python crowd.</p></div>
+      <div class="card acc"><span class="chip">Python cells</span><p>A Jupyter kernel in its own environment with a Packages panel. Charts inline. The notebook file is a normal <code>.ipynb</code>, compatible with SingleStore Notebooks.</p></div>
+      <div class="card viya"><span class="chip viya">SAS cells</span><p>Run in a SAS Compute session on Viya. Each session gets the library <code>S2</code> on the notebook's database, so a DATA step reads and writes SingleStore directly through SAS/ACCESS.</p></div>
+    </div>
+    <div class="cols two">
+      <div class="card"><h4>Several notebooks as tabs</h4><p>Each with its own kernel, database and file. Save to this computer, SAS Content or the SAS server.</p></div>
+      <div class="card"><h4>Claude in the side panel</h4><p>Ask for the next cell in plain words. It reads the schema, writes SQL or Python, and you insert it with one click.</p></div>
+    </div>
+  </div>
+  <aside class="n">The point for SAS Viya: the data never leaves the database for a local copy. SAS reads SingleStore itself through the S2 library, and CAS pushes queries down.</aside>
+</section>
+
+<section class="slide" id="s6">
+  <div class="head"><span class="eyebrow">The assistant</span><h2>Claude helps where you work, and you stay in control</h2></div>
+  <div class="body">
+    <div class="cols">
+      <div class="card acc"><h4>It sees what you see</h4><p>The chat panel in the SQL editor and the notebook reads the schema and runs read-only queries before it answers, so the SQL it writes uses your real table and column names.</p></div>
+      <div class="card acc"><h4>It suggests, you run</h4><p>Answers come as SQL, Python or SAS code with an insert button. The assistant has no write access, no shell and no files. Nothing changes in the database until you run it.</p></div>
+      <div class="card acc"><h4>It knows SingleStore</h4><p>Every question carries a SingleStore SQL skill with the pitfalls learned on real clusters: case-sensitive names, procedure syntax, shard and sort keys. You add to it as you learn.</p></div>
+    </div>
+    <div class="cols two">
+      <div class="card"><h4>Three speeds</h4><p>Fast, Balanced or Thorough, picked per question. Each editor keeps one assistant running, so follow-ups are quick and keep the conversation.</p></div>
+      <div class="card"><h4>Ask Claude everywhere</h4><p>The Schema Explorer and Pipeline Monitor hand a table, a skew finding or a pipeline error to the chat with the context already filled in.</p></div>
+    </div>
+  </div>
+  <aside class="n">This is the takeaway slide for "AI belongs where you work". The assistant runs through your own Claude login, with no API key, and it is read-only by design.</aside>
+</section>
+
+<section class="slide" id="s7">
+  <div class="head"><span class="eyebrow">Operate</span><h2>Operate the cluster from the same rail</h2></div>
+  <div class="body">
+    <table>
+      <thead><tr><th style="width:18%">View</th><th>What it shows</th><th style="width:30%">What you can do</th></tr></thead>
+      <tbody>
+        <tr><td><b>Schema</b></td><td>Databases, tables with rows and size, columns, DDL with shard and sort keys, a row preview, data skew over partitions. SAS libraries and caslibs as sources too, badged by kind.</td><td>Check skew, refresh statistics, query in grid, clean up the work tables SAS jobs leave behind.</td></tr>
+        <tr><td><b>Pipelines</b></td><td>Every pipeline's state, source and target, progress such as files loaded or Kafka lag, latest batches and errors.</td><td>Start, stop and test with confirmation; hand an error to Claude.</td></tr>
+        <tr><td><b>Cluster</b></td><td>CPU, memory and disk per node, health and events, running queries, 7-day history, backups. Refreshes every 5 s.</td><td>See a problem explained before it becomes a ticket.</td></tr>
+        <tr><td><b>History</b></td><td>Every traced query with time, user, rows and a probable source: SAS CAS, SAS in-database, or a person.</td><td>Group repeats, get tuning recommendations with the plan tree.</td></tr>
+        <tr><td><b>Alerts</b></td><td>Long or failed queries, failed pipeline batches, memory and disk over a threshold, nodes not online.</td><td>Edit the rules, acknowledge, clear.</td></tr>
+        <tr><td><b>Workload</b></td><td>Saved sets of statements replayed with N connections; live throughput and latency.</td><td>Compare two runs, for example before and after a new sort key.</td></tr>
+        <tr><td><b>Security</b></td><td>Users with risk flags, effective privileges with the reason, who can access what, resource pools, audit settings.</td><td>Each change previewed as SQL and confirmed, or saved as a script for the DBA.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <aside class="n">Don't read the table. Pick two rows for the audience in the room: Schema and Pipelines for engineers, History and Security for DBAs.</aside>
+</section>
+
+<section class="slide" id="s8">
+  <div class="head"><span class="eyebrow">SAS Viya built in</span><h2>SAS is a source, a language and a file system in the Studio</h2></div>
+  <div class="body">
+    <div class="cols">
+      <div class="card viya"><span class="chip viya">Sources</span><h4>SAS libraries and caslibs</h4><p>The Schema Explorer and the SQL editor's tree list SAS libraries from the Compute session and caslibs from CAS, next to SingleStore databases. Badges tell the kind apart: a SpeedyStore caslib that pushes down live, a standard connector that loads into memory, a SAS/ACCESS libname, a SAS 9 library over SAS/CONNECT.</p></div>
+      <div class="card viya"><span class="chip viya">Languages</span><h4>PROC SQL, FedSQL, CAS</h4><p>Run as picks the engine per tab. SAS cells in the notebook. One Compute and one CAS session per Viya connection, started in the background when the Studio opens so the first run doesn't wait.</p></div>
+      <div class="card viya"><span class="chip viya">Files and sign-in</span><h4>SAS Content and SAS server</h4><p>Open and save programs and notebooks where SAS Studio keeps them. Sign in with your own Viya account through SAS Logon; several saved Viya connections, one active, a tab can be pinned to another.</p></div>
+    </div>
+    <div class="note"><b>Why it matters.</b> SAS SpeedyStore is SAS Viya and SingleStore together. The Studio shows both sides of every table and lets you choose, per query, where the work runs.</div>
+  </div>
+  <aside class="n">The badges on caslibs are a good teaching moment: SS means CAS pushes the query down to SingleStore live; S2 means the standard connector copies the table into memory.</aside>
+</section>
+
+<section class="slide" id="s9">
+  <div class="head"><span class="eyebrow">Benefits</span><h2>What changes for the people who use it</h2></div>
+  <div class="body">
+    <div class="cols">
+      <div class="card s2"><span class="chip s2">Analyst</span><h3>From question to answer in one place</h3><ul><li>Ask in plain words, get SQL that uses the real schema, run it, chart it</li><li>Notebook for the analysis, SAS cell when the method lives in SAS</li><li>No copies of data on the laptop</li></ul></div>
+      <div class="card viya"><span class="chip viya">Data engineer</span><h3>Pipelines and pushdown you can see</h3><ul><li>Kafka and S3 loads created, tested and watched from the same window</li><li>Try a query native and through SAS, and see what was pushed down</li><li>Replay a workload before and after a schema change</li></ul></div>
+      <div class="card acc"><span class="chip">DBA</span><h3>Operate without surprises</h3><ul><li>Cluster health, alerts and query history with the SAS source identified</li><li>Who can access what, with the reason</li><li>Every change previewed as SQL and confirmed, or handed over as a script</li></ul></div>
+    </div>
+    <div class="note"><b>Common to all three:</b> the assistant is read-only, every action that changes something is confirmed in the app, and the Studio works the same inside Claude and on its own.</div>
+  </div>
+  <aside class="n">Tie back to the three takeaways: the assistant where you work, everything for SpeedyStore in one place, and you can start right away.</aside>
+</section>
+
+<section class="slide" id="s10">
+  <div class="head"><span class="eyebrow">How you run it</span><h2>Inside Claude, or on its own</h2></div>
+  <div class="body">
+    <div class="cols two">
+      <div class="card acc"><span class="chip">With Claude</span><h3>An MCP server with apps</h3><ul><li>Runs from Claude Code, Claude Desktop or VS Code; the Studio opens in the chat or full-window in the browser</li><li>Slash commands for the workspace, a notebook, pipeline health and a table report</li><li>Claude can also use the tools directly: run SQL, create and start pipelines, describe tables</li><li>Restart the server in seconds after a code change, without reconnecting</li></ul></div>
+      <div class="card s2"><span class="chip s2">Without Claude</span><h3>A desktop app</h3><ul><li>The same views in their own window from a desktop shortcut; one-command install on Windows</li><li>Talks directly to SingleStore and SAS Viya; no Claude subscription or MCP client needed</li><li>Only the chat panels need Claude; everything else works</li><li>Other MCP clients get the tools with plain text results</li></ul></div>
+    </div>
+    <div class="kv-row cols">
+      <div class="card"><h4>Any SingleStore</h4><p>Self-managed clusters and Helios alike. Passwords in the OS credential store; Entra ID and SSO sign-in supported.</p></div>
+      <div class="card"><h4>Official SDKs</h4><p>The MCP Python SDK, SingleStore's own Python client and the MCP Apps browser client. The project itself is glue.</p></div>
+      <div class="card"><h4>Open source</h4><p>github.com/jonasliesas/singlestore-mcp-server, tests on every push. Version 0.10 added SAS.</p></div>
+    </div>
+  </div>
+  <aside class="n">Say plainly that this is a pre-sales build on an open-source server, not a SAS product. Then show the shortcut: double-click, the Studio opens.</aside>
+</section>
+
+<section class="slide" id="s11">
+  <div class="head"><span class="eyebrow">Takeaways</span><h2>Three things to remember</h2></div>
+  <div class="body">
+    <div class="cols">
+      <div class="card step acc"><span class="n">1</span><h4>AI belongs where you work</h4><p>The Model Context Protocol brings an assistant into your SQL editor and notebook, with read-only access to SAS Viya and SAS SpeedyStore. It helps without taking over.</p></div>
+      <div class="card step s2"><span class="n">2</span><h4>Everything for SAS SpeedyStore in one place</h4><p>Write and run SQL, work in notebooks, explore schemas, load data with pipelines and watch the cluster, with SAS Viya and CAS tables reachable from the same workspace.</p></div>
+      <div class="card step viya"><span class="n">3</span><h4>You can start right away</h4><p>The server behind the Studio is open source, works with self-managed and cloud SingleStore, and runs from Claude Code, Claude Desktop, VS Code or as a desktop app.</p></div>
+    </div>
+  </div>
+  <aside class="n">These are the three takeaways from the session abstract, word for word, so the audience leaves with what they were promised.</aside>
+</section>
+
+<section class="slide title" id="s12">
+  <div class="top">
+    <span class="eyebrow">Thank you</span>
+    <h1>Talk to your data platform</h1>
+    <p class="lead">The repository holds the server, the Studio, the slash commands and the architecture notes. Install it, point it at your cluster and your Viya, and ask your first question.</p>
+    <p class="muted" style="font-size:18px">Repository: <a href="https://github.com/jonasliesas/singlestore-mcp-server">github.com/jonasliesas/singlestore-mcp-server</a></p>
+  </div>
+  <div class="bottom"><span>Jonas Lie-Nielsen &middot; SAS</span><span>SAS Innovate 2027</span></div>
+  <aside class="n">Questions. Offer the repository link and the architecture document for the people who want the detail.</aside>
+</section>
+    </div>
+  </div>
+  <div class="notes" id="notes"><div class="label">Speaker notes</div><p id="notesText"></p></div>
+  <div class="hud">
+    <span class="hint">&larr; &rarr; or click to move &middot; N notes &middot; F fullscreen</span>
+    <div class="btns">
+      <button type="button" id="btnPrev" aria-label="Previous slide">&larr;</button>
+      <span class="count" id="count">1 / 12</span>
+      <button type="button" id="btnNext" aria-label="Next slide">&rarr;</button>
+      <button type="button" id="btnNotes" aria-pressed="false">Notes</button>
+      <button type="button" id="btnFull">Full screen</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var slides = Array.prototype.slice.call(document.querySelectorAll('.slide'));
+  var n = slides.length, cur = 0;
+  var progress = document.getElementById('progress'), count = document.getElementById('count');
+  var notesText = document.getElementById('notesText'), stage = document.getElementById('stage'), viewport = document.getElementById('viewport');
+
+  function fit() {
+    var r = viewport.getBoundingClientRect();
+    var k = Math.min(r.width / 1280, r.height / 720);
+    stage.style.setProperty('--k', String(Math.max(0.1, k)));
+  }
+  function show(i, setHash) {
+    cur = Math.max(0, Math.min(n - 1, i));
+    slides.forEach(function (s, j) { s.classList.toggle('active', j === cur); });
+    progress.style.width = ((cur + 1) / n * 100) + '%';
+    count.textContent = (cur + 1) + ' / ' + n;
+    var note = slides[cur].querySelector('aside.n');
+    notesText.textContent = note ? note.textContent : '';
+    if (setHash !== false) { try { history.replaceState(null, '', '#s' + (cur + 1)); } catch (e) {} }
+  }
+  function fromHash() {
+    var m = /^#s(\d+)$/.exec(location.hash || '');
+    show(m ? parseInt(m[1], 10) - 1 : 0, false);
+  }
+  function next() { show(cur + 1); } function prev() { show(cur - 1); }
+
+  document.addEventListener('keydown', function (e) {
+    if (e.target && /^(INPUT|TEXTAREA)$/.test(e.target.tagName)) return;
+    switch (e.key) {
+      case 'ArrowRight': case 'ArrowDown': case ' ': case 'PageDown': case 'Enter': e.preventDefault(); next(); break;
+      case 'ArrowLeft': case 'ArrowUp': case 'PageUp': case 'Backspace': e.preventDefault(); prev(); break;
+      case 'Home': e.preventDefault(); show(0); break;
+      case 'End': e.preventDefault(); show(n - 1); break;
+      case 'n': case 'N': toggleNotes(); break;
+      case 'f': case 'F': fullscreen(); break;
+    }
+  });
+  document.getElementById('btnNext').addEventListener('click', next);
+  document.getElementById('btnPrev').addEventListener('click', prev);
+  stage.addEventListener('click', function (e) {
+    if (e.target.closest('a, button')) return;
+    var r = stage.getBoundingClientRect();
+    if ((e.clientX - r.left) / r.width < 0.25) prev(); else next();
+  });
+  var tx = null;
+  stage.addEventListener('touchstart', function (e) { tx = e.touches[0].clientX; }, { passive: true });
+  stage.addEventListener('touchend', function (e) {
+    if (tx === null) return;
+    var dx = e.changedTouches[0].clientX - tx; tx = null;
+    if (Math.abs(dx) > 50) { if (dx < 0) next(); else prev(); }
+  });
+
+  function toggleNotes() {
+    var on = document.body.classList.toggle('notes-on');
+    document.getElementById('btnNotes').setAttribute('aria-pressed', on ? 'true' : 'false');
+    fit();
+  }
+  document.getElementById('btnNotes').addEventListener('click', toggleNotes);
+  function fullscreen() {
+    var el = document.documentElement;
+    try {
+      if (document.fullscreenElement) { document.exitFullscreen().catch(function () {}); }
+      else if (el.requestFullscreen) { el.requestFullscreen().catch(function () {}); }
+    } catch (e) {}
+  }
+  document.getElementById('btnFull').addEventListener('click', fullscreen);
+  window.addEventListener('resize', fit);
+  window.addEventListener('hashchange', fromHash);
+  fit(); fromHash();
+})();
+</script>
