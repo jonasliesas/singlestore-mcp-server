@@ -274,19 +274,26 @@ function download(contents) {
   }
 }
 
+let opening = null;  // the app's opening tool call, sent while its page loads
 async function open() {
+  // Session settings and the tool's metadata at the same time; the opening call (often a cluster round trip, the
+  // slowest step) goes out now too instead of after the app's page has loaded and connected.
+  const sessionReq = get("session");
+  const toolReq = get(`tool?name=${encodeURIComponent(toolName)}`);
   try {
-    const s = await (await get("session")).json();
+    const s = await (await sessionReq).json();
     session.reconnectMs = (Number(params.get("reconnect")) || s.reconnect_s || 60) * 1000;
     session.repeatable = new Set([DRAFT_TOOL, ...(s.repeatable ?? [])]);
   } catch (e) {
     if (e instanceof SessionEnded) throw e;  // otherwise an older server without /session: defaults
   }
-  await flushDrafts();
-  const toolRes = await get(`tool?name=${encodeURIComponent(toolName)}`);
+  const toolRes = await toolReq;
   if (!toolRes.ok) throw new Error("this link has expired");
   const tool = await toolRes.json();
-  const html = await (await get(`resource?uri=${encodeURIComponent(tool._meta.ui.resourceUri)}`)).text();
+  opening = callTool(toolName, args);
+  const htmlReq = get(`resource?uri=${encodeURIComponent(tool._meta.ui.resourceUri)}`).then((r) => r.text());
+  await flushDrafts();  // before the app reads its saved state
+  const html = await htmlReq;
   document.title = `${tool.title || tool.name} · SingleStore`;
 
   window.addEventListener("message", async (ev) => {
@@ -308,7 +315,7 @@ async function open() {
         });
       case "ui/notifications/initialized":
         send({ jsonrpc: "2.0", method: "ui/notifications/tool-input", params: { arguments: args } });
-        return send({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: await callTool(toolName, args) });
+        return send({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: await (opening ?? callTool(toolName, args)) });
       case "tools/call": {
         const result = await callTool(p.name, p.arguments);
         // Reset browser links from this page: carry on at the new link (this one's token is gone).

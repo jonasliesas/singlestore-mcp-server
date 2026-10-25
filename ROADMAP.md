@@ -2,7 +2,7 @@
 
 Agreed with the owner; confirm scope and order before starting a round. Details of what was built are in the
 README and the git log; this file keeps what's next.
-Last updated 2026-10-16 (latest release 0.10.1; one commit since).
+Last updated 2026-10-26 (latest release 0.10.1).
 
 ## Released
 - **0.9.0** (2026-10-14) – Workload, SQL Editor tabs/history/SELECT builder, Security and Config views (read-only),
@@ -79,6 +79,17 @@ Last updated 2026-10-16 (latest release 0.10.1; one commit since).
   header and the Schema Explorer's SAS sources; per-connection setting (default on) and
   `SINGLESTORE_MCP_SAS_PREWARM=0` (the test suite's default). SAS 9 sign-on stays lazy.
 
+- Faster Workspace open (not committed yet, 2026-10-26; README → Testing → Performance has the table):
+  `sql_editor` **reads the editor's schema ahead** (the database given, else the active tab's draft database, else
+  the first user database; the editor's first `sql_editor_schema` within 30 s gets it) – browser view link → schema
+  tree 1.13 → 0.64 s; the Workspace asks for the **tab list on tool input** (with `sql_editor`, not after it); the
+  browser host sends the app's **opening call while the page loads**; the **standby opens the server's database
+  connections ahead** (`preconnect.py`, COM_PING every minute, at most an hour, password logins) – restart_server →
+  usable 1.95 → 0.84 s; servers start with the **base Python directly** (no venv launcher: 4 Python processes per
+  Claude session instead of 6); the **SAS pre-warm starts from `sql_editor`** (0.75 s after it answers) instead of
+  only ~1.5 s after the page painted; a SAS **token renewal no longer blocks settings reads** (own lock: a slow SAS
+  Logon held up every SAS call, e.g. 12 s behind a proxy).
+
 ## Backlog
 **Security**
 - Ideas: `REQUIRE X509 / SUBJECT` (mutual TLS); `PASSWORD EXPIRE` / `ACTIVATE`; "Drop view" for column views;
@@ -105,6 +116,12 @@ Last updated 2026-10-16 (latest release 0.10.1; one commit since).
   folder); a local delete goes straight away, not to the Recycle Bin.
 
 **Workspace / performance**
+- Start-up, what's left (2026-10-26): a cold server is ~3 s of imports before the handshake, ~2 s of it the MCP SDK
+  (its `__init__` loads the client, HTTP/auth and both protocol type sets) – an upstream issue, or a handshake the relay
+  answers from a cache keyed by the code's file stamps (sends `list_changed` if the server's lists differ); each
+  connection runs three `SET`s one by one (`SET NAMES`, extended types, vector format: ~0.4 s of its ~1.2 s) – a
+  driver option or upstream change to send them as one; a sas_rest route learned "direct" (proxy skipped) is
+  per process: a new server behind an `HTTPS_PROXY` that can't reach Viya waits for the proxy first again.
 - singlestoredb compiles its Fusion SQL grammars on every start (~0.5 s of the connection import; no option skips
   it, also not on upstream `main`) – issue text ready for Jonas to file: `docs/upstream-singlestoredb-fusion.md`.
 - Reshard simulation: a "Copy to a new table with this shard key" script (CREATE TABLE … SHARD KEY + INSERT …

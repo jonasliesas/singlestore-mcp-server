@@ -40,6 +40,9 @@ from .paths import data_dir
 
 _LEGACY_SECRET = "sas-viya#token"  # the one token of the old single-settings sas.json
 _lock = threading.RLock()
+# Token renewal / import talks to SAS Logon (0.3 s – seconds): its own lock, so reading the settings (every SAS call,
+# the views' status lines) never waits behind it.
+_token_lock = threading.RLock()
 _pending: dict[str, Any] = {}  # PKCE state between "Sign in" and "paste the code"
 _route = {"direct": False}  # True when Viya is only reachable without the configured proxy
 DEFAULTS = {"url": "", "compute_context": "SAS Studio compute context", "client_id": "vscode",
@@ -399,7 +402,7 @@ def token(min_valid: int = 300, name: str | None = None) -> str:
     if not s["name"] or not s["url"]:
         raise _not_set_up()
     name = s["name"]
-    with _lock:
+    with _token_lock:
         t = _stored(name)
         if t and t.get("url") != s["url"]:
             t = None

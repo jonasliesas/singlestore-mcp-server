@@ -177,6 +177,7 @@ class Database:
         self._warming = 0  # background connects in flight (warm)
         self._cond = threading.Condition()
         self._default_db: str | None = None
+        self._adopted = False
 
     def _connect(self) -> _PooledConnection:
         # The active saved connection (connections.py); the SINGLESTORE_* settings
@@ -192,6 +193,45 @@ class Database:
         pc = _PooledConnection(conn, profile.database)
         pc.generation = generation
         return pc
+
+    @property
+    def generation(self) -> int:
+        """Goes up whenever the pool is reset (another active connection): data read before belongs to the old one."""
+        return self._generation
+
+    def _adopt_preconnected(self) -> None:
+        """Take the connections a standby opened before it became this server (``preconnect``), if they were opened
+        with the active connection's current settings; otherwise they're closed and the pool connects as usual."""
+        from . import preconnect
+
+        holder = preconnect.pop_holder()
+        if holder is None:
+            return
+        try:
+            from . import connections
+
+            profile = connections.active()
+            if profile is None or not preconnect.supported(profile):
+                holder.take(None)  # closes them
+                return
+            conns = holder.take(connections.connect_kwargs(profile))
+        except Exception:  # noqa: BLE001 - the pool just connects as usual
+            return
+        extra = []
+        with self._cond:
+            for conn in conns:
+                if self._open >= self._max:
+                    extra.append(conn)
+                    continue
+                pc = _PooledConnection(conn, profile.database)
+                pc.generation = self._generation
+                self._idle.append(pc)
+                self._open += 1
+            if conns:
+                self._default_db = profile.database
+            self._cond.notify_all()
+        for conn in extra:
+            self._discard(_PooledConnection(conn, None))
 
     def reset(self) -> None:
         """Drop every connection (after switching the active connection); busy ones close when released."""
@@ -265,6 +305,13 @@ class Database:
                     self._warming -= 1
                     self._cond.notify_all()
 
+        if not self._adopted:
+            # A server that took over from a standby (restart_server) starts with the standby's open connections.
+            self._adopted = True
+            try:
+                self._adopt_preconnected()
+            except Exception:  # noqa: BLE001 - never stops the start
+                pass
         with self._cond:
             # Idempotent: a second warm (e.g. server start, then the workspace) only tops the pool up.
             n = max(0, min(connections, self._max) - self._open - self._warming)

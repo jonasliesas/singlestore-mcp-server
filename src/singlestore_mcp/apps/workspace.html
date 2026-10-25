@@ -337,9 +337,17 @@ function dropFrame(key) {
   mainEl.querySelector(`.ws-loading[data-view="${key}"]`)?.remove();
   delete ws.frames[key]; delete ws.contexts[key];
 }
-async function loadSqlTabs(prefer) {
+// The tab list is asked for as soon as the host sends the tool input (prefetchSqlTabs), while sql_editor still runs.
+let tabsPrefetch = null;
+function prefetchSqlTabs() {
+  tabsPrefetch ??= S2.callTool("sql_editor_tabs", {}).catch(() => null);
+}
+async function loadSqlTabs(prefer, { early = false } = {}) {
   try {
-    const res = await S2.callTool("sql_editor_tabs", {});
+    const pre = early && tabsPrefetch ? await tabsPrefetch : null;
+    tabsPrefetch = null;
+    // sql_editor(new_tab=true) made a tab after the early list was read: read it again.
+    const res = pre && (!prefer || pre.tabs.some((t) => t.id === prefer)) ? pre : await S2.callTool("sql_editor_tabs", {});
     setSqlTabs(res.tabs);
     ws.lastSql = res.tabs.some((t) => t.id === prefer) ? prefer : res.active;
   } catch (e) {
@@ -665,7 +673,11 @@ let started = false;
 S2.onDisplayModeChange = () => {};
 await S2.connect({
   name: "singlestore-workspace",
-  onToolInput(args) { ws.args = args ?? {}; prefetchPage(viewDef(ws.args.view ?? "sql")?.uri); },
+  onToolInput(args) {
+    ws.args = args ?? {};
+    prefetchPage(viewDef(ws.args.view ?? "sql")?.uri);
+    prefetchSqlTabs();
+  },
   async onToolResult(result) {
     if (started) return;
     started = true;
@@ -674,7 +686,7 @@ await S2.connect({
       ws.sqlResult = result;
       ws.args = { ...ws.args, database: data.database ?? ws.args.database, sql: data.sql ?? ws.args.sql, table: data.table ?? ws.args.table };
       buildShell();
-      await loadSqlTabs(data.tab_id);  // sql_editor(new_tab=true) made that tab
+      await loadSqlTabs(data.tab_id, { early: true });  // sql_editor(new_tab=true) made that tab
       openView(viewDef(data.view) ? data.view : "sql");
       startSasPrewarm();
       if (data.connection_error) S2.toast(`The active connection fails: ${data.connection_error.slice(0, 160)}`, "err");

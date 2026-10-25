@@ -122,13 +122,20 @@ Restarts are fast because most of a fresh server's start is loading the MCP
 SDK and the database driver, which don't change when this project's code does.
 5 s after each start the relay prepares a *standby* process that has loaded only
 those packages; `restart_server` hands over to it, and it then loads this
-project's code fresh from disk and opens its database connections while the old
-server stops (about 1.5 s until the first answer instead of about 6 s). The
-standby is an idle Python process (~90 MB); if packages were installed or
-removed since it loaded them, it steps aside and a fresh server starts.
+project's code fresh from disk while the old server stops. The standby has
+also opened the server's database connections already (4, to the active saved
+connection; password logins only), checks them with a ping every minute and
+hands them over, so the first answer doesn't wait ~1–1.5 s for a connection:
+`restart_server` → Workspace usable in ~0.85 s (was ~1.9 s; ~6 s without a
+standby). It keeps them at most an hour (then the server connects at start, as
+before); `SINGLESTORE_MCP_STANDBY_CONNECT=0` turns this off. The standby is an
+idle Python process (~25–90 MB); if packages were installed or removed since it
+loaded them, it steps aside and a fresh server starts.
 `SINGLESTORE_MCP_NO_STANDBY=1` turns it off. Any server start also opens its
 database connections while the code loads, so the first tool call doesn't wait
-for them.
+for them. On Windows the relay starts the servers with the base Python directly
+(as `multiprocessing` does), not through the virtual environment's launcher, so
+each Claude session runs four Python processes instead of six.
 
 If the server exits on its own — typically a syntax or import error in code
 you just changed — the relay starts it again after a back-off (1, 2, 5, 10,
@@ -424,9 +431,12 @@ the same SQL can be tried SingleStore-native and through SAS side by side.
   (running 2 min)…*; it can be stopped while it waits (nothing reaches SAS).
   Runs on another connection (or in CAS while Compute is busy) don't wait.
 - **SAS session started in the background.** A cold SAS session (Compute session,
-  automatic SingleStore library, startup code) takes ~15–35 s. So when the
-  Workspace opens, it starts the active SAS Viya connection's sessions in the
-  background (`sas_prewarm`, ~1.5 s after the first paint; Compute first, then
+  automatic SingleStore library, startup code) takes ~15–50 s (on Zeus mostly
+  Viya starting the Compute server: ~35–42 s for `POST …/sessions`, then ~6–8 s
+  for the first job). So when the Workspace opens, it starts the active SAS Viya
+  connection's sessions in the background (`sas_prewarm`, as soon as Claude or
+  the browser link opens the Workspace – the `sql_editor` call itself – and
+  again from the page ~1.5 s after its first paint; Compute first, then
   CAS), and again when another connection becomes the active one, when the
   active one is saved or signed in to. The header of the SQL Editor's SAS tabs
   and of the Schema Explorer's SAS sources shows **SAS session: starting… /
@@ -1767,6 +1777,7 @@ All optional, as environment variables of the MCP server:
 | `SINGLESTORE_MCP_NO_SUPERVISOR` | off | Run without the restart relay |
 | `SINGLESTORE_MCP_NO_STANDBY` | off | Don't keep a pre-loaded standby process for fast restarts |
 | `SINGLESTORE_MCP_STANDBY_DELAY` | `5` | Seconds after a start before the standby is prepared |
+| `SINGLESTORE_MCP_STANDBY_CONNECT` | `4` | Database connections the standby opens ahead for the server after `restart_server` (0–4; `0` = off) |
 | `SINGLESTORE_MCP_BROWSER_RECONNECT` | `60` | Seconds an open browser tab keeps trying to reach a restarting server before it shows *Session ended* |
 | `SINGLESTORE_MCP_BROWSER_BIND_WAIT` | `15` | Seconds a new server waits for the previous one to free the browser port |
 | `SINGLESTORE_MCP_METRICS` | on | `0` turns off the Cluster Monitor's background metrics sampler (History tab) |
@@ -2324,4 +2335,20 @@ the previous results file, and p50/p95 changes over 25% are printed as warnings 
 its SQL view make on open (time and size of each), `restart_server` → Workspace usable, the Workspace in
 Edge (browser view: page → SQL Editor → schema tree, with every request), and the cluster round trips
 (connects + statements) of the open sequence. Results go to `perf/results/startup-<timestamp>.json`
-and are compared with the previous startup run.
+and are compared with the previous startup run. Run it in a terminal without `HTTPS_PROXY` (a proxy that can't
+reach Viya makes the SAS pre-warm's first request wait for it).
+
+Where the time goes (2026-10-26, medians of 6 runs, `startup-*-ab-base/new-*.json`; the machine varies ±30%):
+
+| Scenario | Before | After | Mostly |
+|---|---|---|---|
+| Cold: spawn → handshake | 3.1 s | 3.0 s | importing the MCP SDK (~1.3–2.4 s, it loads client, HTTP and auth modules too), singlestoredb (~0.5 s), this package (~0.4 s) |
+| Cold: spawn → Workspace usable (open sequence done) | 4.5 s | 3.9 s | the above + the open sequence |
+| Cold: open sequence | 1.26 s | 1.01 s | `sql_editor` (1 round trip), schema (now read ahead) |
+| `restart_server` → Workspace usable | 1.95 s | 0.84 s | was: waiting for a new connection (~1.1 s); now: loading this package (~0.4 s) + 1 round trip |
+| Browser view: link → schema tree shown | 1.13 s | 0.64 s | the schema (3 queries, ~450 ms) now read while `sql_editor` runs |
+| Browser view: link → editor ready | 0.59 s | 0.57 s | parsing the SQL Editor's page (1.2 MB: CodeMirror, the ext-apps bundle) |
+| First SAS action after opening | ~45–60 s cold | the warm-up starts with `sql_editor` | Viya starting the Compute server (`POST …/sessions` 35–42 s) |
+
+A connection costs ~8 round trips (~1.1–1.5 s): TCP, greeting, TLS (2), login, and the driver's
+`SET NAMES` / `enable_extended_types_metadata` / `vector_type_project_format` (one each).

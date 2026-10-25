@@ -127,6 +127,12 @@ def sql_editor(
         except ValueError:  # too many tabs: the SQL goes into the active one
             pass
         view = "sql"
+    # The SQL Editor asks for its database's schema (~0.5 s of cluster queries) as soon as its page has loaded:
+    # start reading it now, alongside the database list, so it's ready (or nearly) by then. The editor opens on
+    # the database given, else its tab's draft database, else the first user database (below).
+    draft_db = _start_database(tab_id) if view == "sql" else None
+    if view == "sql" and (database or draft_db):
+        _prefetch_schema(database or draft_db)
     # A failing connection must not lock the user out of the workspace: it then
     # opens on the Connections view with the error, to fix or switch connection.
     connection_error = None
@@ -137,6 +143,12 @@ def sql_editor(
         view = "connections" if view in ("sql", "schema", "pipelines", "cluster") else view
     if database and databases and database not in databases:
         raise LookupError(f"Database {database!r} not found (names are case-sensitive).")
+    if view == "sql" and not database and databases and (not draft_db or draft_db not in databases):
+        # The editor then opens on the first user database (as sql_editor.html picks it).
+        first = next((d for d in databases if d not in SYSTEM_DATABASES), None)
+        if first:
+            _prefetch_schema(first)
+    _start_sas_prewarm()
     data: dict[str, Any] = {"databases": databases, "database": database, "sql": sql, "view": view, "table": table,
                             "connection_error": connection_error, "tab_id": tab_id}
     summary = f"SingleStore Workspace opened on the {view} view{f', database {database}' if database else ''}."
@@ -748,9 +760,90 @@ def sql_editor_ask_cancel(editor_id: str) -> CallToolResult:
     return tool_result("Stopped." if stopped else "Nothing to stop.", {"stopped": stopped})
 
 
+# ---------------------------------------------------------------- start-up prefetch
+# sql_editor reads the schema the editor is going to ask for; the editor's first sql_editor_schema call for that
+# database (within PREFETCH_TTL_S, same active connection) gets it instead of querying again. Later calls (the
+# tree's refresh, another database) always query.
+PREFETCH_TTL_S = 30.0
+_prefetched: dict[str, tuple[float, int, Any]] = {}  # database -> (monotonic start, db generation, Future)
+_prefetch_lock = threading.Lock()
+
+
+def _start_database(tab_id: str | None) -> str | None:
+    """The database of the tab the editor opens on (its saved draft), or None."""
+    try:
+        draft = editor_state.load_draft(editor_state.resolve_tab(tab_id))
+    except Exception:  # noqa: BLE001 - only a guess for the prefetch
+        return None
+    name = (draft or {}).get("database")
+    return name if isinstance(name, str) and name else None
+
+
+def _prefetch_schema(database: str) -> None:
+    from concurrent.futures import Future
+
+    fut: Future[dict[str, Any]] = Future()
+    with _prefetch_lock:
+        now = time.monotonic()
+        for name, (started, _, _f) in list(_prefetched.items()):
+            if now - started > PREFETCH_TTL_S:
+                del _prefetched[name]
+        if database in _prefetched:
+            return
+        _prefetched[database] = (now, db.generation, fut)
+
+    def run() -> None:
+        try:
+            fut.set_result(_schema_data(database))
+        except BaseException as exc:  # noqa: BLE001 - the editor's own call then queries (and reports) itself
+            fut.set_exception(exc)
+
+    threading.Thread(target=run, name="schema-prefetch", daemon=True).start()
+
+
+def _take_prefetched(database: str) -> dict[str, Any] | None:
+    with _prefetch_lock:
+        entry = _prefetched.pop(database, None)
+    if entry is None:
+        return None
+    started, generation, fut = entry
+    if time.monotonic() - started > PREFETCH_TTL_S:
+        return None
+    try:
+        data = fut.result(timeout=60)
+    except Exception:  # noqa: BLE001
+        return None
+    return data if generation == db.generation else None
+
+
+SAS_PREWARM_DELAY_S = 0.75  # after this call has answered (its result is what the host waits for)
+
+
+def _start_sas_prewarm() -> None:
+    """Start the SAS session in the background shortly after this call (the Workspace page asks too, ~1.5 s after
+    it painted): a cold Compute session takes ~40 s on Viya, so every second earlier counts. Never blocks or fails
+    the call."""
+    def run() -> None:
+        try:
+            from .. import sas_prewarm
+
+            sas_prewarm.prewarm()
+        except Exception:  # noqa: BLE001 - the page's own sas_prewarm call reports problems
+            pass
+
+    timer = threading.Timer(SAS_PREWARM_DELAY_S, run)
+    timer.name, timer.daemon = "sas-prewarm-start", True
+    timer.start()
+
+
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
 def sql_editor_schema(database: str) -> CallToolResult:
     """Tables, columns and routines of one database, for the SQL Editor's tree and autocomplete."""
+    data = _take_prefetched(database) or _schema_data(database)
+    return tool_result(f"{len(data['tables'])} table(s) in {database}", data)
+
+
+def _schema_data(database: str) -> dict[str, Any]:
     tables, columns, routines = db.parallel(
         lambda: db.execute(
             "SELECT TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES WHERE TABLE_SCHEMA = %s",
@@ -786,4 +879,4 @@ def sql_editor_schema(database: str) -> CallToolResult:
             {"name": r["ROUTINE_NAME"], "type": r["ROUTINE_TYPE"], "returns": r["DATA_TYPE"] or None} for r in routines
         ],
     }
-    return tool_result(f"{len(data['tables'])} table(s) in {database}", data)
+    return data

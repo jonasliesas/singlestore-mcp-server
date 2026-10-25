@@ -18,6 +18,8 @@ third-party packages and waits for "go"; a restart hands the server to it, and
 it then imports this package fresh from disk (code and app changes load as
 before) in well under a second. A standby that finds the installed packages
 changed since it loaded them declines, and a fresh child is started instead.
+The standby also opens the server's database connections ahead (``preconnect``)
+and hands them over, so the first call after a restart doesn't wait for one.
 SINGLESTORE_MCP_NO_STANDBY=1 turns the standby off.
 
 The supervisor also holds a browser-view slot (``browser_address``) for its
@@ -71,6 +73,12 @@ try:  # choosing the OS credential store backend takes ~0.3 s on its own
     keyring.get_keyring()
 except Exception:
     pass
+pre = None
+try:  # database connections for the server this becomes (see singlestore_mcp.preconnect)
+    from singlestore_mcp import preconnect
+    pre = preconnect.start()
+except Exception:
+    pass
 before = stamp()
 line = sys.stdin.buffer.readline()
 if line.strip() != b"go":
@@ -79,6 +87,14 @@ if stamp() != before:  # packages were installed or removed meanwhile: decline (
     sys.stdout.buffer.write(b'{"s2-standby":"stale"}\n'); sys.stdout.buffer.flush()
     sys.exit(0)
 sys.stdout.buffer.write(ACK + b"\n"); sys.stdout.buffer.flush()
+if pre is not None:
+    try:
+        sys.modules[preconnect.HOLDER_MODULE] = pre.handover()
+    except Exception:
+        pass
+# This package loads fresh from disk (code changed since the standby started): forget what preconnect imported.
+for name in [m for m in sys.modules if m == "singlestore_mcp" or m.startswith("singlestore_mcp.")]:
+    del sys.modules[name]
 import runpy
 runpy.run_module("singlestore_mcp.server", run_name="__main__", alter_sys=True)
 """.replace("PRELOAD", repr(_PRELOAD)).replace("ACK", repr(_STANDBY_ACK))
@@ -170,8 +186,16 @@ class Supervisor:
     def _spawn(standby: bool = False) -> subprocess.Popen[bytes]:
         env = dict(os.environ, SINGLESTORE_MCP_SUPERVISED="1")
         args = ["-c", _STANDBY_CODE] if standby else ["-m", "singlestore_mcp.server"]
+        exe = sys.executable
+        base = getattr(sys, "_base_executable", None)
+        if sys.platform == "win32" and base and os.path.normcase(base) != os.path.normcase(exe):
+            # A venv on Windows: its python.exe is only a launcher that starts the base interpreter as a second
+            # process. Start the base interpreter directly, as multiprocessing does (bpo-35797): one process per
+            # server instead of two and ~60 ms sooner; the child's sys.executable is still the venv's.
+            env["__PYVENV_LAUNCHER__"] = exe
+            exe = base
         return subprocess.Popen(
-            [sys.executable, *args],
+            [exe, *args],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
