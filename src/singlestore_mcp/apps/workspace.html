@@ -3,14 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SingleStore Workspace</title>
+<title>SAS SpeedyStore Studio · Workspace</title>
 <!--S2:HEAD-->
 <style>
   body { padding: 0; }
   .ws { display: grid; grid-template-columns: 58px minmax(0, 1fr); height: 760px; background: var(--s2-bg); }
-  html[data-display-mode="fullscreen"] .ws { height: 100vh; }
+  html[data-display-mode="fullscreen"] .ws { height: calc(100vh / var(--s2-zoom)); }
   .ws-rail { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 0;
-    background: var(--s2-bg-2); border-right: 1px solid var(--s2-border-2); }
+    background: var(--s2-bg-2); border-right: 1px solid var(--s2-border-2); overflow-y: auto; scrollbar-width: none; }
+  .ws-rail > * { flex: none; }
+  .ws-rail .gap { flex: 1 0 4px; }
   .ws-rail button { width: 48px; padding: 6px 0 5px; border: 0; border-radius: 8px; background: transparent; cursor: pointer;
     color: var(--s2-text-2); display: flex; flex-direction: column; align-items: center; gap: 3px; position: relative;
     font-size: 10px; line-height: 1.1; font-family: var(--s2-font); }
@@ -19,7 +21,7 @@
   .ws-rail button[aria-current="page"] { background: var(--s2-info-bg); color: var(--s2-info); font-weight: var(--font-weight-semibold, 600); }
   .ws-rail button[aria-current="page"]::before { content: ""; position: absolute; left: -5px; top: 9px; bottom: 9px; width: 3px; border-radius: 2px; background: var(--s2-info); }
   .ws-rail svg { width: 19px; height: 19px; flex: none; }
-  .ws-rail .gap { flex: 1; }
+
   .ws-rail .tool { padding: 7px 0; }
   .ws-main { position: relative; min-width: 0; }
   .ws-main iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: var(--s2-bg); }
@@ -47,12 +49,18 @@
   .ws-loading[hidden] { display: none; }
   .ws-loading .s2-error { max-width: 420px; }
   .ws-badge { position: absolute; top: 1px; right: 7px; min-width: 16px; height: 16px; padding: 0 4px; box-sizing: border-box; border-radius: 8px;
-    background: var(--s2-err); color: #fff; font-size: 10px; font-weight: 600; line-height: 16px; text-align: center; pointer-events: none; }
+    background: var(--s2-err-fill); color: #fff; font-size: 10px; font-weight: 600; line-height: 16px; text-align: center; pointer-events: none; }
   .ws-badge[hidden] { display: none; }
+  /* Product name at the top of the rail */
+  .ws-brand { display: flex; flex-direction: column; align-items: center; gap: 3px; width: 50px; padding: 2px 0 8px; margin-bottom: 4px;
+    border-bottom: 1px solid var(--s2-border-2); color: var(--s2-text); font-size: 10px; font-weight: 700; letter-spacing: .02em; line-height: 1.05; text-align: center; }
+  .ws-brand svg { width: 26px; height: 26px; }
+  .ws-brand small { display: block; font-size: 8px; font-weight: 600; color: var(--s2-text-2); letter-spacing: .04em; }
+  .ws-rail button.present[aria-pressed="true"] { background: var(--s2-warn-bg); color: var(--s2-warn); font-weight: var(--font-weight-semibold, 600); }
 </style>
 </head>
 <body>
-<div id="root"><div class="s2-empty"><span class="s2-spinner"></span> Opening the workspace…</div></div>
+<div id="root"><div class="s2-empty"><span class="s2-spinner"></span> Opening SAS SpeedyStore Studio…</div></div>
 <script type="module">
 // The workspace hosts the other apps as views, each in its own iframe, and
 // plays the MCP Apps *host* for them: it answers their ui/initialize, gives
@@ -82,7 +90,15 @@ const ICONS = {
   connections: '<path d="M9 7V3"/><path d="M15 7V3"/><path d="M6 7h12v4a6 6 0 0 1-12 0z"/><path d="M12 17v4"/>',
   browser: '<path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
   fullscreen: '<path d="M4 9V4h5"/><path d="M20 9V4h-5"/><path d="M4 15v5h5"/><path d="M20 15v5h-5"/>',
+  present: '<rect x="3" y="4" width="18" height="12" rx="1.5"/><line x1="12" y1="16" x2="12" y2="20"/><line x1="8" y1="20" x2="16" y2="20"/><circle cx="12" cy="10" r="2.5"/>',
 };
+// SAS SpeedyStore Studio's mark: SpeedyStore purple with a bolt (speed).
+function brandMark() {
+  const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  s.setAttribute("viewBox", "0 0 32 32"); s.setAttribute("aria-hidden", "true");
+  s.innerHTML = '<rect width="32" height="32" rx="7" fill="#820ddf"/><path d="M18 5 9 18h6l-2 9 9-13h-6z" fill="#fff"/>'; // static, trusted markup
+  return s;
+}
 // Rail order follows this object's order (bottom: true goes to the bottom of the rail).
 const VIEWS = {
   schema: { label: "Schema", title: "Schema Explorer", uri: "ui://singlestore/schema-explorer.html", tool: "schema_explorer" },
@@ -134,11 +150,14 @@ const mainEl = h("div", { class: "ws-main" });
 
 // ---------------------------------------------------------------- layout
 function buildShell() {
-  const rail = h("nav", { class: "ws-rail", "aria-label": "Workspace views" });
+  const rail = h("nav", { class: "ws-rail", "aria-label": "Workspace views" },
+    h("div", { class: "ws-brand", role: "img", "aria-label": "SAS SpeedyStore Studio", title: `SAS SpeedyStore Studio · build ${S2.build}` },
+      brandMark(), h("span", {}, "Studio", h("small", {}, "SpeedyStore"))));
   const railButton = (key, v) => (railButtons[key] = h("button", { title: v.title, "aria-label": v.title,
     onclick: () => openView(key === "notebook" ? (ws.lastNotebook ?? "notebook") : key) }, svg(ICONS[key]), v.label));
   for (const [key, v] of Object.entries(VIEWS)) if (!v.bottom) rail.append(railButton(key, v));
   rail.append(h("div", { class: "gap" }));
+  rail.append(presentButton);
   for (const [key, v] of Object.entries(VIEWS)) if (v.bottom) rail.append(railButton(key, v));
   refreshConnectionLabel();
   if (!S2.inBrowserView()) {
@@ -160,6 +179,29 @@ function buildShell() {
     const action = tabKeyAction(e);
     if (action && isSql(ws.current)) { e.preventDefault(); sqlTabKey(action); }
   }, true);
+}
+
+// ---------------------------------------------------------------- presenter mode
+// One switch for every view: bigger text and neutral names for hosts, connections and users (S2.presenter). Remembered
+// per browser: the browser page keeps it (s2-presenter-save), and so does this page where it may use storage.
+const PRESENT_KEY = "s2-presenter";
+const presentButton = h("button", { class: "present", "aria-pressed": "false",
+  title: "Presenter mode: bigger text, and neutral names for connections, hosts, users and e-mail addresses in every view (for projectors and screen shares). Query results stay as they are.",
+  onclick: () => setPresenter(!ws.presenter) }, svg(ICONS.present), "Present");
+function setPresenter(on, { save = true } = {}) {
+  ws.presenter = Boolean(on);
+  presentButton.setAttribute("aria-pressed", String(ws.presenter));
+  presentButton.setAttribute("aria-label", ws.presenter ? "Presenter mode: on" : "Presenter mode: off");
+  S2.presenter.set(ws.presenter);
+  for (const key of Object.keys(ws.frames)) deliver(key, { type: "s2-presenter", on: ws.presenter });
+  if (!save) return;
+  try { localStorage.setItem(PRESENT_KEY, ws.presenter ? "1" : "0"); } catch { /* sandboxed: the browser page keeps it */ }
+  window.parent.postMessage({ type: "s2-presenter-save", on: ws.presenter }, "*");
+}
+function initialPresenter() {
+  const ctx = S2.app.getHostContext() ?? {};
+  if ("s2Presenter" in ctx) return Boolean(ctx.s2Presenter);
+  try { return localStorage.getItem(PRESENT_KEY) === "1"; } catch { return false; }
 }
 
 // ---------------------------------------------------------------- alerts badge
@@ -558,6 +600,7 @@ function innerContext(view) {
     // The App SDK validates toolInfo.tool as a full MCP Tool (inputSchema required).
     toolInfo: { tool: outer.toolInfo?.tool?.name === viewDef(view).tool
       ? outer.toolInfo.tool : { name: viewDef(view).tool, inputSchema: { type: "object" } } },
+    s2Presenter: Boolean(ws.presenter),
   };
 }
 
@@ -662,7 +705,8 @@ function pushContext() {
   ctxTimer = setTimeout(() => {
     const label = (key) => `${viewDef(key)?.title ?? "?"}${isNotebook(key) ? ` "${ws.titles[key]?.title ?? "untitled"}"`
       : sqlTab(key) ? ` tab "${sqlLabel(sqlTab(key))}"` : ""}`;
-    const parts = [`SingleStore Workspace is open (active connection: ${ws.connection ?? "?"}); the user is on the ${label(ws.current)} view.`];
+    const parts = [`SAS SpeedyStore Studio (the SingleStore Workspace) is open (active connection: ${ws.connection ?? "?"}); the user is on the ${label(ws.current)} view.`
+      + (ws.presenter ? " Presenter mode is on: the user is presenting, so keep host names, connection names and user names out of answers where you can." : "")];
     for (const [view, text] of Object.entries(ws.contexts)) if (text) parts.push(`[${label(view)}]\n${text}`);
     S2.updateModelContext(parts.join("\n\n"));
   }, 250);
@@ -686,6 +730,7 @@ await S2.connect({
       ws.sqlResult = result;
       ws.args = { ...ws.args, database: data.database ?? ws.args.database, sql: data.sql ?? ws.args.sql, table: data.table ?? ws.args.table };
       buildShell();
+      setPresenter(initialPresenter(), { save: false });
       await loadSqlTabs(data.tab_id, { early: true });  // sql_editor(new_tab=true) made that tab
       openView(viewDef(data.view) ? data.view : "sql");
       startSasPrewarm();

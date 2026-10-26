@@ -50,7 +50,7 @@ def test_sql_editor_shows_the_sas_session_state(ui, app_url) -> None:
     page.route("**/call", route)
     page.goto(app_url("sql_editor", {"database": DB, "view": "sql", "new_tab": True, "sql": "-- SAS session status test"}),
               wait_until="domcontentloaded")
-    find_frame(page, "SingleStore Workspace", 30)
+    find_frame(page, "SAS SpeedyStore Studio · Workspace", 30)
     sql = find_frame(page, "SQL Editor", 30)
     assert wait_js(sql, "document.querySelector('.cm-content') && document.body.innerText.includes('Ctrl')", 30)
     try:

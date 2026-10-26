@@ -42,6 +42,7 @@ S2.connect = async function ({ name, onToolInput, onToolResult, onToolCancelled,
     if (ctx.styles?.variables) X.applyHostStyleVariables(ctx.styles.variables);
     if (ctx.styles?.css?.fonts) X.applyHostFonts(ctx.styles.css.fonts);
     if (ctx.displayMode) setDisplayMode(ctx.displayMode);
+    if ("s2Presenter" in ctx) S2.presenter.set(Boolean(ctx.s2Presenter));
     onHostContext?.(ctx);
   };
   app.onhostcontextchanged = applyContext;
@@ -51,6 +52,8 @@ S2.connect = async function ({ name, onToolInput, onToolResult, onToolCancelled,
   app.onteardown = async () => ({});
   await app.connect(new X.PostMessageTransport(window.parent, window.parent));
   S2.app = app;
+  if (S2.embedded()) document.documentElement.dataset.embedded = "";
+  if (activeConn.listeners.size) S2.activeConnections();
   applyContext(app.getHostContext());
   return app;
 };
@@ -126,6 +129,7 @@ window.addEventListener("message", (ev) => {
   else if (msg?.type === "s2-connection-changed") window.dispatchEvent(new CustomEvent("s2:connection-changed", { detail: msg }));
   else if (msg?.type === "s2-sas-connection-changed") window.dispatchEvent(new CustomEvent("s2:sas-connection-changed", { detail: msg }));
   else if (msg?.type === "s2-files-changed") window.dispatchEvent(new CustomEvent("s2:files-changed", { detail: msg.change }));
+  else if (msg?.type === "s2-presenter") S2.presenter.set(Boolean(msg.on));
 });
 
 // A file or folder was renamed or deleted in a file browser: {from, to (null when deleted), folder, version,
@@ -357,9 +361,15 @@ S2.fmt = {
   },
 };
 
-S2.toast = function (message, kind = "") {
+// The toast container is there from the start, so screen readers announce the first message too.
+function toastHost() {
   let host = document.getElementById("s2-toasts");
-  if (!host) document.body.append((host = S2.h("div", { id: "s2-toasts" })));
+  if (!host && document.body) document.body.append((host = S2.h("div", { id: "s2-toasts", "aria-live": "polite" })));
+  return host;
+}
+if (document.body) toastHost(); else document.addEventListener("DOMContentLoaded", toastHost);
+S2.toast = function (message, kind = "") {
+  const host = toastHost();
   const el = S2.h("div", { class: `s2-toast ${kind}`, role: "status" }, message);
   host.append(el);
   setTimeout(() => el.remove(), kind === "err" ? 7000 : 3500);
@@ -378,11 +388,298 @@ S2.confirmInline = function (anchor, message, confirmLabel = "Confirm") {
   });
 };
 
+// Status words in sentence case for badges ("BASE TABLE" -> "Base table", "OPEN" -> "Open"); mixed-case text stays.
+S2.sentence = (text) => { const t = String(text ?? ""); return /^[A-Z][A-Z0-9 _-]*$/.test(t) ? t[0] + t.slice(1).toLowerCase().replace(/_/g, " ") : t; };
+
 S2.errorBox = (err) => S2.h("div", { class: "s2-error" }, err?.message ?? String(err));
 
 // The Workspace's SAS session (sas_prewarm), for the SAS views' header: "SAS session: starting… / ready / not
 // signed in / unreachable". ``watch.refresh()`` asks the server (``getArgs()``: {connection, start}) and, while the
 // session is starting, asks again every 2.5 s; ``onChange(status)`` redraws.
+// ---- Where code runs: SingleStore, SAS Compute, CAS or Python on this computer.
+// S2.engineChip(engine, connection): a labelled chip (icon + "SingleStore · prod"; "S2" on narrow widths, the full
+// text in the tooltip). S2.runContent(engine, connection) is the inside of a Run button ("Run on SingleStore · prod"),
+// S2.runningText(engine) the status line while it runs, S2.pushdownChip(verdict) what reached SingleStore.
+const ICONS = {
+  s2: '<ellipse cx="12" cy="5.5" rx="7.5" ry="2.8"/><path d="M4.5 5.5v13c0 1.6 3.4 2.8 7.5 2.8s7.5-1.2 7.5-2.8v-13"/><path d="M4.5 12c0 1.6 3.4 2.8 7.5 2.8s7.5-1.2 7.5-2.8"/>',
+  compute: '<rect x="3" y="4" width="18" height="12" rx="2"/><line x1="8" y1="20" x2="16" y2="20"/><line x1="12" y1="16" x2="12" y2="20"/>',
+  cas: '<rect x="6.5" y="6.5" width="11" height="11" rx="1.5"/><path d="M9.5 2.5v4M14.5 2.5v4M9.5 17.5v4M14.5 17.5v4M2.5 9.5h4M2.5 14.5h4M17.5 9.5h4M17.5 14.5h4"/>',
+  python: '<polyline points="5 16 10 11 5 6"/><line x1="12" y1="18" x2="19" y2="18"/>',
+  sparkle: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 15l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7z"/>',
+  present: '<rect x="3" y="4" width="18" height="12" rx="1.5"/><line x1="12" y1="16" x2="12" y2="20"/><line x1="8" y1="20" x2="16" y2="20"/><path d="M9 10l2 2 4-4"/>',
+};
+S2.icon = function (name) {
+  const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  s.setAttribute("viewBox", "0 0 24 24"); s.setAttribute("fill", "none"); s.setAttribute("stroke", "currentColor");
+  s.setAttribute("stroke-width", "2"); s.setAttribute("stroke-linecap", "round"); s.setAttribute("stroke-linejoin", "round");
+  s.setAttribute("aria-hidden", "true");
+  s.innerHTML = ICONS[name] ?? ""; // static, trusted markup
+  return s;
+};
+S2.ENGINES = {
+  s2: { label: "SingleStore", short: "S2", prep: "on" },
+  compute: { label: "SAS Compute", short: "Compute", prep: "in" },
+  cas: { label: "CAS", short: "CAS", prep: "in" },
+  python: { label: "Python (local)", short: "Python", prep: "in" },
+};
+// The engine a language runs in: SingleStore SQL on SingleStore; PROC SQL, FedSQL and plain SAS code in SAS Compute;
+// FedSQL in CAS in CAS; notebook Python on this computer.
+S2.engineOf = (lang) => (lang === "cas" ? "cas" : !lang || lang === "singlestore" || lang === "sql" ? "s2" : lang === "python" ? "python" : "compute");
+S2.engineText = (engine, connection) => `${(S2.ENGINES[engine] ?? S2.ENGINES.s2).label}${connection ? ` · ${connection}` : ""}`;
+S2.engineChip = function (engine, connection, { title, verb = "Runs" } = {}) {
+  const e = S2.ENGINES[engine] ?? S2.ENGINES.s2;
+  const full = `${verb} ${e.prep} ${e.label}${connection ? ` (connection ${connection})` : ""}`;
+  return S2.h("span", { class: "s2-engine", "data-engine": engine in S2.ENGINES ? engine : "s2", "aria-label": full, title: title ?? full },
+    S2.icon(engine), S2.h("span", { class: "long", "aria-hidden": "true" }, e.label, connection ? [" · ", S2.h("span", { class: "conn" }, connection)] : null),
+    S2.h("span", { class: "short", "aria-hidden": "true" }, e.short));
+};
+S2.runText = (engine, connection) => `Run ${(S2.ENGINES[engine] ?? S2.ENGINES.s2).prep} ${S2.engineText(engine, connection)}`;
+S2.runContent = function (engine, connection, verb = "Run") {
+  const e = S2.ENGINES[engine] ?? S2.ENGINES.s2;
+  return [S2.h("span", { class: "long" }, `${verb} ${e.prep} ${e.label}`, connection ? [" · ", S2.h("span", { class: "conn" }, connection)] : null),
+    S2.h("span", { class: "short" }, `${verb} · ${e.short}`)];
+};
+S2.runningText = (engine) => { const e = S2.ENGINES[engine] ?? S2.ENGINES.s2; return `Running ${e.prep} ${e.label}…`; };
+const PUSHDOWN = { full: "full", partly: "partial", pulled: "none" };
+S2.pushdownChip = function (verdict) {
+  if (!PUSHDOWN[verdict]) return null;
+  return S2.h("span", { class: "s2-pushdown", "data-v": verdict,
+    title: verdict === "full" ? "SingleStore did the work; SAS only received the result."
+      : verdict === "partly" ? "Part of the work (e.g. the WHERE clause or the column list) ran in SingleStore; SAS did the rest."
+      : "Only a plain table read reached SingleStore: the rows were read into SAS and processed there." },
+    "→ pushed down to SingleStore: ", S2.h("b", {}, PUSHDOWN[verdict]));
+};
+// The active SingleStore and SAS Viya connections (names), read once per page and again after a switch.
+// S2.onConnections(fn) calls fn({s2, viya}) now (when known) and after every change.
+const activeConn = { s2: undefined, viya: undefined, loading: null, listeners: new Set() };
+S2.activeConnections = function (force = false) {
+  if (activeConn.loading && !force) return activeConn.loading;
+  activeConn.loading = Promise.all([
+    S2.callTool("connections_state", {}).then((r) => r.active ?? null).catch(() => null),
+    S2.callTool("sas_connections_state", {}).then((r) => r.active ?? null).catch(() => null),
+  ]).then(([s2, viya]) => {
+    activeConn.s2 = s2; activeConn.viya = viya;
+    for (const fn of activeConn.listeners) { try { fn(activeConn); } catch { /* a view's redraw */ } }
+    return activeConn;
+  });
+  return activeConn.loading;
+};
+S2.onConnections = function (fn) {
+  activeConn.listeners.add(fn);
+  if (activeConn.s2 !== undefined) fn(activeConn); else if (S2.app) S2.activeConnections();
+};
+S2.connections = () => activeConn;
+window.addEventListener("s2:connection-changed", () => { if (activeConn.loading) S2.activeConnections(true); });
+window.addEventListener("s2:sas-connection-changed", () => { if (activeConn.loading) S2.activeConnections(true); });
+
+// "Ask Claude": one name, one style and a small sparkle everywhere (the title says what is asked).
+S2.askClaudeButton = function (props = {}, label = "Ask Claude") {
+  const { class: cls, ...rest } = props;
+  return S2.h("button", { ...rest, class: `s2-btn s2-ask${cls ? ` ${cls}` : ""}` }, S2.icon("sparkle"), label);
+};
+
+// A modal dialog over the page: role=dialog + aria-modal, focus moved into it (``focus``: an element or a function
+// returning one; else its first field), Tab kept inside, Escape anywhere closes it (unless a field inside already
+// handled the key: preventDefault). Returns close(), which also gives the focus back to where it was.
+S2.modal = function (panel, { label, onClose, focus } = {}) {
+  const before = document.activeElement;
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-modal", "true");
+  if (label) panel.setAttribute("aria-label", label);
+  if (!panel.hasAttribute("tabindex")) panel.setAttribute("tabindex", "-1");
+  const focusables = () => [...panel.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')]
+    .filter((el) => !el.disabled && el.getClientRects().length > 0);
+  const onKey = (e) => {
+    if (e.key === "Escape" && !e.defaultPrevented) { e.preventDefault(); e.stopPropagation(); close(); onClose?.(); return; }
+    if (e.key !== "Tab") return;
+    const els = focusables();
+    if (!els.length) { e.preventDefault(); panel.focus(); return; }
+    const first = els[0], last = els[els.length - 1];
+    if (!panel.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+    else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  };
+  // Focus that lands behind the dialog (a click on the page) comes back into it.
+  const onFocus = (e) => { if (open && panel.isConnected && !panel.hidden && !panel.contains(e.target)) (focusables()[0] ?? panel).focus(); };
+  document.addEventListener("keydown", onKey);
+  document.addEventListener("focusin", onFocus);
+  let open = true;
+  function close() {
+    if (!open) return;
+    open = false;
+    document.removeEventListener("keydown", onKey);
+    document.removeEventListener("focusin", onFocus);
+    panel.removeAttribute("aria-modal");
+    panel.removeAttribute("role");
+    if (before && before.isConnected && before !== document.body && typeof before.focus === "function") before.focus();
+  }
+  const first = () => { const el = typeof focus === "function" ? focus() : focus; (el ?? focusables().find((x) => x.matches("input, select")) ?? focusables()[0] ?? panel).focus(); };
+  // The dialog's content may be drawn right after this call (a file browser): focus the panel now, the field next frame.
+  panel.focus();
+  requestAnimationFrame(() => { if (open && (document.activeElement === panel || !panel.contains(document.activeElement))) first(); });
+  return close;
+};
+
+// ---- Presenter mode
+// One switch in the Workspace (remembered per browser): bigger text (shared.css) and neutral stand-ins for
+// identifying metadata in every view: connection names ("Connection A"), hosts and IPs ("host-1"), user names and
+// e-mail addresses ("user1"), SAS Viya addresses ("viya-1"). The server hands out the labels (presenter_labels), so a
+// value gets the same label in every view. Only the text on screen changes (text, tooltips, labels); the views' data
+// and what they send stay real. Not masked: editors (the SQL and code you type) and query results, where only a cell
+// that is exactly one of the known values is replaced. Form fields holding such a value are blurred until focused.
+const pres = { on: false, map: new Map(), re: null, pending: new Map(), timer: null, observer: null, ready: null,
+  texts: new Map(), attrs: new Map(), fields: new Set() };
+const MASK_ATTRS = ["title", "aria-label", "placeholder", "alt"];
+const NO_MASK = "script, style, textarea, .cm-editor, [data-s2-nomask]";
+const RX_EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g;
+const RX_IP = /(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])/g;
+const RX_FQDN = /(?<![\w.@-])[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+\.(?:com|net|org|io|local|internal|cloud|corp|lan|intra|no|se|dk|fi|uk|de|fr|nl|eu|us|ca|au|ch|be|at|it|es|pl|biz|info|dev|app|ai)(?![\w-])/gi;
+const PUBLIC_HOSTS = /(^|\.)(singlestore\.com|singlestore\.io|documentation\.sas\.com|support\.sas\.com|communities\.sas\.com|github\.com|microsoft\.com|python\.org|pypi\.org|jupyter\.org|anthropic\.com|claude\.ai)$/i;
+const LOCAL_IP = /^(127\.0\.0\.1|0\.0\.0\.0|255\.255\.255\.255)$/;
+// host:port where the host isn't a domain name (Kubernetes service names, short host names): "node-x.svc-y:3306".
+const RX_HOSTPORT = /(?<![\w.@/-])([a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)(?=:\d{2,5}(?!\d))/gi;
+const IS_LABEL = /^(host|viya)-\d+$|^user\d+$/i;
+const escRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function presLabel(value, kind) {
+  const k = pres.map.get(value.toLowerCase());
+  if (k) return k.label;
+  pres.pending.set(value.toLowerCase(), { value, kind });
+  clearTimeout(pres.timer);
+  pres.timer = setTimeout(fetchLabels, 40);
+  return "•••";
+}
+function maskString(s, exact) {
+  if (!s || !/[A-Za-z0-9]/.test(s)) return s;
+  if (exact) {
+    const k = pres.map.get(s.trim().toLowerCase());
+    return k ? s.replace(s.trim(), k.label) : s;
+  }
+  let out = pres.re ? s.replace(pres.re, (m) => pres.map.get(m.toLowerCase())?.label ?? m) : s;
+  out = out.replace(RX_EMAIL, (m) => presLabel(m, "user"));
+  out = out.replace(RX_IP, (m) => (LOCAL_IP.test(m) ? m : presLabel(m, "host")));
+  out = out.replace(RX_FQDN, (m) => (PUBLIC_HOSTS.test(m) ? m : presLabel(m, "host")));
+  out = out.replace(RX_HOSTPORT, (m) => (IS_LABEL.test(m) || /^localhost$/i.test(m) || !/[.-]/.test(m) || !/[a-z]/i.test(m.replace(/^\d{4}-\d\d-\d\dT/i, "")) ? m : presLabel(m, "host")));
+  return out;
+}
+function setLabels(items) {
+  for (const x of items ?? []) pres.map.set(String(x.value).toLowerCase(), x);
+  const terms = [...pres.map.values()].map((x) => x.value).sort((a, b) => b.length - a.length);
+  // Whole words, where _ also separates: "db_jonas_1572b" names a user too.
+  pres.re = terms.length ? new RegExp(`(?<![A-Za-z0-9])(?:${terms.map(escRe).join("|")})(?![A-Za-z0-9])`, "gi") : null;
+}
+async function fetchLabels() {
+  const values = [...pres.pending.values()];
+  pres.pending.clear();
+  try { setLabels((await S2.callTool("presenter_labels", values.length ? { values } : {})).labels); }
+  catch { return; }
+  if (pres.on) remaskAll();
+}
+const skipped = (el) => !el || Boolean(el.closest(NO_MASK));
+function maskText(node) {
+  const parent = node.parentElement;
+  if (skipped(parent)) return;
+  const rec = pres.texts.get(node);
+  const orig = rec && node.data === rec.masked ? rec.orig : node.data;
+  const masked = maskString(orig, Boolean(parent.closest("[data-s2-data]")));
+  if (masked !== orig) {
+    pres.texts.set(node, { orig, masked });
+    if (node.data !== masked) node.data = masked;
+  } else if (rec) pres.texts.delete(node);
+}
+function maskAttr(el, name) {
+  const v = el.getAttribute(name);
+  if (v == null || skipped(el)) return;
+  let recs = pres.attrs.get(el);
+  const rec = recs?.[name];
+  const orig = rec && v === rec.masked ? rec.orig : v;
+  const masked = maskString(orig, Boolean(el.closest("[data-s2-data]")));
+  if (masked !== orig) {
+    if (!recs) pres.attrs.set(el, (recs = {}));
+    recs[name] = { orig, masked };
+    if (v !== masked) el.setAttribute(name, masked);
+  } else if (rec) delete recs[name];
+}
+function maskField(el) {
+  if (el.closest(".cm-editor") || ["password", "checkbox", "radio", "number"].includes(el.type)) return;
+  const v = el.value ?? "";
+  const hit = Boolean(v) && maskString(v, false) !== v;
+  el.classList.toggle("s2-masked-field", hit);
+  if (hit) pres.fields.add(el); else pres.fields.delete(el);
+}
+function maskTree(root) {
+  if (root.nodeType === Node.TEXT_NODE) { maskText(root); return; }
+  if (root.nodeType !== Node.ELEMENT_NODE || root.closest(NO_MASK)) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) => (n.nodeType === Node.ELEMENT_NODE && n.matches(NO_MASK) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+  });
+  for (let n = walker.currentNode; n; n = walker.nextNode()) {
+    if (n.nodeType === Node.TEXT_NODE) { maskText(n); continue; }
+    for (const a of MASK_ATTRS) if (n.hasAttribute(a)) maskAttr(n, a);
+    if (n.tagName === "INPUT") maskField(n);
+  }
+}
+function remaskAll() {
+  for (const [node, rec] of [...pres.texts]) {
+    if (!node.isConnected) { pres.texts.delete(node); continue; }
+    if (node.data === rec.masked) { pres.texts.delete(node); node.data = rec.orig; }
+  }
+  for (const [el, recs] of [...pres.attrs]) {
+    if (!el.isConnected) { pres.attrs.delete(el); continue; }
+    for (const [name, rec] of Object.entries(recs)) if (el.getAttribute(name) === rec.masked) { delete recs[name]; el.setAttribute(name, rec.orig); }
+  }
+  if (document.body) maskTree(document.body);
+}
+function unmaskAll() {
+  for (const [node, rec] of pres.texts) if (node.data === rec.masked) node.data = rec.orig;
+  for (const [el, recs] of pres.attrs) for (const [name, rec] of Object.entries(recs)) if (el.getAttribute(name) === rec.masked) el.setAttribute(name, rec.orig);
+  for (const el of pres.fields) el.classList.remove("s2-masked-field");
+  pres.texts.clear(); pres.attrs.clear(); pres.fields.clear();
+}
+function onPresInput(e) { if (pres.on && e.target?.tagName === "INPUT") maskField(e.target); }
+function onPresMutations(records) {
+  for (const r of records) {
+    if (r.type === "characterData") maskText(r.target);
+    else if (r.type === "attributes") maskAttr(r.target, r.attributeName);
+    else for (const n of r.addedNodes) maskTree(n);
+  }
+}
+S2.presenter = {
+  get on() { return pres.on; },
+  // What the screen shows for this text (the text itself when presenter mode is off).
+  mask: (text) => (pres.on ? maskString(String(text ?? ""), false) : text),
+  // Resolves once the labels are in and the page is masked.
+  ready: () => pres.ready ?? Promise.resolve(),
+  set(on) {
+    on = Boolean(on);
+    if (on === pres.on) return;
+    pres.on = on;
+    const root = document.documentElement;
+    if (!on) {
+      delete root.dataset.presenter;
+      delete root.dataset.presenterLoading;
+      pres.observer?.disconnect(); pres.observer = null;
+      document.removeEventListener("input", onPresInput, true);
+      unmaskAll();
+      pres.ready = null;
+      return;
+    }
+    root.dataset.presenter = "";
+    // Nothing identifying shows before the labels are in (one local call): the page is hidden until then.
+    root.dataset.presenterLoading = "";
+    const show = () => { delete root.dataset.presenterLoading; };
+    const failsafe = setTimeout(show, 3000);
+    pres.observer = new MutationObserver(onPresMutations);
+    pres.observer.observe(root, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: MASK_ATTRS });
+    document.addEventListener("input", onPresInput, true);
+    if (document.body) maskTree(document.body);  // e-mails, IPs and host names at once
+    pres.ready = (async () => {
+      try { setLabels((await S2.callTool("presenter_labels", {})).labels); } catch { /* e-mails, IPs and host names only */ }
+      if (pres.on) remaskAll();
+      clearTimeout(failsafe); show();
+    })();
+  },
+};
+
 const SAS_SESSION = {
   starting: ["info", "starting…"], ready: ["ok", "ready"], idle: ["plain", "starts with the first run"],
   off: ["plain", "starts with the first run"], not_signed_in: ["warn", "not signed in"],
@@ -471,7 +768,8 @@ S2.dataTable = function (columns, rows, opts = {}) {
     tbody.replaceChildren(...sorted.map(tr));
   }
   draw();
-  const wrap = S2.h("div", { class: "s2-table-wrap", style: { maxHeight: opts.maxHeight ?? "420px" } },
+  // opts.data: the rows are query results (presenter mode replaces only cells that are exactly a known value).
+  const wrap = S2.h("div", { class: "s2-table-wrap", style: { maxHeight: opts.maxHeight ?? "420px" }, "data-s2-data": opts.data ? "" : null },
     S2.h("table", { class: "s2-table" }, S2.h("thead", {}, S2.h("tr", {}, headCells)), tbody));
   wrap.appendRows = (more) => {
     if (!more?.length) return;
@@ -505,7 +803,7 @@ S2.fileBrowser = function (box, opts) {
   const filter = h("input", { class: "s2-input", type: "search", placeholder: "Filter…", "aria-label": "Filter", oninput: () => draw() });
   const nameInput = opts.mode === "save"
     ? h("input", { class: "s2-input", value: opts.name || "", spellcheck: false, "aria-label": "File name",
-        onkeydown: (e) => { if (e.key === "Enter") save(false); if (e.key === "Escape") opts.onClose?.(); } })
+        onkeydown: (e) => { if (e.key === "Enter") save(false); if (e.key === "Escape") { e.preventDefault(); opts.onClose?.(); } } })
     : null;
   const message = h("div", { class: "row" });
   const ago = (t) => { const s = Date.now() / 1000 - t; return s < 90 ? "just now" : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 129600 ? `${Math.round(s / 3600)} h ago` : new Date(t * 1000).toLocaleDateString(); };
@@ -540,7 +838,7 @@ S2.fileBrowser = function (box, opts) {
   }
   function newFolder() {
     const input = h("input", { class: "s2-input", placeholder: "Folder name", spellcheck: false, "aria-label": "New folder name",
-      onkeydown: (e) => { if (e.key === "Enter") create(); if (e.key === "Escape") message.replaceChildren(); } });
+      onkeydown: (e) => { if (e.key === "Enter") create(); if (e.key === "Escape") { e.preventDefault(); message.replaceChildren(); } } });
     async function create() {
       const name = input.value.trim();
       if (!name || !listing) return;
@@ -584,7 +882,7 @@ S2.fileBrowser = function (box, opts) {
   function startRename(item) {
     const what = item.folder ? "folder" : "file";
     const input = h("input", { class: "s2-input", value: item.name, spellcheck: false, "aria-label": `New name for ${item.name}`,
-      onkeydown: (e) => { if (e.key === "Enter") rename(); if (e.key === "Escape") message.replaceChildren(); } });
+      onkeydown: (e) => { if (e.key === "Enter") rename(); if (e.key === "Escape") { e.preventDefault(); message.replaceChildren(); } } });
     async function rename() {
       const name = input.value.trim();
       if (!name || name === item.name) { message.replaceChildren(); return; }
@@ -622,7 +920,7 @@ S2.fileBrowser = function (box, opts) {
     const btn = h("button", { class: "s2-btn danger", disabled: true, onclick: remove }, "Delete folder");
     const input = h("input", { class: "s2-input", spellcheck: false, placeholder: item.name, "aria-label": `Type ${item.name} to confirm`,
       oninput: () => { btn.disabled = input.value !== item.name; },
-      onkeydown: (e) => { if (e.key === "Enter" && input.value === item.name) remove(); if (e.key === "Escape") message.replaceChildren(); } });
+      onkeydown: (e) => { if (e.key === "Enter" && input.value === item.name) remove(); if (e.key === "Escape") { e.preventDefault(); message.replaceChildren(); } } });
     warn(`Delete the empty folder ${item.name}${where}? Type its name to confirm:`, input, btn);
     input.focus();
   }

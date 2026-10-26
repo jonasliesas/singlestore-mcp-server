@@ -11,7 +11,14 @@
 <!--S2:VENDOR:sas-complete.js-->
 <style>
   body { padding: 10px 12px; }
+  /* Full height: header and panels take what they need, the editor body the rest (a header that wraps never
+     makes the page scroll). */
+  html[data-display-mode="fullscreen"] body { height: calc(100vh / var(--s2-zoom)); display: flex; flex-direction: column; overflow: hidden; }
+  html[data-display-mode="fullscreen"] #root { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  html[data-display-mode="fullscreen"] #root > * { flex: none; }
+  html[data-display-mode="fullscreen"] #root > .sq-body { flex: 1; min-height: 0; height: auto; }
   .sq-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .sq-runas-label { display: inline-flex; align-items: center; gap: 5px; font-size: var(--s2-fs-xs); color: var(--s2-text-2); font-weight: var(--font-weight-semibold, 600); }
   .sq-head select { max-width: 200px; }
   .sq-body { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 10px; height: 640px; }
   .sq-body.no-tree { grid-template-columns: minmax(0, 1fr); }
@@ -22,8 +29,7 @@
   .sq-chat { border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); overflow: hidden; }
   .sq-chat-top { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--s2-border-2); background: var(--s2-bg-2); font-size: var(--s2-fs-xs); }
   .sq-chat-top strong { flex: 1; }
-  .sq-claude-btn .count { background: var(--s2-info); color: #fff; border-radius: 999px; font-size: 10px; padding: 0 6px; font-weight: 600; margin-left: 4px; }
-  html[data-display-mode="fullscreen"] .sq-body { height: calc(100vh - 70px); }
+  .sq-claude-btn .count { background: var(--s2-primary); color: var(--s2-on-primary); border-radius: 999px; font-size: 10px; padding: 0 6px; font-weight: 600; margin-left: 4px; }
   .sq-filebtns { display: inline-flex; align-items: center; gap: 2px; margin-left: 4px; }
   .sq-file { font-size: var(--s2-fs-xs); color: var(--s2-text-2); margin-left: 6px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sq-file .dirty { color: var(--s2-warn); margin-left: 3px; }
@@ -105,7 +111,7 @@
   .sq-tab { border: 0; background: none; padding: 6px 10px; font-size: var(--s2-fs-xs); color: var(--s2-text-2); cursor: pointer;
     border-bottom: 2px solid transparent; margin-bottom: -1px; display: inline-flex; align-items: center; gap: 6px; }
   .sq-tab[aria-selected="true"] { color: var(--s2-text); border-bottom-color: var(--s2-info); font-weight: var(--font-weight-semibold, 600); }
-  .sq-tab .count { background: var(--s2-info); color: #fff; border-radius: 999px; font-size: 10px; padding: 0 6px; font-weight: 600; }
+  .sq-tab .count { background: var(--s2-primary); color: var(--s2-on-primary); border-radius: 999px; font-size: 10px; padding: 0 6px; font-weight: 600; }
   .sq-chat { flex: 1; display: flex; flex-direction: column; min-height: 0; }
   .sq-chat[hidden], .sq-resultview[hidden] { display: none; }
   .sq-resultview { flex: 1; display: flex; flex-direction: column; min-height: 0; }
@@ -143,18 +149,18 @@
   .sq-seg button + button { border-left: 1px solid var(--s2-border); }
   .sq-seg button[aria-pressed="true"] { background: var(--s2-bg-3); color: var(--s2-text); font-weight: var(--font-weight-semibold, 600); }
 
-  /* SAS in the editor: "Run as" languages and their colours (SingleStore blue, PROC SQL / FedSQL orange, CAS purple, plain SAS teal) */
-  :root { --lang-singlestore: var(--s2-info); --lang-procsql: #c2410c; --lang-fedsql: #c2410c; --lang-cas: #7c3aed; --lang-sas: #0f766e; }
+  /* SAS in the editor: "Run as" languages and their colours, the same as where they run (S2.engineChip): SingleStore blue,
+     PROC SQL / FedSQL orange (SAS Compute), CAS indigo, plain SAS teal. Tokens from shared.css (contrast checked). */
+  :root { --lang-singlestore: var(--s2-eng-s2); --lang-procsql: var(--s2-eng-compute); --lang-fedsql: var(--s2-eng-compute); --lang-cas: var(--s2-eng-cas); --lang-sas: var(--s2-eng-sas); }
   .sq-lang { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; font-weight: 700; letter-spacing: .02em; padding: 0 6px;
-    border-radius: 4px; line-height: 17px; white-space: nowrap; color: var(--lc); background: color-mix(in srgb, var(--lc) 13%, transparent);
-    border: 1px solid color-mix(in srgb, var(--lc) 35%, transparent); }
+    border-radius: 4px; line-height: 17px; white-space: nowrap; color: var(--lc); background: color-mix(in srgb, var(--lc) 12%, var(--s2-bg));
+    border: 1px solid color-mix(in srgb, var(--lc) 40%, var(--s2-bg)); }
   .sq-lang[data-lang="singlestore"] { --lc: var(--lang-singlestore); } .sq-lang[data-lang="procsql"] { --lc: var(--lang-procsql); }
   .sq-lang[data-lang="fedsql"] { --lc: var(--lang-fedsql); } .sq-lang[data-lang="cas"] { --lc: var(--lang-cas); } .sq-lang[data-lang="sas"] { --lc: var(--lang-sas); }
   .sq-runas { border-width: 2px; font-weight: 600; max-width: 170px; }
   .sq-runas[data-lang="singlestore"] { border-color: var(--lang-singlestore); } .sq-runas[data-lang="procsql"], .sq-runas[data-lang="fedsql"] { border-color: var(--lang-procsql); }
   .sq-runas[data-lang="cas"] { border-color: var(--lang-cas); }
   .sq-editor { position: relative; }
-  .sq-editor > .sq-lang { position: absolute; top: 4px; right: 8px; z-index: 5; pointer-events: none; opacity: .9; }
   .sq-sasopts { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .sq-sasopts input[type=number] { width: 90px; min-width: 0; }
   .sq-hint { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px; padding: 8px 10px; border-radius: var(--s2-radius-sm);
@@ -174,8 +180,8 @@
   .sq-sent .bar { display: flex; gap: 6px; align-items: center; padding: 4px 8px; border-top: 1px solid var(--s2-border-2); background: var(--s2-bg-2); font-size: 11px; color: var(--s2-text-3); }
   .sq-listing { margin: 0; padding: 8px 10px; font-family: var(--s2-mono); font-size: 12px; white-space: pre; overflow: auto; }
   .sq-row .lib-db { color: var(--s2-info); font-size: 10px; }
-  .sq-row .lib-db.ss { color: #fff; background: #820ddf; border-radius: 3px; padding: 0 3px; }
-  .sq-row .lib-db.s2-std { color: #5b7290; box-shadow: inset 0 0 0 1px #5b7290; border-radius: 3px; padding: 0 3px; }
+  .sq-row .lib-db.ss { color: #fff; background: var(--s2-src-ss); border-radius: 3px; padding: 0 3px; }
+  .sq-row .lib-db.s2-std { color: var(--s2-src-s2); box-shadow: inset 0 0 0 1px var(--s2-src-s2); border-radius: 3px; padding: 0 3px; }
   .sq-row .lib-db.sas9 { color: var(--s2-ok); }
   /* The tree's source (SingleStore / SAS libraries / caslibs) and the SAS run status */
   .sq-treesrc { display: flex; }
@@ -292,6 +298,11 @@ const withConn = (args = {}) => ({ ...args, connection: tabConn() });
 // The tab's SAS session, started in the background when the Workspace opens (sas_prewarm; a tab pinned to another
 // connection only shows its state): "SAS session: starting… / ready / not signed in / unreachable" in the header.
 const sasSessionSlot = h("span", { class: "sq-sas-session" });
+// Where this tab's SQL runs, in words: SingleStore (the active connection), SAS Compute or CAS (the tab's SAS Viya
+// connection). Shown on the Run button, while it runs and on the result.
+const engineNow = (lang = state.language) => S2.engineOf(lang);
+const connFor = (engine) => (engine === "s2" ? S2.connections().s2 : tabConn() || sas.viya?.active || S2.connections().viya) || null;
+S2.onConnections(() => { renderHeader(); if (!state.running) renderResults(); });
 const sasSession = S2.sasSessionWatch(() => ({ connection: tabConn(), start: !tabConn() || tabConn() === sas.viya?.active }),
   (st) => sasSessionSlot.replaceChildren(S2.sasSessionBadge(st) ?? ""));
 function forgetSas() {
@@ -443,12 +454,12 @@ const chatView = h("aside", { class: "sq-chat", hidden: true, "aria-label": "Cha
     h("label", {}, includeSql, " Include the editor's SQL and last result"),
     h("label", {}, "Answer ", modeSelect), profileLabel, modeHint));
 const fileLabel = h("span", { class: "sq-file" });
-const filePanel = h("div", { class: "sq-files", hidden: true,
-  onkeydown: (e) => { if (e.key === "Escape" && filePanel.classList.contains("dialog")) { e.stopPropagation(); hideFilePanel(); view.focus(); } } });
+const filePanel = h("div", { class: "sq-files", hidden: true });
+let closeFileModal = null;  // S2.modal's close while Open / Save as is up
 const histPanel = h("div", { class: "sq-files sq-hist", hidden: true, "aria-label": "Run history" });
 const wlPanel = h("div", { class: "sq-files sq-towl", hidden: true, role: "group", "aria-label": "Send to a workload" });
 const sasPanel = h("div", { class: "sq-files sq-sasopts", hidden: true, role: "group", "aria-label": "SAS options" });
-const claudeBtn = h("button", { class: "s2-btn sq-claude-btn", title: "Chat with Claude about this SQL", onclick: () => toggleChat() });
+const claudeBtn = h("button", { class: "s2-btn s2-ask sq-claude-btn", title: "Ask Claude about this SQL (a chat panel on the right)", onclick: () => toggleChat() });
 const resultsEl = h("section", { class: "sq-results", "aria-label": "Results" }, resultView);
 const mainEl = h("div", { class: "sq-main" }, editorBox, splitEl, resultsEl);
 const bodyEl = h("div", { class: "sq-body" }, treeEl, mainEl, chatView);
@@ -1209,7 +1220,7 @@ async function run(sql = statementAtCursor(), database = state.database, lang = 
       else { accept(data); historyChanged(); }
     }
   } catch (e) {
-    state.error = cleanError(e); report(sql, state.error.message); historyChanged();
+    state.error = cleanError(e); state.errorEngine = "s2"; state.errorConn = connFor("s2"); report(sql, state.error.message); historyChanged();
   } finally {
     state.running = false; state.streamId = null; renderResults(); renderHeader();
   }
@@ -1349,7 +1360,7 @@ const sasArgs = (sql, lang) => ({
 // until it's done. Stop (sas_stop) cancels the job on Viya; the run then ends "stopped" with the log so far.
 async function callSas(tool, args) {
   const id = newRunId();
-  state.sasRun = { id, info: null, started: Date.now() };
+  state.sasRun = { id, info: null, started: Date.now(), engine: engineNow(args.language) };
   renderRunStatus();
   // While the SAS session starts in the background, answer early so the status line says what the run waits for.
   const warming = sasSession.status?.state === "starting";
@@ -1392,12 +1403,12 @@ function runStatusParts() {
   else if (i.state === "queued" || (!r.info && sasSession.status?.state === "starting" && !tabConn())) {
     parts.push(w?.tab ? ` Waiting for the SAS run in tab “${w.tab}” (running ${secsText(w.elapsed_ms ?? 0)})…`
       : w?.warming || !r.info ? " Waiting for the SAS session to start…" : " Waiting for the SAS session (busy)…");
-  } else parts.push(` Running in SAS… ${secsText(elapsed)}`);
+  } else parts.push(` ${S2.runningText(r.engine ?? "compute")} ${secsText(elapsed)}`);
   if (!r.stopping && !i.stopping) {
     parts.push(h("button", { class: "s2-btn ghost", title: i.state === "queued" ? "Don't run it" : "Cancel the SAS job (the SAS session keeps running; the log so far is kept)",
       onclick: (e) => stopSas(e.currentTarget) }, "Stop"));
   }
-  if (tabConn()) parts.push(h("span", { class: "s2-faint" }, `Viya: ${tabConn()}`));
+  parts.push(S2.engineChip(r.engine ?? "compute", connFor(r.engine ?? "compute")));
   return parts;
 }
 let runTimer = null;
@@ -1416,7 +1427,7 @@ async function runSas(sql, lang, { confirmed = false } = {}) {
     if (data.needs_confirmation) state.confirm = { sql, lang, sas: data, database: sasArgs(sql, lang).library };
     else acceptSas(data);
   } catch (e) {
-    state.error = cleanError(e); report(sql, state.error.message);
+    state.error = cleanError(e); state.errorEngine = engineNow(lang); state.errorConn = connFor(state.errorEngine); report(sql, state.error.message);
   } finally {
     state.running = false; state.sasRun = null; renderRunStatus(); renderResults(); renderHeader(); historyChanged();
     sasSession.refresh();
@@ -1496,7 +1507,7 @@ async function runAll() {
 }
 
 async function runBatch(statements, writes) {
-  const b = (state.batch = { items: statements.map((sql, i) => ({ sql, write: writes.has(i), status: "pending" })), sel: 0, stop: false });
+  const b = (state.batch = { items: statements.map((sql, i) => ({ sql, write: writes.has(i), status: "pending" })), sel: 0, stop: false, lang: state.language });
   state.confirm = null; state.running = true; state.error = null; state.result = null;
   let database = state.database, ddl = false, failed = null;
   const started = performance.now();
@@ -1646,13 +1657,14 @@ function renderResults() {
   if (state.running) {
     const b = state.batch;
     statusEl.replaceChildren(...(b
-      ? [h("span", { class: "s2-spinner" }), ` Running statement ${b.sel + 1} of ${b.items.length}…`,
+      ? [h("span", { class: "s2-spinner" }), ` ${S2.runningText(engineNow(b.lang)).replace(/…$/, "")}: statement ${b.sel + 1} of ${b.items.length}…`,
          h("button", { class: "s2-btn ghost", disabled: b.stop, title: "Stop after the statement that is running now",
            onclick: () => { b.stop = true; renderResults(); } }, b.stop ? "Stopping…" : "Stop"),
          state.sasRun ? h("span", { class: "sq-sasrun" }, ...runStatusParts().slice(1)) : null]
       : state.sasRun ? [h("span", { class: "sq-sasrun" }, ...runStatusParts())]
-      : [h("span", { class: "s2-spinner" }), " Running…",
-         state.streamId ? h("button", { class: "s2-btn ghost", title: "Cancel the query on the cluster", onclick: (e) => { e.currentTarget.disabled = true; stopStream(state.streamId); } }, "Stop") : null]));
+      : [h("span", { class: "s2-spinner" }), ` ${S2.runningText("s2")}`,
+         state.streamId ? h("button", { class: "s2-btn ghost", title: "Cancel the query on the cluster", onclick: (e) => { e.currentTarget.disabled = true; stopStream(state.streamId); } }, "Stop") : null,
+         S2.engineChip("s2", connFor("s2"))]));
     return;
   }
   if (state.confirm?.batch) {
@@ -1730,7 +1742,8 @@ function renderResults() {
   }
   if (r?.sas && (!state.error || r.error)) { renderSasResult(r); return; }
   if (state.error) {
-    statusEl.replaceChildren(h("span", { class: "s2-badge err" }, "Error"), batchSummary());
+    const eng = state.errorEngine ?? "s2";
+    statusEl.replaceChildren(S2.engineChip(eng, state.errorConn ?? connFor(eng), { verb: "Ran" }), h("span", { class: "s2-badge err" }, "Error"), batchSummary());
     outEl.replaceChildren(S2.errorBox(state.error));
     return;
   }
@@ -1762,7 +1775,7 @@ function renderResults() {
   // Settings stay per column set, so re-running the same query keeps the chart as it was.
   else if (chartable && state.resultAs === "chart") body = S2Charts.view(r.columns, r.rows, { settings: state.chartSettings, onChange: (cs) => { state.chartSettings = cs; } });
   else {
-    const el = S2.dataTable(r.columns, r.rows, { maxHeight: "none",
+    const el = S2.dataTable(r.columns, r.rows, { maxHeight: "none", data: true,
       beforeSort: isStream(r) ? async () => { try { await loadAllRows(r); } catch (e) { S2.toast(`Sorting only the loaded rows: ${cleanError(e).message}`, "err"); } } : null });
     grid = { r, el };
     body = el;
@@ -1778,7 +1791,7 @@ function renderResultStatus(note) {
   statusEl.replaceChildren(...resultStatusParts(r, note));
 }
 function resultStatusParts(r, note) {
-  const parts = [];
+  const parts = [S2.engineChip("s2", r.connection ?? connFor("s2"), { verb: "Ran" })];
   if (r.kind === "use") {
     parts.push(h("span", { class: "s2-badge ok" }, "Database changed"), h("span", {}, `The editor now runs in ${r.database}`));
   } else if (r.kind === "write" && !r.has_result_set) {
@@ -1827,7 +1840,9 @@ function verdictBadge(v) {
   return h("span", { class: "sq-lang", "data-verdict": v, style: `--lc: var(--s2-${VERDICT_COLOR[v] ?? "text-3"})` },v === "full" ? "pushed down" : v === "partly" ? "partly" : v === "pulled" ? "pulled into SAS" : "none");
 }
 function sasStatusParts(r, cur, tabs) {
-  const parts = [langBadge(r.plain_sas ? "sas" : r.language, r.plain_sas ? "Ran as plain SAS code (unwrapped)" : `Ran as ${langOf(r.language).label}`)];
+  const eng = r.plain_sas ? "compute" : engineNow(r.language);
+  const parts = [S2.engineChip(eng, r.connection ?? connFor(eng), { verb: "Ran" }), S2.pushdownChip(r.pushdown?.verdict),
+    langBadge(r.plain_sas ? "sas" : r.language, r.plain_sas ? "Ran as plain SAS code (unwrapped)" : `Ran as ${langOf(r.language).label}`)];
   if (r.stopped) parts.push(h("span", { class: "s2-badge warn", title: "Stopped by you: the SAS job was cancelled. The Log tab has the log up to there." }, "stopped"));
   else if (r.error) parts.push(h("span", { class: "s2-badge err", title: r.error }, "Error"));
   else if (r.has_result_set) {
@@ -1837,7 +1852,7 @@ function sasStatusParts(r, cur, tabs) {
     if (r.capped) parts.push(h("span", { class: "s2-badge warn", title: `PROC SQL kept the first ${fmt.number(r.table_rows ?? 0)} rows (OUTOBS): more rows exist` }, `cut off at ${fmt.number(total ?? r.row_count)}`));
     else if (r.truncated && total == null) parts.push(h("span", { class: "s2-badge warn" }, `first ${fmt.number(r.row_count)} shown`));
   } else parts.push(h("span", { class: "s2-badge ok" }, r.affected_rows != null ? `${fmt.number(r.affected_rows)} row(s)` : "Ran"));
-  parts.push(h("span", { class: "s2-faint" }, `${fmt.number(r.elapsed_ms, 1)} ms`), r.connection && tabConn() ? h("span", { class: "s2-faint" }, `Viya: ${r.connection}`) : null,
+  parts.push(h("span", { class: "s2-faint" }, `${fmt.number(r.elapsed_ms, 1)} ms`),
     batchSummary(), h("span", { class: "s2-spacer" }),
     h("span", { class: "sq-seg sq-sasview", role: "group", "aria-label": "SAS result" }, tabs.map(([id, label]) => h("button", { "aria-pressed": String(cur === id),
       "data-view": id, onclick: () => { state.sasView = id; renderResults(); } }, label))));
@@ -1871,7 +1886,7 @@ function renderSasResult(r) {
   if (r.error) { outEl.replaceChildren(S2.errorBox(new Error(r.error)), h("div", { class: "sq-placeholder" }, "The Log tab has the SAS log and the code that ran.")); return; }
   if (r.has_result_set) {
     if (!r.rows.length) { outEl.replaceChildren(h("div", { class: "sq-placeholder" }, "The query returned no rows.")); return; }
-    const el = S2.dataTable(r.columns, r.rows, { maxHeight: "none",
+    const el = S2.dataTable(r.columns, r.rows, { maxHeight: "none", data: true,
       beforeSort: sasMore(r) ? async () => { try { await loadAllRows(r); } catch (e) { S2.toast(`Sorting only the loaded rows: ${cleanError(e).message}`, "err"); } } : null });
     grid = { r, el };
     outEl.replaceChildren(el);
@@ -1963,16 +1978,25 @@ function renderSasPanel() {
 
 // The language badge in the editor's corner: the tab's language, or SAS when the statement at the cursor is
 // plain SAS code (it runs unwrapped).
-const editorBadge = h("span", { class: "sq-lang" });
-editorBox.append(editorBadge);
 let badgeTimer = null;
+let runBtn = null;    // the header's Run button (its label says where the statement runs)
+let plainSas = false; // the statement at the cursor is plain SAS code (it runs as written, in SAS Compute)
 function scheduleBadge() { clearTimeout(badgeTimer); badgeTimer = setTimeout(renderEditorBadge, 150); }
 function renderEditorBadge() {
-  let lang = state.language;
-  if (isSas()) { try { if (isPlainSas(statementAtCursor())) lang = "sas"; } catch {} }
-  editorBadge.dataset.lang = lang;
-  editorBadge.textContent = lang === "sas" ? "SAS" : langOf(lang).short;
-  editorBadge.title = lang === "sas" ? "The statement at the cursor is SAS code: it runs as written" : `This tab runs ${langOf(lang).label}`;
+  let plain = false;
+  if (isSas()) { try { plain = isPlainSas(statementAtCursor()); } catch {} }
+  if (plain !== plainSas) { plainSas = plain; renderRunButton(); }
+}
+function renderRunButton() {
+  if (!runBtn) return;
+  const eng = plainSas ? "compute" : engineNow(), conn = connFor(eng);
+  const what = plainSas ? "the SAS code at the cursor (it runs as written)" : "the statement at the cursor or the selection";
+  runBtn.dataset.engine = eng;
+  runBtn.dataset.lang = plainSas ? "sas" : state.language;
+  runBtn.disabled = state.running;
+  runBtn.setAttribute("aria-label", `${S2.runText(eng, conn)}${plainSas ? " (SAS code)" : ""}`);
+  runBtn.title = `${S2.runText(eng, conn)}: ${what} (Ctrl+Enter)`;
+  runBtn.replaceChildren(...[state.running && !state.batch ? h("span", { class: "s2-spinner" }) : null, "▶ ", ...S2.runContent(eng, conn)].filter(Boolean));
 }
 
 function renderHeader() {
@@ -1989,7 +2013,7 @@ function renderHeader() {
         state.recent.map((r, i) => h("option", { value: String(i), title: fileTitle(r.path) }, `${r.name}${viyaRef(r.path) ? ` (${viyaRef(r.path).label})` : ""}`)))
     : null;
   // "Run as": what this tab's SQL runs as; the picker next to it lists databases, SAS libraries or caslibs.
-  const runAs = h("select", { class: "s2-input sq-runas", "data-lang": state.language, "aria-label": "Run as",
+  const runAs = h("select", { class: "s2-input sq-runas", "data-lang": state.language, "aria-label": "Run as", id: "sq-runas",
     title: "What this tab's SQL runs as (Ctrl+Shift+L cycles). PROC SQL / FedSQL run in your SAS session on Viya; FedSQL in CAS runs in CAS. Text starting with proc / data / % runs as plain SAS code.",
     onchange: (e) => setLanguage(e.target.value) },
     LANGS.map((l) => h("option", { value: l.id, selected: l.id === state.language }, l.label)));
@@ -2009,15 +2033,14 @@ function renderHeader() {
     h("h1", { class: "s2-title" }, "SQL Editor"),
     h("button", { class: "s2-btn ghost", "aria-pressed": String(state.treeOpen), title: "Show or hide the schema tree",
       onclick: () => { state.treeOpen = !state.treeOpen; bodyEl.classList.toggle("no-tree", !state.treeOpen); renderHeader(); } }, state.treeOpen ? "◧ Hide schema" : "◧ Schema"),
-    runAs,
+    h("label", { class: "sq-runas-label", for: "sq-runas" }, "Run as", runAs),
     isSas() ? libSelect : dbSelect,
     isSas() ? viyaPick() : null,
     isSas() ? sasSessionSlot : null,
     isSas() ? optsBtn : h("button", { class: "s2-btn ghost", title: "Refresh the database list", "aria-label": "Refresh databases", onclick: () => refreshDatabases({ force: true }) }, "↻"),
-    h("button", { class: "s2-btn primary", onclick: () => run(), disabled: state.running, title: "Run the statement at the cursor or the selection (Ctrl+Enter)" },
-      state.running && !state.batch ? h("span", { class: "s2-spinner" }) : null, "▶ Run"),
+    (runBtn = h("button", { class: "s2-btn primary s2-run sq-run", onclick: () => run() }), renderRunButton(), runBtn),
     h("button", { class: "s2-btn", onclick: () => runAll(), disabled: state.running,
-      title: "Run every statement in the editor, in order (Ctrl+Shift+Enter). Statements that change data are confirmed once for the whole run." },
+      title: `Run every statement in the editor, in order (Ctrl+Shift+Enter), ${S2.ENGINES[engineNow()].prep} ${S2.engineText(engineNow(), connFor(engineNow()))}. Statements that change data are confirmed once for the whole run.` },
       state.running && state.batch ? h("span", { class: "s2-spinner" }) : null, "▶▶ Run all"),
     h("label", { class: "sq-onerr", title: "Run all: keep going after a statement fails (otherwise it stops at the first error)" },
       h("input", { type: "checkbox", checked: state.continueOnError,
@@ -2120,7 +2143,12 @@ function setFile(name, text, { external = false, path = null, version = null } =
 }
 const ago = (t) => { const s = Date.now() / 1000 - t; return s < 90 ? "just now" : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 129600 ? `${Math.round(s / 3600)} h ago` : new Date(t * 1000).toLocaleDateString(); };
 
-function hideFilePanel() { filePanel.hidden = true; filePanel.classList.remove("dialog"); filePanel.replaceChildren(); }
+function hideFilePanel() {
+  const close = closeFileModal;
+  closeFileModal = null;
+  filePanel.hidden = true; filePanel.classList.remove("dialog"); filePanel.replaceChildren();
+  close?.();
+}
 const dirOf = (p) => (p ? p.replace(/[\\/][^\\/]*$/, "") : null);
 const baseOf = (p) => (p ? p.split(/[\\/]/).pop() : null);
 
@@ -2156,7 +2184,15 @@ function showFilePanel(mode, loc = fileLocDefault()) {
   const locBar = h("div", { class: "row sq-locs", role: "tablist", "aria-label": "Location" },
     FILE_LOCS.map((l) => h("button", { class: `s2-btn ghost${l.id === loc ? " primary" : ""}`, role: "tab", "aria-selected": String(l.id === loc),
       title: l.title, onclick: () => showFilePanel(mode, l.id) }, l.label)));
-  filePanel.replaceChildren(locBar, ...recent, browser);
+  const title = h("h2", { class: "s2-modal-title", id: "sq-file-title" }, mode === "open" ? "Open a file" : "Save as",
+    h("span", { class: "s2-spacer" }),
+    h("button", { class: "s2-btn ghost", "aria-label": "Close", title: "Close (Esc)", onclick: () => hideFilePanel() }, "✕"));
+  filePanel.replaceChildren(title, locBar, ...recent, browser);
+  filePanel.setAttribute("aria-labelledby", "sq-file-title");
+  if (!closeFileModal) {
+    closeFileModal = S2.modal(filePanel, { onClose: () => { closeFileModal = null; hideFilePanel(); },
+      focus: () => filePanel.querySelector(mode === "save" ? '.s2-fb input:not([type="search"]):not([type="checkbox"])' : '.s2-fb input[type="search"]') });
+  }
   const name = baseOf(file.name) ?? (isSas() ? "program.sas" : "query.sql");
   if (loc !== "local") {
     const cur = viyaRef(file.path);
@@ -2441,6 +2477,8 @@ function renderHistory() {
     return h("div", { class: "sq-hitem" },
       h("div", { class: "top" },
         h("span", { title: new Date(e.t * 1000).toLocaleString() }, ago(e.t)),
+        S2.engineChip(S2.engineOf(e.language), e.connection ?? null, { verb: "Ran" }),
+        S2.pushdownChip(e.pushdown),
         e.language ? langBadge(e.language) : null,
         h("span", {}, e.database ?? (e.language === "cas" ? "(CASUSER)" : e.language ? "(WORK)" : "(default database)")),
         from ? h("span", { title: ["Run from", e.file && `file ${e.file}`, e.tab && `tab ${e.tab}`].filter(Boolean).join(" ") },
@@ -2610,8 +2648,9 @@ function renderModeOptions() {
 }
 
 function renderTabs() {
-  claudeBtn.className = `s2-btn sq-claude-btn${chat.open ? " primary" : ""}`;
-  claudeBtn.replaceChildren(...["Claude",
+  claudeBtn.className = "s2-btn s2-ask sq-claude-btn";
+  claudeBtn.setAttribute("aria-pressed", String(chat.open));
+  claudeBtn.replaceChildren(...[S2.icon("sparkle"), "Ask Claude",
     chat.waiting ? h("span", { class: "s2-spinner", style: { marginLeft: "4px" } }) : chat.unread ? h("span", { class: "count" }, chat.unread) : null].filter(Boolean));
 }
 // The chat lives in a panel on the right, like the Notebook's.

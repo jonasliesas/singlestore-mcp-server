@@ -95,7 +95,7 @@ def test_connections_sas_viya_list_and_no_save_on_sign_in(ui, app_url, viya_conn
 
     # Use: B becomes the active connection.
     card_b.get_by_role("button", name="Use", exact=True).click()
-    expect(card_b).to_contain_text("ACTIVE")
+    expect(card_b).to_contain_text("Active")
     assert viya_connections.ok("sas_connections_state")["active"] == _VIYA_B
 
     # + New, Save: a third connection; then Delete it.

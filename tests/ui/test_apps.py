@@ -43,7 +43,7 @@ def _no_problems(page: Any, errors: Any, what: str) -> None:
 def workspace(ui, app_url):
     page, errors = ui
     _open(page, app_url("sql_editor", {"database": DB, "view": "sql"}))
-    ws = find_frame(page, "SingleStore Workspace", 30)
+    ws = find_frame(page, "SAS SpeedyStore Studio · Workspace", 30)
     find_frame(page, "SQL Editor", 30)
     return page, errors, ws
 
@@ -349,7 +349,7 @@ def test_sql_editor_tabs(workspace, cluster: McpSession, app_url) -> None:
     # Reload: same tabs, same order, same active tab, each with its own text.
     order = _tab_ids(ws)
     page.reload(wait_until="domcontentloaded")
-    ws = find_frame(page, "SingleStore Workspace", 30)
+    ws = find_frame(page, "SAS SpeedyStore Studio · Workspace", 30)
     assert wait_js(ws, f"document.querySelectorAll('.ws-tabs .ws-tab').length === {len(order)}", 30), "tabs didn't come back"
     assert _tab_ids(ws) == order and _active_tab(ws) == tab2
     assert two in _editor_text(_visible_sql(page))
@@ -363,7 +363,7 @@ def test_sql_editor_tabs(workspace, cluster: McpSession, app_url) -> None:
         cluster.ok("list_databases", timeout=60)
         page.goto(app_url("sql_editor", {"database": DB, "view": "sql"}), wait_until="domcontentloaded")
         errors.drain()  # the old page's polls failed while the server restarted: expected
-        ws = find_frame(page, "SingleStore Workspace", 30)
+        ws = find_frame(page, "SAS SpeedyStore Studio · Workspace", 30)
         assert wait_js(ws, f"document.querySelectorAll('.ws-tabs .ws-tab').length === {len(order)}", 30), "tabs didn't come back after restart"
         assert _tab_ids(ws) == order and _active_tab(ws) == tab1
         assert one in _editor_text(_visible_sql(page))

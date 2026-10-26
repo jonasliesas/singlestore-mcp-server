@@ -53,10 +53,10 @@ def _query(sql: str, params: tuple[Any, ...] = (), database: str | None = None) 
 def collect(min_ms: int = MIN_RUNTIME_MS, hours: float | None = None, limit: int = _MAX_EVENTS) -> dict[str, Any]:
     min_ms = max(MIN_RUNTIME_MS, int(min_ms or MIN_RUNTIME_MS))
     limit = max(1, min(_MAX_EVENTS, int(limit)))
-    where = ["EVENT_TYPE = 'Query_completion'", "DETAILS::%%duration_ms >= %s",
-             "(DETAILS::$query_text IS NULL OR DETAILS::$query_text NOT LIKE %s)"]
-    # Every statement this server sends for itself starts with a "/* s2-… */" marker: leave them all out.
-    params: list[Any] = [min_ms, f"%{history_store.MARKER_PREFIX}%"]
+    where = ["EVENT_TYPE = 'Query_completion'", "DETAILS::%%duration_ms >= %s"]
+    # The Studio's own statements (a "/* s2-… */" marker, system-view reads) are listed too, flagged ``own``: the app
+    # hides them unless "Show Studio's own queries" is ticked.
+    params: list[Any] = [min_ms]
     if hours:
         where.append("TIME >= NOW() - INTERVAL %s SECOND")
         params.append(int(float(hours) * 3600))
@@ -109,6 +109,7 @@ def collect(min_ms: int = MIN_RUNTIME_MS, hours: float | None = None, limit: int
         "sql_truncated": (r["sql_len"] or 0) > _LIST_SQL_CHARS,
         "shape": history_store.shape_of(r["sql_head"]),
         "origin": history_store.origin(r["sql_head"]),
+        "own": history_store.is_studio_query(r["sql_head"]),
         # Runs of the same statement (other literal values) in the same database share this key.
         "stmt": history_store.statement_key(r["sql_head"], r["db"] or None),
         "tables": history_store.table_names(r["sql_head"], r["db"] or None),
@@ -271,6 +272,7 @@ def _merge_plans(events: list[dict[str, Any]], live: list[dict[str, Any]] | None
                 "key": f"plan:{p['stmt']}", "stmt": p["stmt"], "database": p.get("database"),
                 "sql": " ".join((p.get("text") or "").split())[:_LIST_SQL_CHARS],
                 "sql_truncated": (p.get("text_len") or 0) > _LIST_SQL_CHARS, "origin": p.get("origin"),
+                "own": history_store.is_studio_query(p.get("text")),
                 "tables": p.get("tables") or [], "plan_keys": [], "nodes": [], "live": False,
                 "runs": 0, "failed": 0, "rows": 0, "exec_ms": 0.0, "cpu_ms": 0.0, "blob_wait_ms": 0.0, "queued_ms": 0.0,
                 "avg_max_mem": 0.0, "avg_spill": 0.0, "avg_blob_miss": 0.0, "first_load": None, "last_executed": None,

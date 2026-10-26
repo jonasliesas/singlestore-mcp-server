@@ -156,12 +156,12 @@ def _warm_database() -> None:
         pass
 
 
-_SPLASH = """<!doctype html><html><head><meta charset="utf-8"><title>SingleStore Workspace</title>
+_SPLASH = """<!doctype html><html><head><meta charset="utf-8"><title>SAS SpeedyStore Studio</title>
 <style>html,body{height:100%;margin:0}body{display:grid;place-items:center;font:14px system-ui,'Segoe UI',sans-serif;
 color:#555;background:#fff}@media(prefers-color-scheme:dark){body{background:#1e1e1e;color:#aaa}}
 .s{width:18px;height:18px;border:2px solid #ccc;border-top-color:#7c3aed;border-radius:50%;
 display:inline-block;vertical-align:-4px;margin-right:8px;animation:r .8s linear infinite}@keyframes r{to{transform:rotate(360deg)}}
-</style></head><body><div id="m"><span class="s"></span>Starting SingleStore Workspace…</div>
+</style></head><body><div id="m"><span class="s"></span>Starting SAS SpeedyStore Studio…</div>
 <script>
 const target = __TARGET__, ping = target.split("?")[0] + "ping", t0 = Date.now();
 (function poll() {

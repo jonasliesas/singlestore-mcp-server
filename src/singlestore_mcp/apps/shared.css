@@ -26,6 +26,22 @@
   --s2-mono: var(--font-mono, ui-monospace, "Cascadia Code", Consolas, monospace);
   --s2-fs: var(--font-text-sm-size, 13px);
   --s2-fs-xs: var(--font-text-xs-size, 12px);
+  /* Filled buttons and count pills: white text needs a darker fill in dark mode (>= 4.5:1). */
+  --s2-primary: light-dark(var(--s2-info), #1a64d6);
+  --s2-on-primary: #ffffff;
+  --s2-err-fill: #cf222e;
+  /* Where code runs (S2.engineChip): text colours >= 4.5:1 on their 12 % tint in both themes
+     (tests/test_contrast.py measures them). SAS Compute orange, CAS indigo, SingleStore blue, Python slate. */
+  --s2-eng-s2: light-dark(#0a58ca, #6cb6ff);
+  --s2-eng-compute: light-dark(#a1360a, #ff9a66);
+  --s2-eng-cas: light-dark(#4338ca, #a5b4fc);
+  --s2-eng-python: light-dark(#4b5563, #c4ccd6);
+  --s2-eng-sas: light-dark(#0d6b63, #5eead4);
+  /* SpeedyStore caslib badge (white on brand purple) and the standard-connector outline */
+  --s2-src-ss: #820ddf;
+  --s2-src-s2: light-dark(#5b7290, #9fb3cc);
+  /* "Ask Claude" sparkle */
+  --s2-ai: light-dark(#a8461f, #f0a080);
 }
 
 * { box-sizing: border-box; }
@@ -55,8 +71,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .s2-btn:hover:not(:disabled) { background: var(--s2-bg-2); }
 .s2-btn:focus-visible { outline: 2px solid var(--s2-ring); outline-offset: 1px; }
 .s2-btn:disabled { opacity: .5; cursor: default; }
-.s2-btn.primary { background: var(--s2-info); border-color: var(--s2-info); color: #fff; }
-.s2-btn.primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--s2-info); }
+.s2-btn.primary { background: var(--s2-primary); border-color: var(--s2-primary); color: var(--s2-on-primary); }
+.s2-btn.primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--s2-primary); }
 .s2-btn.danger { color: var(--s2-err); }
 .s2-btn.ghost { border-color: transparent; background: transparent; }
 .s2-btn.ghost:hover:not(:disabled) { background: var(--s2-bg-2); }
@@ -163,3 +179,49 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .s2-fb-row:hover .s2-fb-acts, .s2-fb-row:focus-within .s2-fb-acts { opacity: 1; }
 .s2-fb-acts .s2-btn { padding: 0 6px; font-size: 11px; }
 .s2-fb-locs { margin-bottom: 6px; }
+
+/* Keyboard focus for every custom button (segmented controls, tree rows, icon buttons). */
+button:focus-visible, [role="tab"]:focus-visible { outline: 2px solid var(--s2-ring); outline-offset: 1px; }
+
+/* Count pill on a button or tab (white on the primary fill). */
+.s2-count { background: var(--s2-primary); color: var(--s2-on-primary); border-radius: 999px; font-size: 10px; padding: 0 6px; font-weight: 600; }
+
+/* Where code runs: S2.engineChip(engine, connection). Text + colour + icon; short label on narrow widths. */
+.s2-engine {
+  display: inline-flex; align-items: center; gap: 4px; padding: 0 7px; border-radius: 999px; max-width: 100%;
+  font-size: 11px; font-weight: 600; line-height: 18px; white-space: nowrap; color: var(--ec);
+  background: color-mix(in srgb, var(--ec) 12%, var(--s2-bg)); border: 1px solid color-mix(in srgb, var(--ec) 40%, var(--s2-bg));
+}
+.s2-engine svg { width: 12px; height: 12px; flex: none; }
+.s2-engine .conn { font-weight: 500; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
+.s2-engine[data-engine="s2"] { --ec: var(--s2-eng-s2); }
+.s2-engine[data-engine="compute"] { --ec: var(--s2-eng-compute); }
+.s2-engine[data-engine="cas"] { --ec: var(--s2-eng-cas); }
+.s2-engine[data-engine="python"] { --ec: var(--s2-eng-python); }
+.s2-engine .short { display: none; }
+.s2-pushdown { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--s2-text-2); white-space: nowrap; }
+.s2-pushdown b { font-weight: 600; }
+.s2-pushdown[data-v="full"] b { color: var(--s2-ok); }
+.s2-pushdown[data-v="partly"] b { color: var(--s2-warn); }
+.s2-pushdown[data-v="pulled"] b { color: var(--s2-err); }
+.s2-run .short { display: none; }
+.s2-run .conn { overflow: hidden; text-overflow: ellipsis; max-width: 180px; display: inline-block; vertical-align: bottom; }
+@media (max-width: 1100px) {
+  .s2-engine .long, .s2-run .long { display: none; }
+  .s2-engine .short, .s2-run .short { display: inline; }
+}
+
+/* "Ask Claude": one name and style everywhere, with a small sparkle. */
+.s2-ask svg { width: 13px; height: 13px; color: var(--s2-ai); flex: none; }
+
+/* A modal dialog (S2.modal): the backdrop is a big box-shadow, so the page behind stays as it is. */
+.s2-modal-title { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; font-size: var(--font-text-md-size, 14px); font-weight: var(--font-weight-semibold, 600); }
+
+/* Presenter mode (S2.presenter): bigger text for projectors; masked form fields are blurred until focused. */
+/* The outermost Studio page zooms (the Workspace, or a view opened on its own); views inside the Workspace
+   get the zoom through their frame. CSS zoom also scales vh, so full-height layouts use calc(100vh / var(--s2-zoom)). */
+:root { --s2-zoom: 1; }
+html[data-presenter]:not([data-embedded]) { --s2-zoom: 1.2; }
+html[data-presenter]:not([data-embedded]) body { zoom: var(--s2-zoom); }
+html[data-presenter] .s2-masked-field:not(:focus) { color: transparent !important; text-shadow: 0 0 6px var(--s2-text); }
+html[data-presenter-loading] body { visibility: hidden; }

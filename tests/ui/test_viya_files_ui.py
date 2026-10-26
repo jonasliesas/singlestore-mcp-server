@@ -50,7 +50,7 @@ def test_sql_editor_open_save_as_sas_content(ui, app_url, sas: McpSession, conte
     marker = f"ui_{secrets.token_hex(3)}"
     page.goto(app_url("sql_editor", {"database": DB, "view": "sql", "new_tab": True, "sql": f"select '{marker}' as x;"}),
               wait_until="domcontentloaded")
-    ws = find_frame(page, "SingleStore Workspace", 30)
+    ws = find_frame(page, "SAS SpeedyStore Studio · Workspace", 30)
     sql = _visible_sql(page)
     conn = sas.ok("viya_files_browse", {"location": "content", "path": content_dir})["connection"]
     ref = f"sas-content://{conn}{content_dir}/ui.sql"
@@ -120,7 +120,7 @@ def test_rename_delete_in_sas_content_and_the_tab_follows(ui, app_url, sas: McpS
     conn = sas.ok("viya_files_browse", {"location": "content", "path": content_dir})["connection"]
     sas.ok("sql_editor_save_file", {"name": f"sas-content://{conn}{content_dir}/ren.sql", "sql": "select 'ren' as x;\n"})
     page.goto(app_url("sql_editor", {"database": DB, "view": "sql", "new_tab": True}), wait_until="domcontentloaded")
-    ws = find_frame(page, "SingleStore Workspace", 30)
+    ws = find_frame(page, "SAS SpeedyStore Studio · Workspace", 30)
     sql = _visible_sql(page)
     sql.locator(".sq-filebtns").get_by_role("button", name="Open", exact=True).click()
     _content_folder(sql, ".sq-files", folder).locator(".item", has_text="ren.sql").click()

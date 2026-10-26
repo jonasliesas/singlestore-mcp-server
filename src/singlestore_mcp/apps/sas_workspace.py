@@ -565,14 +565,18 @@ def _pushdown(language: str, log_text: str, traced: list[dict[str, Any]] | None 
 
 
 def _record(sql: str, library: str | None, language: str, data: dict[str, Any] | None, source: dict[str, Any],
-            kind: str, ms: float, exc: BaseException | None = None) -> None:
+            kind: str, ms: float, exc: BaseException | None = None, connection: str | None = None) -> None:
     lang = "sas" if sas_sql.is_plain_sas(sql) else language
     ms = round(ms, 1)
+    conn = (data or {}).get("connection") or connection
+    pushdown = ((data or {}).get("pushdown") or {}).get("verdict")
     if exc is not None or (data and (data.get("error") or data.get("stopped"))):
         err = str(exc) if exc is not None else data.get("error") or "Stopped"
-        editor_state.add_history(sql, library, ok=False, kind=kind, error=err, source=source, elapsed_ms=ms, language=lang)
+        editor_state.add_history(sql, library, ok=False, kind=kind, error=err, source=source, elapsed_ms=ms, language=lang,
+                                 connection=conn)
     else:
         editor_state.add_history(sql, library, ok=True, kind=kind, elapsed_ms=ms, source=source, language=lang,
+                                 connection=conn, pushdown=pushdown,
                                  rows=data["row_count"] if data and data.get("has_result_set") else None,
                                  affected=data.get("affected_rows") if data else None)
 
@@ -644,7 +648,7 @@ def _run_tool(language: str, sql: str, library: str | None, options: dict[str, A
     def finish(run: sas_runs.Run) -> None:
         if record:
             _record(sql, library, language, run.result, source, kind, ((run.ended or time.time()) - run.created) * 1000,
-                    run.error)
+                    run.error, connection=getattr(run, "conn", None))
 
     run = sas_runs.start(run_id, connection, engine, source, sql, work, finish)
     return _answer(run, wait_ms)

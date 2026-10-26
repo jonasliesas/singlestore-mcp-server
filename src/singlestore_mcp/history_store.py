@@ -311,6 +311,30 @@ _SECRETS_MASKED = 2  # user_version from which stored samples / plan texts have 
 _WORKLOAD = re.compile(r"\s*/\* workload:(.+?) stmt:[\w\-]+ \*/")
 
 
+# The Studio's own housekeeping, for "Show Studio's own queries" (Cluster -> Queries, Query History): everything this
+# server sends for itself carries a "/* s2-... */" marker; the plan cache drops comments, so there it is recognised
+# by what it is: reads of system views (information_schema) only, and session checks (SELECT 1 / NOW() /
+# CURRENT_USER() / @@variables, SHOW, USE, SET NAMES ...). Other tools send such statements too.
+_OWN_MARKER = re.compile(r"/\*\s*s2-")
+_SESSION_CHECK = re.compile(
+    r"^\s*(?:/\*.*?\*/\s*)*(?:"
+    r"select\s+(?:(?:1|@(?!@)|now\(\)|current_user\(\)|user\(\)|database\(\)|version\(\)|connection_id\(\)|utc_timestamp\(\)|@@[\w.$]+)"
+    r"(?:\s+(?:as\s+)?`?\w+`?)?\s*,?\s*)+(?:from\s+dual\s*)?;?\s*$"
+    r"|show\s|use\s|set\s+(?:names|session|@@|autocommit|character_set|sql_mode|time_zone|collation)|kill\s+query\b)",
+    re.I | re.S)
+_TABLE_REFS = re.compile(r"\b(?:from|join)\s+(`?[\w$]+`?(?:\s*\.\s*`?[\w$]+`?)?)", re.I)
+
+
+def is_studio_query(sql: str | None) -> bool:
+    """True for the Studio's own housekeeping statements (see above)."""
+    if not sql:
+        return False
+    if _OWN_MARKER.search(sql) or _SESSION_CHECK.match(sql):
+        return True
+    refs = [r.replace("`", "").replace(" ", "").lower() for r in _TABLE_REFS.findall(sql)]
+    return bool(refs) and all(r.startswith("information_schema.") for r in refs)
+
+
 def origin(sql: str | None) -> str | None:
     """Probable origin of a statement from simple heuristics on its text."""
     if not sql:

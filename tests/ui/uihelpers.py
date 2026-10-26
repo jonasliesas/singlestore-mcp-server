@@ -49,7 +49,7 @@ def find_frame(page: Any, title: str | re.Pattern, timeout: float = 20, min_text
 
 
 def app_frame(page: Any, timeout: float = 30) -> Any:
-    """The app frame of a standalone browser-view page (the host page itself is titled "SingleStore")."""
+    """The app frame of a standalone browser-view page (the host page itself is titled "SAS SpeedyStore Studio" or "<tool> · SAS SpeedyStore Studio")."""
     return find_frame(page, re.compile(r"^(?!SingleStore$).+"), timeout, min_text=40)
 
 

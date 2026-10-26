@@ -143,7 +143,7 @@ def test_security_script_basket_opens_in_sql_editor(ui: Any, app_url: Any, clust
     tag = secrets.token_hex(3)
     role, group = f"zz_test_r{tag}", f"zz_test_g{tag}"
     page.goto(app_url("sql_editor", {"database": DB, "view": "sql"}), wait_until="domcontentloaded")
-    ws = find_frame(page, "SingleStore Workspace", 30)
+    ws = find_frame(page, "SAS SpeedyStore Studio · Workspace", 30)
     find_frame(page, "SQL Editor", 30)
     tabs_before = ws.evaluate("[...document.querySelectorAll('.ws-tabs .ws-tab')].map((t) => t.dataset.tab)")
     ws.locator('nav.ws-rail button[aria-label^="Security"]').click()
@@ -288,7 +288,7 @@ def test_security_password_lock_tls_and_columns(ui: Any, app_url: Any, cluster: 
         p.get_by_role("button", name="Close").click()
         unlock = f.get_by_role("button", name="Unlock…")
         unlock.wait_for(timeout=30_000)
-        assert "LOCKED" in f.get_by_label("Account settings").inner_text()
+        assert "Locked" in f.get_by_label("Account settings").inner_text()  # status badges are sentence case
         unlock.click()
         _preview(f, f"ALTER USER '{user}'@'%' ACCOUNT UNLOCK;")
         p.get_by_label("I have checked the statements").check()

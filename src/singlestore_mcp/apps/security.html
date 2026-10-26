@@ -26,7 +26,7 @@
     font-size: var(--s2-fs-xs); margin-bottom: 8px; }
   .sc-notice.warn { background: var(--s2-warn-bg); color: var(--s2-warn); }
   .sc-wrap { max-height: 460px; }
-  html[data-display-mode="fullscreen"] .sc-wrap.tall { max-height: calc(100vh - 260px); }
+  html[data-display-mode="fullscreen"] .sc-wrap.tall { max-height: calc(100vh / var(--s2-zoom) - 260px); }
   .sc-table td.mono, .sc-table td.user { font-family: var(--s2-mono); }
   .sc-table tbody tr.row { cursor: pointer; }
   .sc-table tr.open td { background: var(--s2-bg-2); }
@@ -302,7 +302,7 @@ function usersTable(list) {
       h("td", {}, u.type),
       h("td", { title: u.failed_login_attempts ? `Failed-login lockout: locked for ${u.password_lock_time} s after ${u.failed_login_attempts} failed logins`
           : "No failed-login lockout (FAILED_LOGIN_ATTEMPTS = 0)" },
-        h("span", { class: `s2-badge ${String(u.account_status).toUpperCase() === "LOCKED" ? "err" : "plain"}` }, u.account_status ?? "?"),
+        h("span", { class: `s2-badge ${String(u.account_status).toUpperCase() === "LOCKED" ? "err" : "plain"}` }, S2.sentence(u.account_status ?? "?")),
         u.failed_login_attempts ? h("span", { class: "s2-faint" }, ` lockout ${u.failed_login_attempts}×/${u.password_lock_time} s`) : null),
       h("td", { class: "num" }, String(u.connections)),
       h("td", {}, pwCell(u)),
@@ -386,8 +386,7 @@ function userDetail(u) {
       actBtn("Grant columns (view)…", { action: "grant_view", grantee_type: "user", user: d.user, host: d.host }),
       actBtn("Revoke all…", { action: "revoke_all", grantee_type: "user", user: d.user, host: d.host }, { cls: "danger" }),
       actBtn("Drop user…", { action: "drop_user", user: d.user, host: d.host }, { cls: "danger" }),
-      h("button", { class: "s2-btn", onclick: () => S2.sendPrompt(`Review the SingleStore privileges of ${d.grantee} (groups: ${d.groups.join(", ") || "none"}; roles: ${roles.join(", ") || "none"}). Use the user_privileges tool, point out anything risky or broader than needed, and suggest least-privilege GRANT/REVOKE statements I could run myself.`) },
-        "Ask Claude to review")));
+      S2.askClaudeButton({ title: "Ask Claude to review these privileges (advice only; nothing changes)", onclick: () => S2.sendPrompt(`Review the SingleStore privileges of ${d.grantee} (groups: ${d.groups.join(", ") || "none"}; roles: ${roles.join(", ") || "none"}). Use the user_privileges tool, point out anything risky or broader than needed, and suggest least-privilege GRANT/REVOKE statements I could run myself.`) })));
 }
 
 // Account: lock status, failed-login lockout, REQUIRE SSL, and the buttons that change them (and the password).
@@ -399,7 +398,7 @@ function accountBlock(d) {
   return [
     h("h3", {}, "Account"),
     h("div", { class: "sc-chain", "aria-label": "Account settings" },
-      h("span", { class: `s2-badge ${isLocked ? "err" : "plain"}`, title: "ACCOUNT_STATUS" }, d.account_status ?? "?"),
+      h("span", { class: `s2-badge ${isLocked ? "err" : "plain"}`, title: `ACCOUNT_STATUS: ${d.account_status ?? "?"}` }, S2.sentence(d.account_status ?? "?")),
       h("span", { class: "s2-badge plain", title: "REQUIRE SSL shows as 'SSL' in USER_PRIVILEGES and in SHOW GRANTS" },
         d.require_ssl == null ? "REQUIRE ?" : d.require_ssl ? "REQUIRE SSL" : "REQUIRE NONE"),
       h("span", { class: "s2-small" }, d.failed_login_attempts

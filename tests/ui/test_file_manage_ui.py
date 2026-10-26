@@ -56,7 +56,7 @@ def test_rename_and_delete_follow_the_open_tab(ui, app_url, sql_dir: Path) -> No
     (sql_dir / folder).mkdir()
     (sql_dir / folder / "a.sql").write_text("select 'renamed' as x;\n", encoding="utf-8")
     page.goto(app_url("sql_editor", {"database": DB, "view": "sql", "new_tab": True}), wait_until="domcontentloaded")
-    ws = find_frame(page, "SingleStore Workspace", 30)
+    ws = find_frame(page, "SAS SpeedyStore Studio · Workspace", 30)
     sql = _visible_sql(page)
 
     # Open a.sql from the folder (this tab is empty, so it opens here).
@@ -150,7 +150,7 @@ def test_a_slow_folder_doesnt_replace_a_later_one(ui, app_url, sql_dir: Path) ->
     for d in (slow, fast):
         (sql_dir / d).mkdir()
     page.goto(app_url("sql_editor", {"database": DB, "view": "sql"}), wait_until="domcontentloaded")
-    find_frame(page, "SingleStore Workspace", 30)
+    find_frame(page, "SAS SpeedyStore Studio · Workspace", 30)
     sql = _visible_sql(page)
     sql.locator(".sq-filebtns").get_by_role("button", name="Open", exact=True).click()
     sql.locator(".sq-files").get_by_role("tab", name="This computer").click()

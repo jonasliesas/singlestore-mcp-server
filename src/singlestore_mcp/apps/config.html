@@ -13,7 +13,7 @@
     font-size: var(--s2-fs-xs); margin-bottom: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .cf-notice.warn { background: var(--s2-warn-bg); color: var(--s2-warn); }
   .cf-wrap { max-height: 560px; }
-  html[data-display-mode="fullscreen"] .cf-wrap { max-height: calc(100vh - 170px); }
+  html[data-display-mode="fullscreen"] .cf-wrap { max-height: calc(100vh / var(--s2-zoom) - 170px); }
   .cf-table td.name { font-family: var(--s2-mono); }
   .cf-table td.val { font-family: var(--s2-mono); max-width: 300px; }
   .cf-table td.dflt { font-family: var(--s2-mono); color: var(--s2-text-2); max-width: 200px; }
@@ -35,7 +35,11 @@
   .cf-legend span::before { content: ""; display: inline-block; width: 3px; height: 10px; margin-right: 5px; vertical-align: -1px; }
   .cf-legend .c::before { background: var(--s2-warn); }
   .cf-legend .d::before { background: var(--s2-info); }
-  select.s2-input { padding: 3px 6px; }
+  select.s2-input { padding: 3px 6px; max-width: 220px; }
+  /* Every column fits at 1440 px (the last one was cut off): long categories and values are cut with … (full text on hover). */
+  .cf-table td.name { max-width: 300px; }
+  .cf-table td:nth-child(4) { max-width: 200px; }
+  .cf-table td.val { max-width: 240px; }
 </style>
 </head>
 <body>
@@ -186,8 +190,10 @@ function render() {
   const vs = d.variables;
   const nChanged = vs.filter((v) => v.status === "changed").length, nDiff = vs.filter((v) => v.differs).length;
   const cats = [...new Set(vs.map((v) => v.category).filter(Boolean))].sort();
-  const sel = (key, label, options) => h("select", { class: "s2-input", "aria-label": label, onchange: (e) => { state[key] = e.target.value; drawTable(); } },
-    options.map(([val, text]) => h("option", { value: val, selected: state[key] === val }, text)));
+  // Each filter has a visible label ("Settable: Any" said nothing on its own).
+  const sel = (key, label, options) => h("label", { class: "cf-check" }, label,
+    h("select", { class: "s2-input", "aria-label": label, onchange: (e) => { state[key] = e.target.value; drawTable(); } },
+      options.map(([val, text]) => h("option", { value: val, selected: state[key] === val }, text))));
   root.replaceChildren(...[
     h("div", { class: "s2-header" },
       h("div", {}, h("h1", { class: "s2-title" }, "Config"),
@@ -204,9 +210,9 @@ function render() {
         `Changed from default (${nChanged})`),
       h("label", { class: "cf-check" }, h("input", { type: "checkbox", checked: state.differs, onchange: (e) => { state.differs = e.target.checked; drawTable(); } }),
         `Differs between nodes (${nDiff})`),
-      cats.length ? sel("category", "Category", [["", "All categories"], ...cats.map((c) => [c, c])]) : null,
-      sel("sync", "Sync", [["", "Sync & non-sync"], ["sync", "Sync"], ["non-sync", "Non-sync"], ["unknown", "Not in docs"]]),
-      sel("runtime", "Settable", [["", "Any"], ["runtime", "Settable at runtime"], ["startup", "Startup only"]]),
+      cats.length ? sel("category", "Category", [["", "All"], ...cats.map((c) => [c, c])]) : null,
+      sel("sync", "Sync", [["", "Both"], ["sync", "Sync"], ["non-sync", "Non-sync"], ["unknown", "Not in docs"]]),
+      sel("runtime", "Settable", [["", "Any time"], ["runtime", "At runtime"], ["startup", "Startup only"]]),
       h("span", { class: "s2-spacer" }),
       h("span", { class: "cf-legend" }, h("span", { class: "c" }, "changed"), h("span", { class: "d" }, "differs by node")),
       countEl),

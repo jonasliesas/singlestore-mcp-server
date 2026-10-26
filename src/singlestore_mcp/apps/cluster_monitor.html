@@ -73,7 +73,7 @@
   .cm-q tbody tr { cursor: pointer; }
   .cm-q-detail td { background: var(--s2-bg-2); white-space: normal !important; }
   .cm-q-detail .row { display: flex; gap: 14px; flex-wrap: wrap; font-size: var(--s2-fs-xs); color: var(--s2-text-2); margin-bottom: 6px; }
-  html[data-display-mode="fullscreen"] .cm-q-wrap { max-height: calc(100vh - 420px) !important; }
+  html[data-display-mode="fullscreen"] .cm-q-wrap { max-height: calc(100vh / var(--s2-zoom) - 420px) !important; }
   /* Tabs, and the overview's two columns: chart beside the node cards on wide screens. */
   .cm-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--s2-border); margin: 4px 0 12px; }
   .cm-tabs button { border: 0; border-bottom: 2px solid transparent; background: none; padding: 6px 12px; cursor: pointer;
@@ -137,6 +137,9 @@ const state = {
   data: null, error: null, loading: false,
   auto: true, timer: null,
   includeInternal: false,
+  // The Studio's own statements (this monitor, the alert checks, the editor's schema reads; flagged ``own`` by the
+  // server) are hidden unless this is ticked.
+  showOwn: (() => { try { return localStorage.getItem("s2-show-own") === "1"; } catch { return false; } })(),
   tab: "overview",      // "overview" | "health" | "queries" | "disk" | "bottomless" | "io" | "history" | "backups"
   history: [],          // [{t, cpu: {nodeId: pct}}] from the server
   chart: { group: "all", hidden: new Set(), hoverT: null },
@@ -270,7 +273,14 @@ function drawSeriesPlot(plot) {
   // Height follows the width (about 2.4 : 1) so a wide window doesn't flatten the lines.
   const maxH = S2.displayMode === "fullscreen" ? Math.max(260, Math.round(window.innerHeight * 0.5)) : (spec.maxH ?? 340);
   const H = Math.max(spec.minH ?? 200, Math.min(maxH, Math.round(W / 2.4)));
-  const m = { l: spec.left ?? 40, r: spec.right ?? 104, t: 10, b: 24 };
+  // The right margin fits the widest end label ("aggregator-0 3.5%": 11 px mono, ~6.7 px a character), so the labels
+  // stay inside the card; at most 45 % of the width (longer names are cut with …).
+  const lastOf = (sr) => { for (let i = hist.length - 1; i >= 0; i--) { const v = sr.get(hist[i]); if (v != null) return v; } return null; };
+  const endText = (sr) => { const v = lastOf(sr); return v == null ? "" : `${sr.name} ${spec.value(v)}`; };
+  const maxChars = Math.floor((W * 0.45 - 26) / 6.7);
+  const fitText = (t) => (t.length > maxChars ? `${t.slice(0, Math.max(4, maxChars - 1))}…` : t);
+  const widest = Math.max(0, ...series.map((sr) => fitText(endText(sr)).length));
+  const m = { l: spec.left ?? 40, r: Math.max(spec.right ?? 60, Math.ceil(26 + widest * 6.7)), t: 10, b: 24 };
   const pw = W - m.l - m.r, ph = H - m.t - m.b;
   const t1 = spec.t1 ?? hist.at(-1).t, t0 = spec.t0 ?? Math.min(hist[0].t, t1 - 60);
   const x = (t) => m.l + ((t - t0) / (t1 - t0)) * pw;
@@ -318,7 +328,7 @@ function drawSeriesPlot(plot) {
   if (overflow > 0) for (const l of labels) l.y -= overflow;
   for (const l of labels) {
     svg.append(svgEl("line", { x1: m.l + pw + 6, x2: m.l + pw + 16, y1: l.y, y2: l.y, stroke: l.s.color, "stroke-width": 2, "stroke-linecap": "round" }));
-    svg.append(svgEl("text", { class: "label", x: m.l + pw + 20, y: l.y + 4 }, `${l.s.name} ${spec.value(l.v)}`));
+    svg.append(svgEl("text", { class: "label", x: m.l + pw + 20, y: l.y + 4 }, fitText(`${l.s.name} ${spec.value(l.v)}`)));
   }
 
   // Crosshair + tooltip: snap to the nearest reading.
@@ -446,7 +456,7 @@ function queriesTable(qs, names) {
           q.resource_pool ? h("span", {}, `Resource pool: ${q.resource_pool}`) : null,
           q.queued_reason ? h("button", { class: "s2-badge warn", style: { cursor: "pointer", border: 0 }, title: "Open the resource pools and the workload manager queue in the Security view",
             onclick: (e) => { e.stopPropagation(); openPools(); } }, `Queued: ${q.queued_reason} →`) : null),
-        q.sql ? h("button", { class: "s2-btn", onclick: (e) => { e.stopPropagation(); askAbout(q); } }, "Ask Claude about this query") : null)));
+        q.sql ? S2.askClaudeButton({ title: "Ask Claude about this query", onclick: (e) => { e.stopPropagation(); askAbout(q); } }) : null)));
     }
   }
   return h("div", { class: "s2-table-wrap cm-q-wrap", style: { maxHeight: "380px" } },
@@ -473,7 +483,7 @@ function recentTable(rs, names) {
       body.append(h("tr", { class: "cm-q-detail" }, h("td", { colspan: "6" },
         h("div", { class: "row" }, h("span", {}, `${fmt.number(r.runs)} runs since compiled`), r.rollbacks ? h("span", {}, `${fmt.number(r.rollbacks)} rolled back`) : null,
           h("span", {}, "Constants are shown as ^ (parameterized plan text)")),
-        h("button", { class: "s2-btn", onclick: (e) => { e.stopPropagation(); S2.sendPrompt(`This statement ran on SingleStore (database ${r.database}, average ${r.avg_ms} ms over ${r.runs} runs since its plan was compiled). Explain what it does and whether it could be faster:\n\n${r.sql}`); } }, "Ask Claude about this statement"))));
+        S2.askClaudeButton({ title: "Ask Claude about this statement", onclick: (e) => { e.stopPropagation(); S2.sendPrompt(`This statement ran on SingleStore (database ${r.database}, average ${r.avg_ms} ms over ${r.runs} runs since its plan was compiled). Explain what it does and whether it could be faster:\n\n${r.sql}`); } }))));
     }
   }
   return h("div", { class: "s2-table-wrap cm-q-wrap recent" },
@@ -835,8 +845,8 @@ function issueList(issues, docsFallback, what) {
       i.last_ago_s != null ? ` Last: ${agoText(i.last_ago_s)}.` : "")),
     h("div", { class: "acts" },
       (i.docs ?? docsFallback) ? h("button", { class: "s2-btn", title: i.docs ?? docsFallback, onclick: () => openDocs(i.docs ?? docsFallback) }, "Docs") : null,
-      h("button", { class: "s2-btn", title: "Ask Claude what this means and what to check (advice only)",
-        onclick: () => S2.sendPrompt(`The SingleStore ${what} shows: "${i.title}" (${i.explanation}). What does this mean for this cluster and what should an admin check? Don't change anything on the cluster.`) }, "Ask Claude")))));
+      S2.askClaudeButton({ title: "Ask Claude what this means and what to check (advice only)",
+        onclick: () => S2.sendPrompt(`The SingleStore ${what} shows: "${i.title}" (${i.explanation}). What does this mean for this cluster and what should an admin check? Don't change anything on the cluster.`) })))));
 }
 
 function healthBanner(x) {
@@ -1120,7 +1130,7 @@ function tabs(d) {
     tab("io", "IO"),
     tab("history", "History"),
     tab("backups", "Backups"),
-    recent ? h("span", { class: "s2-faint s2-small", style: { alignSelf: "center", marginLeft: "6px" } }, `${recent} ran in the last ${d.recent_seconds ?? 60} s`) : null);
+    recent ? h("span", { class: "s2-faint s2-small", style: { alignSelf: "center", marginLeft: "6px" }, title: "Statements in the aggregators' plan caches that ran in the last minute (Queries tab)" }, `${recent} ran in the last ${d.recent_seconds ?? 60} s`) : null);
 }
 
 function queriesTab(d, names) {
@@ -1129,18 +1139,21 @@ function queriesTab(d, names) {
       h("h2", {}, `Running now (${d.queries.length})`),
       h("span", { class: "s2-faint s2-small" }, `${d.idle_connections} idle connection${d.idle_connections === 1 ? "" : "s"} · refreshed every ${REFRESH_MS / 1000}s`),
       h("span", { class: "s2-spacer" }),
+      ownToggle(d),
       h("label", { class: "cm-auto s2-small s2-muted", title: "Also show the work leaves do on behalf of user queries (user 'distributed')" },
         h("input", { type: "checkbox", checked: state.includeInternal, onchange: (e) => { state.includeInternal = e.target.checked; refresh(); } }),
         "Include internal leaf activity")),
     queriesTable(d.queries, names),
     h("div", { class: "cm-section" },
       h("h2", {}, `Ran in the last ${d.recent_seconds ?? 60} s (${(d.recent ?? []).length})`),
-      h("span", { class: "s2-faint s2-small" }, "From the aggregators' plan caches: also the short statements that finish between two refreshes. System-view reads are left out.")),
+      h("span", { class: "s2-faint s2-small" }, `From the aggregators' plan caches: also the short statements that finish between two refreshes.${state.showOwn ? "" : " The Studio's own reads are left out."}`)),
     recentTable(d.recent ?? [], names),
   ];
 }
 
 function accept(data) {
+  data.all = { queries: data.queries, recent: data.recent ?? [] };
+  applyOwn(data);
   state.data = data;
   state.error = null;
   if (data.history) state.history = data.history;
@@ -1149,6 +1162,23 @@ function accept(data) {
   reportContext();
 }
 
+function applyOwn(data) {
+  data.queries = state.showOwn ? data.all.queries : data.all.queries.filter((q) => !q.own);
+  data.recent = state.showOwn ? data.all.recent : data.all.recent.filter((r) => !r.own);
+  data.ownHidden = state.showOwn ? 0 : data.all.queries.length - data.queries.length + data.all.recent.length - data.recent.length;
+}
+function setShowOwn(on) {
+  state.showOwn = on;
+  try { localStorage.setItem("s2-show-own", on ? "1" : "0"); } catch {}
+  if (state.data?.all) applyOwn(state.data);
+  render();
+}
+function ownToggle(d) {
+  return h("label", { class: "cm-auto s2-small s2-muted",
+    title: "The statements this Studio sends for itself: this monitor, alert checks, schema and session reads (marked /* s2-… */, or system-view reads and SELECT 1 / NOW() / @@variables, which other tools send too)" },
+    h("input", { type: "checkbox", checked: state.showOwn, onchange: (e) => setShowOwn(e.target.checked) }),
+    `Show Studio's own queries${!state.showOwn && d.ownHidden ? ` (${d.ownHidden} hidden)` : ""}`);
+}
 function reportContext() {
   const d = state.data;
   const names = shortNames(d.nodes);

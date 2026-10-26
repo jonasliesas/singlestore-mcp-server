@@ -67,7 +67,7 @@
   .se-tag.sort { background: var(--s2-ok-bg); color: var(--s2-ok); }
   .se-tag.pk { background: var(--s2-warn-bg); color: var(--s2-warn); }
   .se-ddl { max-height: 360px; overflow: auto; white-space: pre; word-break: normal; }
-  html[data-display-mode="fullscreen"] .se { height: calc(100vh - 70px); }
+  html[data-display-mode="fullscreen"] .se { height: calc(100vh / var(--s2-zoom) - 70px); }
   html[data-display-mode="fullscreen"] .se-ddl { max-height: none; }
   html[data-display-mode="fullscreen"] .se-right .s2-table-wrap { max-height: none !important; }
   .se-ddl.wrap { white-space: pre-wrap; word-break: break-word; }
@@ -78,7 +78,7 @@
 
   /* Clean-up panel */
   .cu { display: flex; flex-direction: column; gap: 10px; min-height: 580px; }
-  html[data-display-mode="fullscreen"] .cu { min-height: calc(100vh - 70px); }
+  html[data-display-mode="fullscreen"] .cu { min-height: calc(100vh / var(--s2-zoom) - 70px); }
   .cu-box { border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); padding: 8px 10px; }
   .cu-opts { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: flex-start; }
   .cu-opts label { display: flex; align-items: center; gap: 6px; font-size: var(--s2-fs-xs); color: var(--s2-text-2); }
@@ -141,11 +141,11 @@
   .se-sources button.on { background: var(--s2-info-bg); color: var(--s2-info); font-weight: 600; }
   /* SingleStore kinds: SS = SAS SpeedyStore caslib (SingleStore purple), S2 standard connector caslib (grey-blue
      outline), S2 SAS/ACCESS libname (.col), 9 = SAS 9 library over SAS/CONNECT */
-  .se-ico.ss { background: #820ddf; color: #fff; }
-  .se-ico.s2-std { background: transparent; color: #5b7290; box-shadow: inset 0 0 0 1px #5b7290; }
+  .se-ico.ss { background: var(--s2-src-ss); color: #fff; }
+  .se-ico.s2-std { background: transparent; color: var(--s2-src-s2); box-shadow: inset 0 0 0 1px var(--s2-src-s2); }
   .se-ico.sas9 { background: var(--s2-ok-bg); color: var(--s2-ok); }
-  .s2-badge.ss { background: #820ddf; color: #fff; border-color: #820ddf; }
-  .s2-badge.s2-std { background: transparent; color: #5b7290; border: 1px solid #5b7290; }
+  .s2-badge.ss { background: var(--s2-src-ss); color: #fff; border-color: var(--s2-src-ss); }
+  .s2-badge.s2-std { background: transparent; color: var(--s2-src-s2); border: 1px solid var(--s2-src-s2); }
   .se-code { border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); padding: 8px 10px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 6px; }
   .se-code pre { margin: 0; max-height: 260px; overflow: auto; white-space: pre; }
   .se-code h3 { margin: 0; font-size: var(--s2-fs-xs); text-transform: uppercase; letter-spacing: .04em; color: var(--s2-text-3); font-weight: 600; }
@@ -821,7 +821,7 @@ function renderSasRight() {
       h("div", { class: "s2-toolbar" }, s2link,
         h("button", { class: "s2-btn", "aria-pressed": String(!!codeOpen), title: src === "cas" ? "The CASLIB statement and table.addCaslib for this caslib, rebuilt from its settings"
           : "The LIBNAME statement for this library, rebuilt from its settings", onclick: () => toggleLibCode(src, sel.lib) }, "</> Show code"),
-        h("button", { class: "s2-btn", onclick: () => loadSasTablesSE(src, sel.lib, true) }, "↻ Refresh")));
+        h("button", { class: "s2-btn", title: "Reload this library's tables", onclick: () => loadSasTablesSE(src, sel.lib, true) }, "↻ Refresh library")));
     const code = libCodePanel(src, sel.lib);
     if (!t || t.status === "loading") return [head, code, h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Loading tables…")];
     if (t.status === "error") return [head, code, S2.errorBox(t.error)];
@@ -852,7 +852,7 @@ function renderSasRight() {
     if (!p || p.status === "loading") body = h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Fetching the first 50 rows…");
     else if (p.status === "error") body = S2.errorBox(p.error);
     else if (!p.data.rows.length) body = placeholder("No rows", "The table is empty.");
-    else body = [S2.dataTable(p.data.columns, p.data.rows, { maxHeight: "320px" }),
+    else body = [S2.dataTable(p.data.columns, p.data.rows, { maxHeight: "320px", data: true }),
       h("div", { class: "s2-small s2-faint", style: { marginTop: "4px" } }, `First ${p.data.rows.length} row(s) · `, h("span", { class: "s2-mono" }, p.data.sql))];
   } else if (!c || c.status === "loading") body = h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Loading columns…");
   else if (c.status === "error") body = S2.errorBox(c.error);
@@ -1158,7 +1158,7 @@ function renderDbOverview(db) {
         onclick: () => openAnalyze(db, null) }, "Analyze all tables…") : null,
       !meta?.system && meta?.tables ? h("button", { class: "s2-btn", title: "Rows and data per partition and leaf for every table (read-only)",
         onclick: () => loadSkew(db, null, true) }, state.dbSkew.has(db) ? "↻ Check skew" : "Check skew") : null,
-      h("button", { class: "s2-btn", title: "Reload tables", onclick: () => loadTables(db, true) }, "↻ Refresh")));
+      h("button", { class: "s2-btn", title: `Reload the tables of ${db}`, onclick: () => loadTables(db, true) }, "↻ Refresh database")));
   const an = [analyzePanel(db, null), dbSkewBox(db)];
   if (!t || t.status === "loading") return [head, an, h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Loading tables…")];
   if (t.status === "error") return [head, an, S2.errorBox(t.error)];
@@ -1208,13 +1208,13 @@ function renderTableDetail(db, table) {
   const isTable = info.type === "BASE TABLE";
   const [, cls, kindLabel] = storageShort(info);
   const badges = h("div", { class: "se-badges" },
-    h("span", { class: `s2-badge ${isTable ? "plain" : "ok"}` }, info.type),
-    isTable && h("span", { class: `s2-badge ${cls === "col" ? "info" : "warn"}` }, info.storage),
-    info.reference && h("span", { class: "s2-badge plain" }, "REFERENCE"));
+    h("span", { class: `s2-badge ${isTable ? "plain" : "ok"}`, title: info.type }, S2.sentence(info.type)),
+    isTable && h("span", { class: `s2-badge ${cls === "col" ? "info" : "warn"}`, title: info.storage }, S2.sentence(info.storage)),
+    info.reference && h("span", { class: "s2-badge plain" }, "Reference"));
   const head = h("div", { class: "se-head" },
     h("div", { class: "se-titlebox" }, title, badges),
     h("div", { class: "s2-toolbar" },
-      h("button", { class: "s2-btn primary", onclick: askClaude, title: "Send a question about this table to Claude" }, `Ask Claude about this ${isTable ? "table" : "view"}`),
+      S2.askClaudeButton({ onclick: askClaude, title: `Ask Claude about this ${isTable ? "table" : "view"} (the question goes to the chat)` }),
       h("button", { class: "s2-btn", onclick: queryInGrid, title: "Ask Claude to open this table in the Query Grid" }, "Query in grid"),
       isTable && !SYSTEM.has(db) ? h("button", { class: "s2-btn", onclick: () => openAnalyze(db, table),
         title: "Refresh this table's optimizer statistics (ANALYZE TABLE; shows the plan first)" }, "Analyze…") : null,
@@ -1281,7 +1281,7 @@ function renderTableDetail(db, table) {
     if (!p || p.status === "loading") body = h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Fetching first 50 rows…");
     else if (p.status === "error") body = S2.errorBox(p.error);
     else if (!p.data.rows.length) body = placeholder("No rows", "The table is empty.");
-    else body = [S2.dataTable(p.data.columns, p.data.rows, { maxHeight: "320px" }),
+    else body = [S2.dataTable(p.data.columns, p.data.rows, { maxHeight: "320px", data: true }),
       h("div", { class: "s2-small s2-faint", style: { marginTop: "4px" } },
         `First ${p.data.rows.length} row(s) · `, h("span", { class: "s2-mono" }, p.data.sql))];
   } else {
@@ -1475,7 +1475,7 @@ function renderCandidates(data) {
     Views: c.views.length || null, Risk: c.risks.join(", ") || null, _c: c,
   }));
   const table = S2.dataTable(["", "Database", "Name", "Kind", "Rows", "Size", "Created", "Created by", "Age", "Last used", "Views", "Risk"], rows, {
-    maxHeight: S2.displayMode === "fullscreen" ? "calc(100vh - 470px)" : "300px",
+    maxHeight: S2.displayMode === "fullscreen" ? "calc(100vh / var(--s2-zoom) - 470px)" : "300px",
     render: {
       "": (k, r) => h("input", { type: "checkbox", checked: cu.selected.has(k), "aria-label": `Select ${r.Database}.${r.Name}`,
         onclick: (e) => e.stopPropagation(),
@@ -1592,14 +1592,14 @@ function render() {
     h("span", { class: "s2-spacer" }),
     cleanup
       ? h("button", { class: "s2-btn", onclick: leaveCleanup, title: "Back to browsing the schema" }, "← Schema")
-      : h("button", { class: "s2-btn", onclick: enterCleanup, title: "Find and drop leftover SAS work tables (_dm…, _flw…, temp)" }, "🧹 Clean up"),
+      : h("button", { class: "s2-btn", onclick: enterCleanup, title: "Find leftover SAS work tables (_dm…, _flw…, temp) and choose which to drop (asks first)" }, "Clean up work tables…"),
     h("button", { class: "s2-btn ghost", title: cleanup ? "Scan again" : "Reload database list", onclick: () => {
       if (cleanup) { cleanupScan(false); return; }
       state.tables.clear(); state.details.clear(); state.previews.clear();
       loadDatabases();
       for (const db of state.expanded) loadTables(db, true);
       if (state.sel?.table) loadDetail(state.sel.db, state.sel.table, true);
-    } }, "↻ Refresh"),
+    } }, cleanup ? "↻ Scan again" : "↻ Refresh all"),
     cleanup ? S2.openInBrowserButton("cleanup_work_tables", () => ({}))
       : S2.openInBrowserButton("schema_explorer", () => ({ database: state.sel?.db, table: state.sel?.table })),
     S2.fullscreenButton());

@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SingleStore</title>
+<title>SAS SpeedyStore Studio</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23820ddf'/%3E%3Cpath d='M18 5 9 18h6l-2 9 9-13h-6z' fill='white'/%3E%3C/svg%3E">
 <style>
   :root { color-scheme: light dark; }
   html, body { margin: 0; height: 100%; background: light-dark(#ffffff, #1e1e1e); }
@@ -48,6 +49,15 @@ const toolName = params.get("tool");
 const args = JSON.parse(params.get("args") || "{}");
 const darkQuery = matchMedia("(prefers-color-scheme: dark)");
 const theme = () => (darkQuery.matches ? "dark" : "light");
+// Presenter mode is remembered per browser (the Workspace's switch asks this page to keep it); ?present=1 / 0 sets it.
+const PRESENT_KEY = "s2-presenter";
+function presenter() {
+  const asked = params.get("present");
+  try {
+    if (asked != null) localStorage.setItem(PRESENT_KEY, asked === "1" || asked === "true" ? "1" : "0");
+    return localStorage.getItem(PRESENT_KEY) === "1";
+  } catch { return asked === "1" || asked === "true"; }
+}
 const status = document.getElementById("status");
 const connEl = document.getElementById("conn");
 let frame = null;
@@ -232,7 +242,7 @@ function end(why) {
   frame?.remove();  // stops every timer and poll of the app
   frame = null;
   status.remove();
-  document.title = "Session ended · SingleStore";
+  document.title = "Session ended · SAS SpeedyStore Studio";
   const drafts = Object.values(readDrafts());
   const box = el("div", { id: "ended", role: "alert" },
     el("h1", {}, "Session ended"),
@@ -294,10 +304,12 @@ async function open() {
   const htmlReq = get(`resource?uri=${encodeURIComponent(tool._meta.ui.resourceUri)}`).then((r) => r.text());
   await flushDrafts();  // before the app reads its saved state
   const html = await htmlReq;
-  document.title = `${tool.title || tool.name} · SingleStore`;
+  // The Workspace (sql_editor's page) is the Studio itself; other apps are named after their tool.
+  document.title = toolName === "sql_editor" ? "SAS SpeedyStore Studio" : `${tool.title || tool.name} · SAS SpeedyStore Studio`;
 
   window.addEventListener("message", async (ev) => {
     if (!frame || ev.source !== frame.contentWindow) return;
+    if (ev.data?.type === "s2-presenter-save") { try { localStorage.setItem(PRESENT_KEY, ev.data.on ? "1" : "0"); } catch {} return; }
     const { id, method, params: p, jsonrpc } = ev.data ?? {};
     if (jsonrpc !== "2.0" || !method) return;
     switch (method) {
@@ -310,7 +322,7 @@ async function open() {
             theme: theme(), displayMode: "fullscreen", availableDisplayModes: ["fullscreen"],
             containerDimensions: { width: innerWidth, height: innerHeight },
             locale: navigator.language, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-            platform: "web", toolInfo: { tool },
+            platform: "web", toolInfo: { tool }, s2Presenter: presenter(),
           },
         });
       case "ui/notifications/initialized":

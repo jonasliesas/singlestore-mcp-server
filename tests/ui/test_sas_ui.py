@@ -37,7 +37,7 @@ def workspace(ui, app_url, sas_warm):
     page, errors = ui
     page.goto(app_url("sql_editor", {"database": DB, "view": "sql", "new_tab": True, "sql": "-- SAS UI test"}),
               wait_until="domcontentloaded")
-    ws = find_frame(page, "SingleStore Workspace", 30)
+    ws = find_frame(page, "SAS SpeedyStore Studio · Workspace", 30)
     sql = find_frame(page, "SQL Editor", 30)
     assert wait_js(sql, "document.querySelector('.cm-content') && document.body.innerText.includes('Ctrl')", 30)
     return page, errors, ws, sql
@@ -47,7 +47,8 @@ def test_sql_editor_run_as_proc_sql(workspace, sas: McpSession) -> None:
     page, errors, ws, sql = workspace
     run_as = sql.get_by_label("Run as", exact=True)
     run_as.select_option("procsql")
-    assert wait_js(sql, "document.querySelector('.sq-editor .sq-lang')?.textContent === 'PROC SQL'", 5), "editor badge not PROC SQL"
+    # The Run button says where it runs (the editor's corner badge is gone: it covered the first line).
+    assert wait_js(sql, "document.querySelector('.sq-run')?.dataset.lang === 'procsql' && /Run in SAS Compute/.test(document.querySelector('.sq-run').getAttribute('aria-label'))", 5),         "Run button doesn't say SAS Compute"
     # The tree lists SAS libraries (the session is warm: sas_warm); an error in the tree ends the wait at once.
     listed = wait_js(sql, "[...document.querySelectorAll('.sq-tree .sq-row .name')].some((e) => e.textContent === 'SASHELP') ? 'ok'"
                           " : (document.querySelector('.sq-tree .s2-error')?.innerText ?? '')", 180)
@@ -104,7 +105,7 @@ def test_sql_editor_sas_autocomplete_fetches_columns(workspace, sas: McpSession)
     table being expanded in the tree: the editor looks them up in the background (alias resolved)."""
     page, errors, ws, sql = workspace
     sql.get_by_label("Run as", exact=True).select_option("procsql")
-    assert wait_js(sql, "document.querySelector('.sq-editor .sq-lang')?.textContent === 'PROC SQL'", 5)
+    assert wait_js(sql, "document.querySelector('.sq-run')?.dataset.lang === 'procsql'", 5)
     sql.locator(".cm-content").click()
     page.keyboard.press("Control+A")
     page.keyboard.type("select c. from sashelp.class c")
@@ -268,7 +269,8 @@ def test_tab_pins_its_viya_connection(workspace, sas: McpSession) -> None:
     assert wait_js(sql, "document.querySelector('.sq-sasopts select.sq-viya')?.classList.contains('pinned')", 5)
     _set_sql(sql, "select count(*) as n from sashelp.class;")
     assert wait_js(sql, r"/Result \(\d+\)/.test(document.querySelector('.sq-status')?.innerText ?? '')", 90), text(sql)[-600:]
-    assert f"Viya: {active}" in sql.locator(".sq-status").inner_text()
+    # The result's engine chip names the connection it ran on ("SAS Compute · Zeus").
+    assert sql.locator(".sq-status .s2-engine").first.get_attribute("aria-label") == f"Ran in SAS Compute (connection {active})"
     deadline = time.monotonic() + 20
     pinned = None
     while time.monotonic() < deadline and pinned != active:

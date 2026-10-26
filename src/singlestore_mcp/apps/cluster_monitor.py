@@ -18,6 +18,7 @@ from typing import Any
 
 from mcp.types import CallToolResult, ToolAnnotations
 
+from .. import history_store
 from ..db import db
 from ._core import APP_ONLY, apps, jsonable_rows, register_app, tool_result, with_browser_link
 
@@ -207,18 +208,19 @@ def _short_host(host: str) -> str:
 
 # Statements that ran recently, from the aggregators' plan caches: catches the many queries that finish
 # between two refreshes and so never show up in the process list. The plan cache keeps parameterized text
-# without comments, so this server's own reads (all of information_schema) are left out by what they read.
+# without comments, so the Studio's own statements are recognised by what they are (history_store.is_studio_query)
+# and flagged ``own``; the app hides them unless "Show Studio's own queries" is ticked.
 _RECENT_SECONDS = 60
 _RECENT_SQL = (
     "SELECT p.NODE_ID, p.DATABASE_NAME, p.QUERY_TEXT, p.COMMITS + p.ROLLBACKS AS RUNS, p.ROLLBACKS,"
     " p.AVERAGE_EXEC_TIME, TIMESTAMPDIFF(SECOND, p.LAST_EXECUTED, NOW()) AS AGO_S"
     " FROM information_schema.MV_PLANCACHE p JOIN information_schema.MV_NODES n ON n.ID = p.NODE_ID"
     " WHERE n.TYPE <> 'LEAF' AND p.LAST_EXECUTED >= NOW() - INTERVAL %s SECOND"
-    " AND p.QUERY_TEXT NOT LIKE %s AND p.QUERY_TEXT NOT LIKE %s AND p.QUERY_TEXT NOT LIKE %s"
+    " AND p.QUERY_TEXT NOT LIKE %s AND p.QUERY_TEXT NOT LIKE %s"
     " AND p.DATABASE_NAME NOT IN ('', 'information_schema')"
-    " ORDER BY p.LAST_EXECUTED DESC, p.AVERAGE_EXEC_TIME DESC LIMIT 100"
+    " ORDER BY p.LAST_EXECUTED DESC, p.AVERAGE_EXEC_TIME DESC LIMIT 200"
 )
-_RECENT_PARAMS = (_RECENT_SECONDS, "%information_schema.%", "SELECT SQL_NO_LOGGING%", "%binary_serialization%")
+_RECENT_PARAMS = (_RECENT_SECONDS, "SELECT SQL_NO_LOGGING%", "%binary_serialization%")
 
 
 def _recent(names: dict[int, str]) -> list[dict[str, Any]]:
@@ -233,6 +235,7 @@ def _recent(names: dict[int, str]) -> list[dict[str, Any]]:
             "rollbacks": int(r["ROLLBACKS"] or 0),
             "avg_ms": r["AVERAGE_EXEC_TIME"],
             "ago_s": max(0, int(r["AGO_S"] or 0)),
+            "own": history_store.is_studio_query(r["QUERY_TEXT"]),
         })
     return out
 
@@ -253,12 +256,9 @@ def collect(include_internal: bool = False) -> dict[str, Any]:
             "SELECT NODE_ID, ID, USER, HOST, DB, COMMAND, TIME, STATE, INFO, TRANSACTION_STATE, RESOURCE_POOL,"
             " REASON_FOR_QUEUEING FROM information_schema.MV_PROCESSLIST"
             f" WHERE COMMAND <> 'Sleep'{user_filter}"
-            " AND (INFO IS NULL OR INFO NOT LIKE %s)"
             # Leaf-side fan-out of system-view reads, including this monitor's own.
             " AND NOT (USER = 'distributed' AND DB = 'information_schema')"
             " ORDER BY TIME DESC LIMIT 200",
-            # This server's own statements (this monitor, the alert checks, …) all start with "/* s2-".
-            ("%/* s2-%",),
         ),
         lambda: _query(
             "SELECT COUNT(*) AS n FROM information_schema.MV_PROCESSLIST WHERE COMMAND = 'Sleep' AND USER <> 'distributed'"
@@ -314,6 +314,8 @@ def collect(include_internal: bool = False) -> dict[str, Any]:
                 "transaction": q["TRANSACTION_STATE"],
                 "resource_pool": q["RESOURCE_POOL"],
                 "queued_reason": q["REASON_FOR_QUEUEING"] or None,
+                # This server's own statements (this monitor, the alert checks, …: "/* s2-…" marker).
+                "own": history_store.is_studio_query(q["INFO"]),
             }
             for q in queries
         ],
@@ -337,12 +339,12 @@ def _summary(data: dict[str, Any]) -> str:
         if disk and disk["total_b"]:
             parts.append(f"disk {disk['used_b'] / disk['total_b'] * 100:.0f}% used")
         lines.append("- " + ", ".join(parts))
-    qs = data["queries"]
+    qs = [q for q in data["queries"] if not q.get("own")]
     lines.append(f"{len(qs)} active quer{'y' if len(qs) == 1 else 'ies'}, {data['idle_connections']} idle connection(s).")
     for q in qs[:10]:
         sql = " ".join((q["sql"] or q["command"] or "").split())
         lines.append(f"- {q['seconds']}s {q['user']}@{q['database'] or '-'} on {q['node']}: {sql[:160]}")
-    recent = data.get("recent") or []
+    recent = [r for r in data.get("recent") or [] if not r.get("own")]
     lines.append(f"{len(recent)} statement(s) ran in the last {data.get('recent_seconds', 60)} s (from the plan cache).")
     for r in recent[:5]:
         sql = " ".join((r["sql"] or "").split())

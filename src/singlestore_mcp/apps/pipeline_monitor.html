@@ -290,7 +290,7 @@ function card(p) {
       ? h("div", { class: "pm-err" },
           h("span", { class: "pm-err-text", title: p.last_error.message },
             h("strong", {}, `${p.error_count} error${p.error_count === 1 ? "" : "s"}`), ` · ${fmt.relTime(p.last_error.unix)}: ${p.last_error.message}`),
-          h("button", { class: "s2-btn", onclick: () => askClaude(p) }, "Ask Claude"))
+          S2.askClaudeButton({ title: "Ask Claude about this pipeline (the question goes to the chat)", onclick: () => askClaude(p) }))
       : null,
     open ? details(p, nb) : null);
 }
@@ -312,7 +312,7 @@ function details(p, nb) {
         d.test.loading ? h("span", { class: "s2-spinner" }) : null),
       d.test.error ? S2.errorBox(d.test.error)
         : d.test.result ? (d.test.result.rows?.length
-            ? S2.dataTable(d.test.result.columns, d.test.result.rows, { maxHeight: "260px" })
+            ? S2.dataTable(d.test.result.columns, d.test.result.rows, { maxHeight: "260px", data: true })
             : h("div", { class: "s2-muted s2-small" }, "Test returned no rows (nothing new in the source, or all data already loaded)."))
         : null));
   }

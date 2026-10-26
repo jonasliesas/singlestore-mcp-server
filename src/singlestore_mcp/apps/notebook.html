@@ -9,6 +9,12 @@
 <!--S2:VENDOR:singlestore_functions.json-->
 <style>
   body { padding: 10px 12px; }
+  /* Full height as a flex column: a header that wraps never makes the page scroll. */
+  html[data-display-mode="fullscreen"] body { height: calc(100vh / var(--s2-zoom)); display: flex; flex-direction: column; overflow: hidden; }
+  html[data-display-mode="fullscreen"] #root { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  html[data-display-mode="fullscreen"] #root > * { flex: none; }
+  html[data-display-mode="fullscreen"] #root > .nb-layout { flex: 1; min-height: 0; height: auto; }
+  .cell .bar .s2-engine { margin-left: 2px; }
   .nb-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
   .nb-head select { max-width: 190px; }
   .nb-file { font-size: var(--s2-fs-xs); color: var(--s2-text-2); max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -21,7 +27,6 @@
   @keyframes nbpulse { 50% { opacity: .35; } }
   .nb-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; height: 680px; }
   .nb-layout.chat-open { grid-template-columns: minmax(0, 1fr) 340px; }
-  html[data-display-mode="fullscreen"] .nb-layout { height: calc(100vh - 64px); }
   @media (max-width: 760px) { .nb-layout.chat-open { grid-template-columns: minmax(0, 1fr); } }
   .nb-cells { overflow: auto; min-height: 0; padding: 2px 4px 80px 0; }
   .nb-files { border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); padding: 8px 10px; margin-bottom: 8px; background: var(--s2-bg-2); font-size: var(--s2-fs-xs); }
@@ -132,7 +137,7 @@
   .nb-ask { display: flex; gap: 6px; align-items: flex-end; padding: 6px 8px; border-top: 1px solid var(--s2-border-2); }
   .nb-ask textarea { flex: 1; resize: none; min-height: 34px; max-height: 120px; font-size: var(--s2-fs-xs); }
   .nb-chat .hint { font-size: 11px; color: var(--s2-text-3); padding: 0 8px 6px; }
-  .cell.sas .badge { background: color-mix(in srgb, #0378cd 18%, transparent); color: #0378cd; }
+  .cell.sas .badge { background: color-mix(in srgb, var(--s2-eng-sas) 12%, var(--s2-bg)); color: var(--s2-eng-sas); }
   .sas-out { display: grid; gap: 6px; }
   .sas-head { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: var(--s2-fs-xs); }
   .sas-lst { background: #fff; color: #111; border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius-sm); padding: 6px; overflow: auto; max-height: 640px; }
@@ -334,11 +339,9 @@ const overwriteCR = (t) => t.includes("\r") ? t.split("\n").map((l) => l.split("
 // ---------------------------------------------------------------- layout
 const root = document.getElementById("root");
 const headEl = h("div", { class: "nb-head" });
-const filePanel = h("div", { class: "nb-files", hidden: true, role: "group", "aria-label": "Notebook files" });
-// Escape closes the Open / Save as dialog wherever the focus is (Open leaves it on the toolbar button).
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !filePanel.hidden && filePanel.classList.contains("dialog")) { e.stopPropagation(); e.preventDefault(); hideFiles(); }
-}, true);
+const filePanel = h("div", { class: "nb-files", hidden: true, "aria-label": "Notebook files" });
+// Open / Save as is a modal dialog (S2.modal): focus inside, Tab kept there, Escape anywhere closes it.
+let closeFileModal = null;
 const pkgPanel = h("div", { class: "nb-files nb-pkgs", hidden: true });
 const envEl = h("div", { class: "nb-env", hidden: true });
 const cellsEl = h("div", { class: "nb-cells" });
@@ -378,10 +381,12 @@ function renderHeader() {
     h("button", { class: "s2-btn primary", disabled: state.runningAll || !envReady(), title: "Run all cells from the top", onclick: runAll }, state.runningAll ? h("span", { class: "s2-spinner" }) : null, "▶▶ Run all"),
     kernelEl,
     h("button", { class: "s2-btn ghost", title: "Python packages in the notebook environment", disabled: !envReady(), onclick: () => togglePackages() }, "Packages"),
-    h("button", { class: "s2-btn ghost", title: "Interrupt the running cell", disabled: !envReady(), onclick: () => kernelControl("interrupt") }, "■"),
-    h("button", { class: "s2-btn ghost", title: "Restart the Python kernel (clears variables)", disabled: !envReady(), onclick: () => kernelControl("restart") }, "↻"),
+    h("button", { class: "s2-btn ghost", title: "Interrupt the running cell (the kernel and its variables stay)", "aria-label": "Interrupt the running cell",
+      disabled: !envReady(), onclick: () => kernelControl("interrupt") }, "■ Interrupt"),
+    h("button", { class: "s2-btn ghost", title: "Restart the Python kernel: stops it and starts a new one (clears every variable)", "aria-label": "Restart kernel",
+      disabled: !envReady(), onclick: () => kernelControl("restart") }, "Restart kernel"),
     h("span", { class: "s2-spacer" }),
-    h("button", { class: `s2-btn${state.chatOpen ? " primary" : ""}`, title: "Ask Claude about this notebook", onclick: () => toggleChat() }, "Claude"),
+    S2.askClaudeButton({ title: "Ask Claude about this notebook (a chat panel on the right)", "aria-pressed": String(state.chatOpen), onclick: () => toggleChat() }),
     S2.openInBrowserButton("notebook", () => ({ name: state.file.name, database: state.database })),
     S2.fullscreenButton(),
   ].filter(Boolean));
@@ -413,7 +418,7 @@ function renderEnv() {
     envEl.replaceChildren(h("strong", {}, title),
       h("div", {}, `Not installed yet in the notebook environment: ${missing.join(", ")}.`,
         sas.length ? " They give you SAS cells on SAS Viya (saspy) and CAS, DLPy, model management and optimization from Python (swat, sas-dlpy, sasctl, sasoptpy)." : "",
-        " Installing takes a minute; restart the kernel (↻) afterwards."),
+        " Installing takes a minute; restart the kernel (Restart kernel) afterwards."),
       h("div", { style: { marginTop: "8px" } }, h("button", { class: "s2-btn primary", onclick: installEnv }, "Install missing packages"),
         h("button", { class: "s2-btn ghost", onclick: () => { envEl.hidden = true; } }, "Not now")));
     return;
@@ -471,7 +476,7 @@ async function installPackages(spec) {
       renderPackages();
     } while (st?.state === "installing");
     const failed = (pkgs.log.at(-1) ?? "").startsWith("Error");
-    S2.toast(failed ? "Install failed — see the log" : "Installed. Restart the kernel (↻) to use them.", failed ? "err" : "ok");
+    S2.toast(failed ? "Install failed — see the log" : "Installed. Restart the kernel (Restart kernel) to use them.", failed ? "err" : "ok");
   } catch (e) { pkgs.log = [cleanError(e).message]; }
   pkgs.installing = false;
   await loadPackages();
@@ -550,6 +555,7 @@ function cellEl(cell) {
   const status = h("div", { class: "status" });
   const confirm = h("div", {});
   const body = h("div", { class: "body", onclick: () => setActive(cell) }, bar, editor, mdView, confirm, outputs, status);
+  outputs.dataset.s2Data = "";  // what the cell printed / returned: presenter mode leaves it as it is
   const el = h("div", { class: `cell ${cell.type}`, dataset: { id: cell.id } }, gutter, body);
   cell.el = { root: el, gutter, bar, editor, mdView, outputs, status, confirm };
   makeEditor(cell, editor);
@@ -557,6 +563,15 @@ function cellEl(cell) {
   renderOutputs(cell);
   return el;
 }
+// Where a cell runs: SQL on SingleStore (the active connection), Python in the kernel on this computer, SAS in SAS
+// Compute (the active SAS Viya connection).
+const CELL_ENGINE = { sql: "s2", python: "python", sas: "compute" };
+const cellConn = (engine) => (engine === "s2" ? S2.connections().s2 : engine === "compute" ? S2.connections().viya : null) || null;
+function cellEngineChip(cell, verb = "Runs") {
+  const eng = CELL_ENGINE[cell.type];
+  return eng ? S2.engineChip(eng, cellConn(eng), { verb }) : null;
+}
+S2.onConnections(() => { for (const c of state.cells) if (c.el) { renderCell(c); renderOutputs(c); } });
 function renderGutter(cell) {
   const badge = { sql: "SQL", python: "PY", sas: "SAS", markdown: "TEXT" }[cell.type];
   cell.el.gutter.replaceChildren(...[
@@ -577,12 +592,13 @@ function renderCell(cell) {
   const idx = state.cells.indexOf(cell);
   bar.replaceChildren(...[
     typeSelect,
+    cellEngineChip(cell),
     nameInput ? h("span", {}, "result →") : null, nameInput,
     h("span", { class: "spacer" }),
-    h("button", { class: "s2-btn ghost", title: "Move up", disabled: idx <= 0, onclick: () => moveCell(cell, -1) }, "↑"),
-    h("button", { class: "s2-btn ghost", title: "Move down", disabled: idx >= state.cells.length - 1, onclick: () => moveCell(cell, 1) }, "↓"),
+    h("button", { class: "s2-btn ghost", title: "Move up", "aria-label": "Move cell up", disabled: idx <= 0, onclick: () => moveCell(cell, -1) }, "↑"),
+    h("button", { class: "s2-btn ghost", title: "Move down", "aria-label": "Move cell down", disabled: idx >= state.cells.length - 1, onclick: () => moveCell(cell, 1) }, "↓"),
     cell.outputs.length ? h("button", { class: "s2-btn ghost", title: "Clear output", onclick: () => { cell.outputs = []; renderOutputs(cell); markDirty(); } }, "Clear") : null,
-    h("button", { class: "s2-btn ghost", title: "Delete cell", onclick: () => deleteCell(cell) }, "🗑"),
+    h("button", { class: "s2-btn ghost", title: "Delete cell", "aria-label": "Delete cell", onclick: () => deleteCell(cell) }, "🗑"),
   ].filter(Boolean));
   const showEditor = cell.type !== "markdown" || cell.editing;
   editor.hidden = !showEditor;
@@ -666,7 +682,7 @@ function outputEl(o) {
       t.variable ? `→ ${t.variable}` : null,
       t.truncated ? `showing first ${fmt.number(rows.length)}` : null,
       t.fetch_limited ? "fetch limit reached" : null].filter(Boolean).join(" · ");
-    return h("div", {}, h("div", { class: "tbl-head" }, note), S2.dataTable(t.columns, rows));
+    return h("div", {}, h("div", { class: "tbl-head" }, note), S2.dataTable(t.columns, rows, { data: true }));
   }
   if (d["image/png"]) return h("img", { src: `data:image/png;base64,${joinText(d["image/png"]).trim()}`, alt: joinText(d["text/plain"]) || "chart" });
   if (d["image/jpeg"]) return h("img", { src: `data:image/jpeg;base64,${joinText(d["image/jpeg"]).trim()}`, alt: "image" });
@@ -715,11 +731,12 @@ function renderOutputs(cell) {
   // Interrupt stops Python code at once, but on Windows not a call waiting in C (a network read, a lock, a long
   // numpy/C loop): after a few seconds, offer the restart that does stop it.
   const stuck = cell.running && state.interruptAt && Date.now() - state.interruptAt > INTERRUPT_GRACE_MS;
-  if (cell.running) st.replaceChildren(h("span", { class: "s2-spinner" }), ` Running${cell.seconds ? ` · ${cell.seconds}s` : ""}`,
+  if (cell.running) st.replaceChildren(h("span", { class: "s2-spinner" }), ` ${S2.runningText(CELL_ENGINE[cell.type] ?? "python")}${cell.seconds ? ` · ${cell.seconds}s` : ""}`,
+    cellEngineChip(cell),
     stuck ? h("span", { class: "nb-stuck", role: "alert" }, ` · Interrupt didn't stop it: the cell is waiting in code that can't be interrupted here `,
       "(a network read, a lock or a long C call). ",
       h("button", { class: "s2-btn", onclick: () => kernelControl("restart") }, "Restart kernel"), " stops it; variables are cleared.") : null);
-  else if (cell.lastRun) st.replaceChildren(cell.lastRun);
+  else if (cell.lastRun) st.replaceChildren(...[cell.lastEngine ? S2.engineChip(cell.lastEngine, cell.lastConn, { verb: "Ran" }) : null, cell.lastRun].filter(Boolean));
   else st.replaceChildren();
 }
 
@@ -753,6 +770,7 @@ async function runCell(cell, { advance = false, confirmed = false } = {}) {
   }
   if (advance) focusNext(cell);
   cell.running = true; cell.outputs = []; cell.seconds = 0; cell.lastRun = null;
+  cell.lastEngine = CELL_ENGINE[cell.type] ?? null; cell.lastConn = cellConn(cell.lastEngine);
   state.interruptAt = 0;
   renderGutter(cell); renderOutputs(cell);
   state.kernel = { ...state.kernel, state: "busy" }; renderKernel();
@@ -890,7 +908,12 @@ function renderFileLabel() {
   fileLabel.replaceChildren(state.file.name ?? "untitled.ipynb", dirty ? h("span", { class: "dirty", title: "Unsaved changes" }, "●") : "");
 }
 const ago = (t) => { const s = Date.now() / 1000 - t; return s < 90 ? "just now" : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 129600 ? `${Math.round(s / 3600)} h ago` : new Date(t * 1000).toLocaleDateString(); };
-function hideFiles() { filePanel.hidden = true; filePanel.classList.remove("dialog"); filePanel.replaceChildren(); }
+function hideFiles() {
+  const close = closeFileModal;
+  closeFileModal = null;
+  filePanel.hidden = true; filePanel.classList.remove("dialog"); filePanel.replaceChildren();
+  close?.();
+}
 const dirOf = (p) => (p ? p.replace(/[\\/][^\\/]*$/, "") : null);
 const baseOf = (p) => (p ? p.split(/[\\/]/).pop() : null);
 function showFiles(mode) {
@@ -905,6 +928,13 @@ function showFiles(mode) {
     extra: (loc) => (mode === "save" && loc === "local" ? [h("button", { class: "s2-btn", title: "Download the .ipynb (browser view)",
       onclick: () => S2.download(baseOf(state.file.name) || "notebook.ipynb", JSON.stringify(toIpynb(), null, 1), "application/x-ipynb+json") }, "Download")] : []),
   });
+  filePanel.prepend(h("h2", { class: "s2-modal-title", id: "nb-file-title" }, mode === "open" ? "Open a notebook" : "Save the notebook as",
+    h("span", { class: "s2-spacer" }), h("button", { class: "s2-btn ghost", "aria-label": "Close", title: "Close (Esc)", onclick: () => hideFiles() }, "✕")));
+  filePanel.setAttribute("aria-labelledby", "nb-file-title");
+  if (!closeFileModal) {
+    closeFileModal = S2.modal(filePanel, { onClose: () => { closeFileModal = null; hideFiles(); },
+      focus: () => filePanel.querySelector(mode === "save" ? '.s2-fb input:not([type="search"]):not([type="checkbox"])' : '.s2-fb input[type="search"]') });
+  }
 }
 function savedTo(res, nb) {
   state.file = { name: res.name, path: res.path, folder: res.folder, version: res.version ?? null, savedJson: JSON.stringify(nb) };

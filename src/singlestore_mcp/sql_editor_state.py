@@ -304,11 +304,13 @@ def _history() -> dict[str, Any]:
 
 def add_history(sql: str, database: str | None, *, ok: bool, elapsed_ms: float | None = None,
                 rows: int | None = None, affected: int | None = None, error: str | None = None,
-                kind: str = "read", source: dict[str, Any] | None = None, language: str | None = None) -> None:
+                kind: str = "read", source: dict[str, Any] | None = None, language: str | None = None,
+                connection: str | None = None, pushdown: str | None = None) -> None:
     """Record one statement the user ran. Never fails the run itself.
 
     ``source``: the editor tab it ran from, ``{"tab_id", "tab", "file"}`` (tab
-    label and open file name), when the editor says.
+    label and open file name), when the editor says. ``connection``: where it ran (the SingleStore connection, or
+    the SAS Viya connection of a SAS run); ``pushdown``: a SAS run's pushdown verdict (full / partly / pulled).
     """
     sql = sql.strip()
     if not sql:
@@ -321,6 +323,10 @@ def add_history(sql: str, database: str | None, *, ok: bool, elapsed_ms: float |
     }
     if language and language != "singlestore" and language in HISTORY_LANGUAGES:
         entry["language"] = language
+    if isinstance(connection, str) and connection.strip():
+        entry["connection"] = connection.strip()[:200]
+    if pushdown in ("full", "partly", "pulled"):
+        entry["pushdown"] = pushdown
     for key in ("tab_id", "tab", "file"):
         value = (source or {}).get(key)
         if isinstance(value, str) and value.strip():

@@ -23,8 +23,8 @@
   .qh-main.with-detail { grid-template-columns: minmax(0, 1.25fr) minmax(340px, 1fr); }
   @media (max-width: 1000px) { .qh-main.with-detail { grid-template-columns: minmax(0, 1fr); } }
   .qh-list { max-height: 560px; }
-  html[data-display-mode="fullscreen"] .qh-list { max-height: calc(100vh - 250px); }
-  html[data-display-mode="fullscreen"] .qh-detail { max-height: calc(100vh - 250px); overflow: auto; }
+  html[data-display-mode="fullscreen"] .qh-list { max-height: calc(100vh / var(--s2-zoom) - 250px); }
+  html[data-display-mode="fullscreen"] .qh-detail { max-height: calc(100vh / var(--s2-zoom) - 250px); overflow: auto; }
   .qh-table { width: 100%; }
   .qh-table tbody tr { cursor: pointer; }
   .qh-table tbody tr[aria-selected="true"] td { background: var(--s2-info-bg); }
@@ -326,11 +326,26 @@ function planRows() {
   const rows = planRowsFiltered();
   return pin && !rows.some((p) => p.key === pin.key) ? [pin, ...rows] : rows;
 }
+// "Show Studio's own queries": the statements this Studio sends for itself (flagged ``own`` by the server: marked
+// /* s2-… */, system-view reads, session checks) are hidden unless ticked (remembered in this browser).
+const showOwn = () => state.showOwn ?? (state.showOwn = (() => { try { return localStorage.getItem("s2-show-own") === "1"; } catch { return false; } })());
+function setShowOwn(on) {
+  state.showOwn = on;
+  try { localStorage.setItem("s2-show-own", on ? "1" : "0"); } catch {}
+  render();
+}
+// The details say where a statement ran (the active connection's name, read once).
+S2.onConnections(() => { if (state.selected && state.data) renderDetail(); });
+const ownHidden = () => (showOwn() ? 0 : (state.data?.events ?? []).filter((e) => e.own).length);
+// Where a statement came from, for the Source column and the details: every row ran on SingleStore; SAS ones were sent by
+// SAS Compute, CAS or SAS's embedded process (guessed from the SQL, so "probably").
+const SENT_BY = { "SAS CAS": "CAS", "SAS in-database": "SAS Compute", "SAS EP": "SAS (embedded process)" };
+const sentBy = (origin) => (SENT_BY[origin] ?? (/^Workload: /.test(origin ?? "") ? "the Studio's Workload" : null));
 function planRowsFiltered() {
   const d = state.data;
   if (!d?.plans?.length || !state.plansOn || state.shape || state.user || state.category) return [];
   const q = state.search.trim().toLowerCase();
-  return d.plans.filter((p) =>
+  return d.plans.filter((p) => (showOwn() || !p.own) &&
     (!state.database || (p.database ?? "") === state.database) &&
     (!state.status || (state.status === "ok" ? p.failed === 0 : p.failed > 0)) &&
     (!state.origin || state.origin === "plan" || (state.origin === "-" ? !p.origin : p.origin === state.origin)) &&
@@ -344,7 +359,7 @@ function filtered() {
   if (!d) return [];
   if (state.origin === "plan") return [];
   const q = state.search.trim().toLowerCase();
-  const rows = d.events.filter((e) =>
+  const rows = d.events.filter((e) => (showOwn() || !e.own) &&
     (!state.user || e.user === state.user) &&
     (!state.database || (e.database ?? "") === state.database) &&
     (!state.status || (state.status === "ok") === e.ok) &&
@@ -435,6 +450,9 @@ function filters() {
         try { localStorage.setItem("qh-group", state.group ? "1" : "0"); } catch {}
         renderList();
       } }), "Group repeated statements"),
+    h("label", { class: "qh-field", title: "The statements this Studio sends for itself: its monitors, schema and session reads (marked /* s2-… */, or system-view reads and SELECT 1 / NOW() / @@variables, which other tools send too)" },
+      h("input", { type: "checkbox", checked: showOwn(), onchange: (e) => setShowOwn(e.target.checked) }),
+      `Show Studio's own queries${ownHidden() ? ` (${fmt.number(ownHidden())} hidden)` : ""}`),
     plans.length || d.plancache_error ? h("label", { class: "qh-field", title: d.plancache_error ?? "Also list the statements only the plan cache knows (every run faster than the trace threshold), with their totals since the plan was compiled. No user or single runs; the runtime filter applies to their average (above 1 s)." },
       h("input", { type: "checkbox", checked: state.plansOn, disabled: !plans.length, onchange: (e) => setPlansOn(e.target.checked) }),
       `Plan cache statements (${fmt.number(plans.length)})`) : null,
@@ -507,7 +525,7 @@ function renderList() {
     h("td", {}, e.user ?? "–"),
     h("td", { class: e.database ? "" : "null" }, e.database ?? "–"),
     h("td", {}, e.category ?? "–"),
-    h("td", { class: e.origin ? "" : "null" }, e.origin ?? ""),
+    h("td", { class: e.origin ? "" : "null", title: sentBy(e.origin) ? `Ran on SingleStore, sent by ${sentBy(e.origin)} (probably: guessed from the SQL)` : "" }, e.origin ?? ""),
     h("td", { class: "num" }, e.rows == null ? "–" : fmt.number(e.rows)),
     h("td", {}, status(e.ok, e.error_code)),
     h("td", { class: "sql", title: e.sql }, child ? "" : e.sql));
@@ -639,7 +657,7 @@ function renderDetail() {
     ["Started", when(ev?.start_time ?? row.started)], ["Finished", when(row.finished)], ["Duration", secs(row.ms)],
     ["User", row.user ?? "–"], ["Database", row.database ?? "–"], ["Type", row.category ?? "–"],
     ["Rows", row.rows == null ? "–" : fmt.number(row.rows)], ["Resource pool", row.pool ?? "–"],
-    ...(row.origin ? [["Source", `${row.origin} (probably)`]] : []),
+    ...(row.origin ? [["Source", `${row.origin} (probably)${sentBy(row.origin) ? ` · ran on SingleStore, sent by ${sentBy(row.origin)}` : ""}`]] : []),
     ["Connection", ev?.connection_id ?? "–"], ["Plan ID", row.plan_id ?? "–"],
     ...(row.tables?.length ? [["Tables", row.tables.join(", ")]] : []),
     ...(same.length > 1 ? [["Same statement", `${same.length} runs in the list · avg ${secs(same.reduce((a, e) => a + e.ms, 0) / same.length)} · p95 ${secs(p95(same.map((e) => e.ms)))}`]] : []),
@@ -648,6 +666,9 @@ function renderDetail() {
   fill(detailEl,
     h("div", { style: { display: "flex", alignItems: "center", gap: "8px" } },
       h("h2", {}, `${secs(row.ms)} query`),
+      S2.engineChip("s2", S2.connections().s2, { verb: "Ran" }),
+      sentBy(row.origin) ? h("span", { class: "s2-small s2-muted", title: "Guessed from the SQL" }, `sent by ${sentBy(row.origin)}`) : null,
+      row.own ? h("span", { class: "s2-badge plain", title: "A statement this Studio sent for itself" }, "Studio") : null,
       row.ok ? h("span", { class: "s2-badge ok" }, "Succeeded") : h("span", { class: "s2-badge err" }, "Failed"),
       row.kept ? h("span", { class: "s2-badge plain", title: KEPT_TITLE }, "Kept locally") : null,
       h("span", { class: "s2-spacer" }),
@@ -665,8 +686,8 @@ function renderDetail() {
       h("button", { class: "s2-btn", disabled: !ev, onclick: () => copy(ev.query_text ?? "") }, "Copy SQL"),
       S2.embedded() ? h("button", { class: "s2-btn", disabled: !ev, title: "Add this query to a test workload (Workload view) to replay it at a set rate",
         onclick: () => S2.openView("workload", { sql: S2W.strip(ev.query_text ?? ""), database: row.database ?? null }) }, "Add to workload") : null,
-      h("button", { class: "s2-btn", disabled: !ev || state.claude[key]?.running, title: "Claude looks at the query, the plan and the tables (read-only) and answers here",
-        onclick: () => askInApp(row, ev, t) }, "Ask Claude")),
+      S2.askClaudeButton({ disabled: !ev || state.claude[key]?.running, title: "Ask Claude: Claude looks at the query, the plan and the tables (read-only) and answers here",
+        onclick: () => askInApp(row, ev, t) })),
     claudeBox(key),
     t?.loading ? h("div", { class: "s2-small s2-muted" }, "Analyzing: EXPLAIN, plan statistics and table design (EXPLAIN doesn't run the query)…") : null,
     t?.error ? S2.errorBox(t.error) : null,
@@ -692,7 +713,7 @@ function renderPlanDetail() {
       `The trace keeps only runs of at least ${fmt.number(state.data?.trace?.duration_threshold_ms ?? 1000)} ms, and none of this statement's runs are in it. `,
       "The plan cache shows the statement with its values replaced (@ numbers, ^ strings), and keeps no user."),
     h("dl", { class: "qh-meta" }, [["Database", p.database ?? "–"], ["Aggregators", p.nodes.map((n) => `node ${n}`).join(", ")],
-      ...(p.origin ? [["Source", `${p.origin} (probably)`]] : []), ...(p.tables?.length ? [["Tables", p.tables.join(", ")]] : [])]
+      ...(p.origin ? [["Source", `${p.origin} (probably)${sentBy(p.origin) ? ` · ran on SingleStore, sent by ${sentBy(p.origin)}` : ""}`]] : []), ...(p.tables?.length ? [["Tables", p.tables.join(", ")]] : [])]
       .flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, String(v))])),
     planCacheTable(p),
     h("pre", { class: "s2-pre qh-sql" }, p.sql + (p.sql_truncated ? " …" : "")),
@@ -1269,7 +1290,7 @@ function renderUsage() {
       h("span", { class: "qh-seg", role: "group", "aria-label": "Period" },
         USAGE_DAYS.map(([v, label]) => h("button", { "aria-pressed": String(u.days === v), onclick: () => { if (u.days !== v) { u.days = v; loadUsage(); } } }, label)))),
     h("span", { class: "s2-spacer" }),
-    h("button", { class: "s2-btn", disabled: u.loading, onclick: () => loadUsage() }, u.loading ? h("span", { class: "s2-spinner" }) : null, "Refresh"));
+    h("button", { class: "s2-btn", disabled: u.loading, title: "Read the usage figures again", onclick: () => loadUsage() }, u.loading ? h("span", { class: "s2-spinner" }) : null, "↻ Refresh usage"));
   if (u.loading && !d) { fill(usageEl, controls, h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Reading the local history and the plan cache…")); return; }
   if (u.error) { fill(usageEl, controls, S2.errorBox(u.error)); return; }
   if (!d) { fill(usageEl, controls); return; }
@@ -1397,7 +1418,8 @@ function trendChart(title, note, series, value, format, kind, hourly, onPick, pi
   series.forEach((p, i) => {
     if (i % every === 0) svg.append(svgEl("text", { class: "tick", x: m.l + bw * (i + 0.5), y: H - 6, "text-anchor": "middle" }, bucketLabel(p.t, hourly)));
   });
-  const hint = h("div", { class: "hint" }, onPick ? "Click a bar to list its queries." : " ");
+  const pickText = onPick ? (kind === "line" ? "Click a point to list its queries." : "Click a bar to list its queries.") : " ";
+  const hint = h("div", { class: "hint" }, pickText);
   const show = (i) => { const p = series[i]; hint.textContent = `${bucketLabel(p.t, hourly)}: ${format(vals[i])}${kind !== "line" ? "" : ` · ${fmt.number(p.queries)} queries`}`; };
   if (kind === "line") {
     let d = "";
@@ -1422,7 +1444,7 @@ function trendChart(title, note, series, value, format, kind, hourly, onPick, pi
       svg.append(bar, hit);
     }
   });
-  svg.addEventListener("pointerleave", () => { hint.textContent = onPick ? "Click a bar to list its queries." : " "; });
+  svg.addEventListener("pointerleave", () => { hint.textContent = pickText; });
   return h("section", { class: "s2-card qh-chart" }, h("h3", {}, title, note ? h("span", { class: "s2-faint" }, note) : null), svg, hint);
 }
 
@@ -1495,7 +1517,7 @@ function renderTrends() {
         TREND_DAYS.map(([v, label]) => h("button", { "aria-pressed": String(!t.hourly && t.days === v), onclick: () => { t.hourly = false; if (t.days !== v) { t.days = v; loadTrends(); } else renderTrends(); } }, label)),
         h("button", { "aria-pressed": String(t.hourly), onclick: () => { t.hourly = true; renderTrends(); } }, "48 h, hourly"))),
     h("span", { class: "s2-spacer" }),
-    h("button", { class: "s2-btn", disabled: t.loading, onclick: () => loadTrends() }, t.loading ? h("span", { class: "s2-spinner" }) : null, "Refresh"));
+    h("button", { class: "s2-btn", disabled: t.loading, title: "Read the trends again from the local history", onclick: () => loadTrends() }, t.loading ? h("span", { class: "s2-spinner" }) : null, "↻ Refresh trends"));
   if (t.loading && !d) { fill(trendsEl, controls, h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Reading the local history…")); return; }
   if (t.error) { fill(trendsEl, controls, S2.errorBox(t.error)); return; }
   if (!d) { fill(trendsEl, controls); return; }

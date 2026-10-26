@@ -2,7 +2,7 @@
 
 Agreed with the owner; confirm scope and order before starting a round. Details of what was built are in the
 README and the git log; this file keeps what's next.
-Last updated 2026-10-26 (latest release 0.10.1).
+Last updated 2026-10-26 (latest release 0.10.1; design round from `studio-design-review.md` in this file).
 
 ## Released
 - **0.9.0** (2026-10-14) – Workload, SQL Editor tabs/history/SELECT builder, Security and Config views (read-only),
@@ -90,7 +90,52 @@ Last updated 2026-10-26 (latest release 0.10.1).
   only ~1.5 s after the page painted; a SAS **token renewal no longer blocks settings reads** (own lock: a slow SAS
   Logon held up every SAS call, e.g. 12 s behind a proxy).
 
+- Design round "SAS SpeedyStore Studio" (not committed yet, 2026-10-26; review: `../studio-design-review.md`,
+  screenshots before/after in `../studio-design-review/after/`):
+  - **Where code runs**, everywhere SQL or code runs: Run buttons say the target in words ("Run on SingleStore ·
+    prod", "Run in SAS Compute · Zeus", "Run in CAS · Zeus"; short "Run · S2" on narrow widths), *Run as* has a visible
+    label, the status line says "Running on SingleStore… / in SAS Compute… / in CAS…", results, the run history and
+    notebook cells carry an engine chip (`S2.engineChip`) with the connection, SAS runs on SingleStore libraries the
+    pushdown outcome ("→ pushed down to SingleStore: full / partial / none"); the run history stores the connection and
+    the pushdown verdict; Query History says "ran on SingleStore, sent by CAS / SAS Compute / SAS (embedded process)".
+  - **Top 10 quick wins** done: product name + mark in the rail and the titles (browser tab "SAS SpeedyStore Studio",
+    favicon: also the first-load 404); the editor's corner language chip removed (the Run button names the engine);
+    CPU chart end labels fit the card; dark-mode contrast ≥ 4.5:1 for the primary button, count pills, alert badge,
+    Run-as / SS / S2 colours (tokens in shared.css, `tests/test_contrast.py`); Open / Save as is a real modal
+    (`S2.modal`: role=dialog, aria-modal, focus inside, Tab trapped, Escape anywhere, focus back) with a title and ✕;
+    SQL Editor / Notebook as a flex column (a wrapping header no longer scrolls the page); labelled refreshes
+    ("Refresh all / database / library", "Refresh usage / trends") and "Clean up work tables…"; Notebook "■ Interrupt"
+    and "Restart kernel" with labels; one "Ask Claude" (`S2.askClaudeButton`, sparkle, secondary) in every view.
+  - Small bugs: Config's last column (narrower category / value columns, labelled filters "Category / Sync /
+    Settable"), "Click a point" under the p95 line chart, `--s2-accent`, badge case (Active, Open, Base table,
+    Columnstore), focus ring on every button, toast live region created at start.
+  - **Presenter mode** (rail "Present", `&present=1`; remembered per browser): ~20 % larger, connection names / hosts /
+    IPs / users / e-mails / Viya addresses masked as "Connection A", "host-1", "user1", "viya-1" in every view
+    (`S2.presenter`, labels from `presenter_labels`), query results and editors left as they are.
+  - **Studio's own queries** hidden in Cluster → Queries and Query History unless "Show Studio's own queries" is
+    ticked (`history_store.is_studio_query`: `/* s2-… */` marker, system-view reads, session checks).
+
 ## Backlog
+**Design review – what's left** (`../studio-design-review.md`; IDs from there)
+- Bigger ideas: a Home / overview start view (1), responsive tables with column priorities (3: L-6 Query text and
+  L-7 Security flags off-screen at 1024 px), one design-token layer for font sizes and the remaining hard-coded
+  colours (4: engine / source / AI tokens done), `S2.pageHeader` (5).
+- Presenter mode, what it doesn't do yet: hide demo-irrelevant chrome (keyboard-hint paragraphs, env-var notes, C-6);
+  inside Claude Desktop it's remembered only where the app frame may use browser storage (the browser view always
+  remembers it); masking is text-based, so a customer name used as a *database* or table name is only masked when it
+  is also a connection or user name.
+- Open: B-2 (example-query empty state), B-3 (grouped rail, README view table), B-4 (jargon tooltips), V-1 (one
+  primary per region; Connections still has several), V-2 (danger style), V-3 (button sizes in Security), V-5
+  (number formatting / # column in the SQL result grid), V-6/V-7, V-9/V-10, L-2 (cut-off stat cards), L-3, L-4
+  (Workload empty state), L-5 (pipeline cards), L-9 (Trends 2×2 grid, nice duration ticks), L-10, C-2 (pushdown verdict
+  is now in the status bar; still opt-in "Show pushdown"; no "SAS EP" quick filter), C-3 (contradictory SAS session
+  messages, bug 7), C-7, C-8 (column comments as chips), C-9, C-10, I-2 (sticky error toasts), I-3 (tree actions on
+  focus), I-4 (arrow keys in tabs), I-5 (skeletons), I-7, I-8, A-1 (`--s2-text-3` under 4.5:1; comes from the host in
+  Claude), A-3 (input borders), A-5 (colour-only signals).
+- Tests: Playwright's hit testing is off inside CSS-zoomed frames, so presenter-mode UI tests click with JS.
+- Naming: the desktop shortcut / installer still say "SingleStore Workspace" (`install.ps1`; renaming moves the
+  user's shortcut, so only with Jonas); the splash and every title say SAS SpeedyStore Studio.
+
 **Security**
 - Ideas: `REQUIRE X509 / SUBJECT` (mutual TLS); `PASSWORD EXPIRE` / `ACTIVATE`; "Drop view" for column views;
   re-apply locks after a cluster restart (restarts clear them).

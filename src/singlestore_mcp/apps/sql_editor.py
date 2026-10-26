@@ -185,6 +185,7 @@ def _stream_data(stream: result_stream.Stream, rows: list[dict[str, Any]], offse
         "rows": rows, "offset": offset,
         # Compatibility with the non-streamed result: row_count = rows read so far (the total once done).
         "row_count": st["loaded"], "truncated": st["capped"], "warnings": warnings,
+        "connection": _active_connection(),
     }
 
 
@@ -209,15 +210,16 @@ def sql_editor_query(sql: str, database: str | None = None, max_rows: int = resu
         data = {"needs_confirmation": True, "reason": str(exc), "sql": sql, "database": database}
         return tool_result("This statement changes data or schema and needs confirmation.", data)
     source = {"tab_id": tab_id, "tab": tab, "file": file}
+    conn = _active_connection()
     first = max(1, min(int(max_rows), result_stream.MAX_PAGE_ROWS))
 
     def record(s: result_stream.Stream) -> None:
         if s.error is not None:
             editor_state.add_history(sql, database, ok=False, kind="read", error=_error_text(s.error), source=source,
-                                     elapsed_ms=s.total_ms)
+                                     elapsed_ms=s.total_ms, connection=conn)
         else:
             editor_state.add_history(sql, database, ok=True, kind="read", elapsed_ms=s.total_ms, source=source,
-                                     rows=len(s.rows) if s.columns else None)
+                                     rows=len(s.rows) if s.columns else None, connection=conn)
 
     stream = result_stream.start(sql, database, stream_id=stream_id, replaces=replaces, on_finish=record)
     stream.wait_first(first)
@@ -228,6 +230,17 @@ def sql_editor_query(sql: str, database: str | None = None, max_rows: int = resu
     data = _stream_data(stream, stream.page(0, first))
     more = "" if data["done"] else "; more loading"
     return tool_result(f"{data['loaded']} row(s) in {data['elapsed_ms']} ms{more}", data)
+
+
+def _active_connection() -> str | None:
+    """The name of the active SingleStore connection (where the editor's SQL runs), for the result and history."""
+    try:
+        from .. import connections
+
+        p = connections.active()
+        return p.name if p else None
+    except Exception:  # noqa: BLE001 - a label only
+        return None
 
 
 def _error_text(exc: BaseException) -> str:
@@ -289,14 +302,15 @@ def sql_editor_execute(sql: str, database: str | None = None, max_rows: int = 10
     statement is sent once (never retried after a dropped connection)."""
     max_rows = max(1, min(int(max_rows), MAX_ROWS_LIMIT))
     source = {"tab_id": tab_id, "tab": tab, "file": file}
+    conn = _active_connection()
 
     def record(s: result_stream.Stream) -> None:
         if s.error is not None:
             editor_state.add_history(sql, database, ok=False, kind="write", error=_error_text(s.error), source=source,
-                                     elapsed_ms=s.total_ms)
+                                     elapsed_ms=s.total_ms, connection=conn)
         else:
             editor_state.add_history(sql, database, ok=True, kind="write", elapsed_ms=s.total_ms, source=source,
-                                     rows=len(s.rows) if s.columns else None, affected=s.affected)
+                                     rows=len(s.rows) if s.columns else None, affected=s.affected, connection=conn)
 
     stream = result_stream.start(sql, database, stream_id=stream_id, replaces=replaces, on_finish=record, write=True)
     stream.wait_first(max_rows)

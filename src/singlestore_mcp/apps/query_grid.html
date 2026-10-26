@@ -30,7 +30,7 @@
 .qg-pager .s2-btn { padding: 2px 7px; }
 .qg-pager select { border: 1px solid var(--s2-border); background: var(--s2-bg); border-radius: var(--s2-radius-sm); padding: 1px 4px; font-size: var(--s2-fs-xs); }
 .qg-grid { max-height: 460px; }
-html[data-display-mode="fullscreen"] .qg-grid { max-height: calc(100vh - 150px); }
+html[data-display-mode="fullscreen"] .qg-grid { max-height: calc(100vh / var(--s2-zoom) - 150px); }
 .qg-grid .s2-table { width: max-content; min-width: 100%; }
 .qg-grid .s2-table td { max-width: 320px; }
 .qg-grid .s2-table th { max-width: 320px; }
@@ -287,7 +287,7 @@ function renderGrid() {
     onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleSort(col); } },
   }, col, h("span", { class: "s2-sort" })));
   tbody = h("tbody");
-  return h("div", { class: "s2-table-wrap qg-grid" },
+  return h("div", { class: "s2-table-wrap qg-grid", "data-s2-data": "" },
     h("table", { class: "s2-table" },
       h("thead", {}, h("tr", {}, h("th", { class: "qg-rn" }, "#"), headCells)),
       tbody));

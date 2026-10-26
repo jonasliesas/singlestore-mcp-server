@@ -26,7 +26,7 @@
   .wl-kpi .v { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .wl-kpi .k { font-size: 11px; color: var(--s2-text-3); }
   .wl-progress { height: 6px; background: var(--s2-bg-3); border-radius: 3px; overflow: hidden; margin: 4px 0 8px; }
-  .wl-progress > div { height: 100%; background: var(--s2-accent, #7c3aed); transition: width .5s; }
+  .wl-progress > div { height: 100%; background: var(--s2-primary); transition: width .5s; }
   .wl-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; margin-bottom: 10px; }
   .wl-charts h3 { font-size: 12px; margin: 0 0 4px; color: var(--s2-text-2); }
   table.wl-t { width: 100%; border-collapse: collapse; font-size: var(--s2-fs-xs); font-variant-numeric: tabular-nums; }
@@ -47,7 +47,7 @@
   .wl-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; align-items: start; }
   .wl-layout.chat-open { grid-template-columns: minmax(0, 1fr) 360px; }
   @media (max-width: 860px) { .wl-layout.chat-open { grid-template-columns: minmax(0, 1fr); } }
-  .wl-chat { position: sticky; top: 8px; display: flex; flex-direction: column; height: min(780px, calc(100vh - 20px)); min-height: 360px;
+  .wl-chat { position: sticky; top: 8px; display: flex; flex-direction: column; height: min(780px, calc(100vh / var(--s2-zoom) - 20px)); min-height: 360px;
     border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius); overflow: hidden; background: var(--s2-bg); }
   .wl-chat[hidden] { display: none; }
   .wl-chat .top { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--s2-border-2); background: var(--s2-bg-2); font-size: var(--s2-fs-xs); }
@@ -72,7 +72,7 @@
   .wl-ask textarea { flex: 1; resize: none; min-height: 34px; max-height: 120px; font-size: var(--s2-fs-xs); }
   .wl-ask-opts { font-size: 11px; color: var(--s2-text-3); padding: 0 8px 6px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   .wl-ask-opts select { font-size: 11px; padding: 1px 4px; height: auto; width: auto; }
-  .wl-claude .count { background: var(--s2-info); color: #fff; border-radius: 999px; font-size: 10px; padding: 0 6px; font-weight: 600; margin-left: 4px; }
+  .wl-claude .count { background: var(--s2-primary); color: var(--s2-on-primary); border-radius: 999px; font-size: 10px; padding: 0 6px; font-weight: 600; margin-left: 4px; }
   .wl-sqlcell { max-width: 420px; font-family: var(--s2-mono, ui-monospace, Consolas, monospace); font-size: 11px; color: var(--s2-text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 </style>
 </head>
@@ -319,7 +319,7 @@ function statementCard(s, i) {
     h("textarea", { class: "s2-input", spellcheck: "false", placeholder: "SELECT … (placeholders: {{int:1:1000}}, {{pick:a|b}}, {{date:2024-01-01:2024-12-31}})",
       value: s.sql, oninput: (e) => upd("sql", e.target.value) }),
     s.history ? h("div", { class: "wl-note" }, `From the history: ${fmt.number(s.history.runs)} runs, median ${ms(s.history.median_ms)}`) : null,
-    t ? h("div", { class: "wl-test" }, t.loading ? [h("span", { class: "s2-spinner" }), " Running once…"]
+    t ? h("div", { class: "wl-test" }, t.loading ? [h("span", { class: "s2-spinner" }), " Running once on SingleStore…"]
       : t.error ? h("span", { class: "s2-error" }, t.error)
       : t.result.ran ? h("span", { class: "s2-badge ok" }, `${fmt.number(t.result.rows)}${t.result.more ? "+" : ""} rows in ${ms(t.result.ms)}`)
       : h("span", { class: "s2-badge warn" }, "Not run (writes aren't test-run); placeholders OK")) : null);
@@ -329,8 +329,11 @@ function renderSaveBar() {
   const b = document.getElementById("wl-save");
   if (b) b.disabled = state.saving || !state.dirty;
   const r = document.getElementById("wl-run");
-  if (r) r.textContent = state.dirty ? "Save and run" : "Run";
+  if (r) r.replaceChildren(...runLabel());
 }
+// The Run button says where the statements run: on SingleStore, through the active connection.
+const runLabel = () => S2.runContent("s2", S2.connections().s2, state.dirty ? "Save and run" : "Run");
+S2.onConnections(() => renderSaveBar());
 
 function definition() {
   const d = state.draft;
@@ -350,7 +353,8 @@ function definition() {
       h("input", { class: "s2-input", type: "text", placeholder: "Run label, e.g. baseline", value: state.label, style: { width: "180px" }, "aria-label": "Run label",
         oninput: (e) => { state.label = e.target.value; } }),
       running ? h("button", { class: "s2-btn danger", onclick: stopRun }, "Stop run")
-        : h("button", { id: "wl-run", class: "s2-btn primary", disabled: !d.name, onclick: start }, state.dirty ? "Save and run" : "Run")),
+        : h("button", { id: "wl-run", class: "s2-btn primary s2-run", disabled: !d.name, onclick: start,
+            title: `${state.dirty ? "Save the workload and run it" : "Run the workload"} ${S2.ENGINES.s2.prep} ${S2.engineText("s2", S2.connections().s2)}` }, ...runLabel())),
     h("p", { class: "wl-note" }, "Each statement is tagged /* workload:name stmt:id */ so it shows in Query History with the source \"Workload: name\". ",
       "Only SELECT / WITH runs unless \"Allow writes\" is on. Workloads and runs are saved in the workloads folder of the server's data folder."));
 }
@@ -390,11 +394,12 @@ function runPanel() {
   return h("div", {},
     h("div", { style: { display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" } },
       h("b", {}, `${r.label || "Run"} · ${r.id}`),
+      S2.engineChip("s2", r.connection ?? S2.connections().s2, { verb: live ? "Runs" : "Ran" }),
       h("span", { class: `s2-badge ${r.state === "done" ? "ok" : r.state === "error" ? "err" : live ? "info" : "warn"}` }, r.state === "starting" ? "connecting…" : live && r.elapsed_s >= r.duration_s ? "finishing…" : r.state),
       h("span", { class: "s2-small s2-faint" }, `${when(r.started)} · ${r.settings.concurrency} connections · ${r.settings.pacing === "rate" ? "fixed rate" : "as fast as possible"}${r.rtt_ms != null ? ` · network round trip ${ms(r.rtt_ms)}` : ""}`),
       h("span", { class: "s2-spacer" }),
       live ? h("button", { class: "s2-btn danger", onclick: stopRun }, "Stop") : null,
-      !live ? h("button", { class: "s2-btn ghost", title: "Ask Claude in the chat to interpret this run", onclick: () => S2.sendPrompt(`Analyze this SingleStore workload run and suggest what to tune:\n\n${runText(r)}`) }, "Ask Claude") : null,
+      !live ? S2.askClaudeButton({ title: "Ask Claude in the chat to interpret this run", onclick: () => S2.sendPrompt(`Analyze this SingleStore workload run and suggest what to tune:\n\n${runText(r)}`) }) : null,
       !live && S2.embedded() ? h("button", { class: "s2-btn ghost", title: "Statements slower than the cluster's trace threshold (or all of them with \"Trace every query\") are in Query History, Source = Workload: " + r.workload, onclick: () => S2.openView("history") }, "Open Query History") : null),
     live ? h("div", { class: "wl-progress", "aria-label": "Progress" }, h("div", { style: { width: `${progress}%` } })) : null,
     r.error ? h("div", { class: "s2-error", style: { margin: "6px 0" } }, r.error) : null,
@@ -463,7 +468,7 @@ function comparePanel() {
     h("div", { style: { display: "flex", gap: "10px", alignItems: "flex-end", flexWrap: "wrap", marginBottom: "10px" } },
       pick("base", "Before (baseline)"), pick("new", "After"),
       h("button", { class: "s2-btn primary", disabled: c.loading, onclick: runCompare }, c.loading ? h("span", { class: "s2-spinner" }) : null, "Compare"),
-      res ? h("button", { class: "s2-btn ghost", title: "Ask Claude in the chat to interpret the comparison", onclick: () => S2.sendPrompt(`Interpret this before/after comparison of a SingleStore workload and say whether the change helped:\n\n${compareText(res)}`) }, "Ask Claude") : null),
+      res ? S2.askClaudeButton({ title: "Ask Claude in the chat to interpret the comparison", onclick: () => S2.sendPrompt(`Interpret this before/after comparison of a SingleStore workload and say whether the change helped:\n\n${compareText(res)}`) }) : null),
     res ? [
       h("div", { class: "wl-kpis" },
         kpi("p50 before → after", `${ms(res.totals.base_p50_ms)} → ${ms(res.totals.new_p50_ms)}`),
@@ -632,13 +637,14 @@ function currentChat() {
   if (!chats.has(k)) chats.set(k, { id: `wc-${pageId}-${++chatSeq}`, messages: [], lastSeq: 0, waiting: false, waitingMode: null, job: null, unread: 0, tests: {}, picks: {} });
   return chats.get(k);
 }
-const claudeBtn = h("button", { class: "s2-btn wl-claude", title: "Ask Claude to build or vary this workload's statements", onclick: () => toggleChat() });
+const claudeBtn = h("button", { class: "s2-btn s2-ask wl-claude", title: "Ask Claude to build or vary this workload's statements (a chat panel on the right)", onclick: () => toggleChat() });
 function renderClaudeBtn() {
   const c = currentChat();
   const unread = [...chats.values()].reduce((n, x) => n + x.unread, 0);
-  claudeBtn.className = `s2-btn wl-claude${chat.open ? " primary" : ""}`;
+  claudeBtn.className = "s2-btn s2-ask wl-claude";
   claudeBtn.setAttribute("aria-pressed", String(chat.open));
-  claudeBtn.replaceChildren(...["Claude", c.waiting ? h("span", { class: "s2-spinner", style: { marginLeft: "4px" } }) : unread ? h("span", { class: "count" }, unread) : null].filter(Boolean));
+  claudeBtn.setAttribute("aria-pressed", String(chat.open));
+  claudeBtn.replaceChildren(...[S2.icon("sparkle"), "Ask Claude", c.waiting ? h("span", { class: "s2-spinner", style: { marginLeft: "4px" } }) : unread ? h("span", { class: "count" }, unread) : null].filter(Boolean));
 }
 
 const msgsEl = h("div", { class: "wl-msgs", "aria-live": "polite" });
@@ -756,7 +762,7 @@ function codeBlock(code, key) {
         renderChat(false);
       } }, "Test"),
       h("button", { class: "s2-btn ghost", onclick: () => S2.copy(code) }, "Copy")),
-    t ? h("div", { class: "res" }, t.loading ? [h("span", { class: "s2-spinner" }), " Running once…"]
+    t ? h("div", { class: "res" }, t.loading ? [h("span", { class: "s2-spinner" }), " Running once on SingleStore…"]
       : t.error ? h("span", { class: "s2-error" }, t.error)
       : t.result.ran ? h("span", { class: "s2-badge ok" }, `${fmt.number(t.result.rows)}${t.result.more ? "+" : ""} rows in ${ms(t.result.ms)}`)
       : h("span", { class: "s2-badge warn" }, "Not run: only read-only statements are test-run")) : null);

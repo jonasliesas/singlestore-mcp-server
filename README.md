@@ -152,8 +152,8 @@ In hosts that support [MCP Apps](https://modelcontextprotocol.io/seps/1865-mcp-a
 (e.g. Claude), the server's apps open as interactive windows in the chat. In
 other hosts the same tools return a normal text result.
 
-The apps are combined in the **SingleStore Workspace**. A slim rail on the
-left switches between its views:
+The apps are combined in the **SingleStore Workspace**, shown to customers as **SAS SpeedyStore Studio** (the name
+and mark at the top of the rail, the browser tab's title). A slim rail on the left switches between its views:
 
 | View | What it's for |
 |---|---|
@@ -169,7 +169,8 @@ left switches between its views:
 - Ask Claude ("open the SingleStore workspace"), or use `/singlestore-workspace`
   (optionally with a database and view, e.g. `/singlestore-workspace SASDP notebook`).
 - The tool behind it is `sql_editor(database?, sql?, view?, table?, new_tab?)`;
-  `view` is `sql`, `notebook`, `schema`, `pipelines` or `cluster`. `sql` goes
+  `view` is `sql`, `notebook`, `schema`, `pipelines`, `cluster`, `history`, `security`, `config`, `alerts`,
+  `workload` or `connections`. `sql` goes
   into the SQL Editor's active tab, or a new tab with `new_tab=true`.
 - Outside Claude: in your browser or as a desktop app, see
   [Browser and desktop window](#browser-and-desktop-window).
@@ -186,6 +187,38 @@ left switches between its views:
   at the bottom of the rail.
 - Buttons that run tools go through Claude, which may ask you to approve
   them; statements that change data also ask in the app first.
+
+**Where code runs.** Every place that runs SQL or code says where, in words and colour (a chip with an icon; on
+narrow windows just "S2" / "Compute" / "CAS" with the full text as tooltip):
+
+- *Before*: the Run button says the target, e.g. **▶ Run on SingleStore · prod**, **▶ Run in SAS Compute · Zeus**,
+  **▶ Run in CAS · Zeus** (SingleStore: the active connection; SAS: the tab's SAS Viya connection). *Run as* has a
+  visible label. The Workload's Run button says the same.
+- *While it runs*: "Running on SingleStore…", "Running in SAS Compute…", "Running in CAS…".
+- *After*: the result's status line, the SQL Editor's run history and the Notebook cell's status start with a chip
+  **SingleStore · prod** / **SAS Compute · Zeus** / **CAS · Zeus**. PROC SQL / FedSQL / CAS on a SingleStore library
+  add the pushdown outcome next to it: "→ pushed down to SingleStore: full / partial / none".
+- *Notebook*: each cell's header shows its engine: SingleStore (SQL), SAS Compute (SAS), Python (local).
+- *Query History*: every row ran on SingleStore; rows from SAS keep their Source (SAS EP / SAS CAS / SAS
+  in-database) and say "ran on SingleStore, sent by CAS / SAS Compute / SAS (embedded process)".
+
+Colours (shared.css, ≥ 4.5:1 in light and dark, checked by `tests/test_contrast.py`): SingleStore blue, SAS Compute
+orange, CAS indigo, Python slate; the *Run as* languages use the same ones (PROC SQL / FedSQL orange, plain SAS teal).
+
+**Presenter mode.** **Present** at the bottom of the rail (or `&present=1` / `&present=0` on a browser link) switches
+it for every view; the browser remembers it. Text is ~20 % larger, and identifying metadata is replaced with neutral
+labels, the same label for the same value in every view while the server runs: connection names → "Connection A",
+hosts and IP addresses → "host-1", user names and e-mail addresses → "user1", SAS Viya addresses → "viya-1". The
+labels come from the server (`presenter_labels`): saved SingleStore and SAS Viya connections, this computer's user and
+host name, the cluster's user list, plus e-mails / IPs / host names a page finds. Only what's on screen changes (text,
+tooltips, labels; form fields holding such a value are blurred until focused); what the views send stays real. Not
+masked: the SQL / code editors and query results (a result cell is replaced only when it is exactly one of the known
+values). Claude's context still has the real names (it's told presenter mode is on).
+
+**The Studio's own queries.** The Workspace's housekeeping (the monitors, alert checks, schema and session reads) is
+hidden from Cluster → Queries and Query History unless **Show Studio's own queries** is ticked (remembered per
+browser). They are the statements marked `/* s2-… */`, and — because the plan cache drops comments — system-view reads
+and session checks (`SELECT 1`, `NOW()`, `@@variables`, `SHOW`), which other tools send too.
 
 ### SQL Editor
 
@@ -462,8 +495,9 @@ the same SQL can be tried SingleStore-native and through SAS side by side.
 - The result pane has **Result**, **Log** (the generated SAS code with
   **Copy code**, then the SAS log with errors, warnings and notes in colour)
   and **Pushdown** tabs. Colour badges show the language everywhere: S2 blue,
-  PROC SQL / FedSQL orange, CAS purple, SAS (plain code) teal; also in the
-  editor's corner and in the run history.
+  PROC SQL / FedSQL orange, CAS indigo, SAS (plain code) teal, also in the run
+  history; the Run button names the engine (*Run in SAS Compute · Zeus*, see
+  [Where code runs](#singlestore-workspace)). The badge in the editor's corner is gone (it covered the first line).
 - **Writes**: reads run straight away. Statements that write anywhere but
   WORK (Compute) or CASUSER (CAS) ask first, as do plain SAS steps that write
   outside WORK or run system commands, `proc datasets`, `caslib` statements
@@ -2270,6 +2304,13 @@ while Claude has the server's .exe open.
 - `test_tools.py`: model-visible tools, including Claude's 50,000-character result limit; app-only tools;
   error handling and safety guards; local writes.
 - `test_workload.py`: placeholders, validation and run comparison (offline), and a real 20 s run (cluster).
+- `test_contrast.py` (offline): WCAG contrast of the engine-chip, primary-button, alert-badge, caslib-badge and
+  "Ask Claude" colours in `shared.css`, light and dark. `test_presenter.py` (offline): presenter-mode labels and the
+  "Studio's own queries" classifier.
+- `ui/test_studio_ui.py`: where code runs (S2 chips, run history, Notebook cells, Workload; with `--sas` also SAS
+  Compute, CAS and the pushdown chip), the Open / Save as dialogs' keyboard behaviour, presenter mode (no real
+  connection name, host, user or e-mail in any view; results unmasked; off restores), the Studio's own queries hidden,
+  and contrast measured on the rendered page in both themes.
 - `test_notebook.py`, `test_compare.py`, `test_assistants.py`, and `ui/test_apps.py` (Workspace views,
   SQL Editor, Query History, Workload, every standalone app). When a UI test fails, a screenshot is saved
   in `tests/ui/_artifacts/`. The UI fixtures (`ui`, the screenshot hook) are in `tests/conftest.py`, so one
