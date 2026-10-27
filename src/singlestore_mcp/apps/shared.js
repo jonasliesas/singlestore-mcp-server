@@ -130,6 +130,8 @@ window.addEventListener("message", (ev) => {
   else if (msg?.type === "s2-sas-connection-changed") window.dispatchEvent(new CustomEvent("s2:sas-connection-changed", { detail: msg }));
   else if (msg?.type === "s2-files-changed") window.dispatchEvent(new CustomEvent("s2:files-changed", { detail: msg.change }));
   else if (msg?.type === "s2-presenter") S2.presenter.set(Boolean(msg.on));
+  // The cluster / SAS Viya answer again after a network break (the Workspace's connection-health line).
+  else if (msg?.type === "s2-reconnected") window.dispatchEvent(new CustomEvent("s2:reconnected", { detail: msg }));
 });
 
 // A file or folder was renamed or deleted in a file browser: {from, to (null when deleted), folder, version,

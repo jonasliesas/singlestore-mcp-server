@@ -2,7 +2,7 @@
 
 Agreed with the owner; confirm scope and order before starting a round. Details of what was built are in the
 README and the git log; this file keeps what's next.
-Last updated 2026-10-26 (latest release 0.10.1; design round from `studio-design-review.md` in this file).
+Last updated 2026-10-27 (latest release 0.10.1; design round from `studio-design-review.md`; network-break recovery).
 
 ## Released
 - **0.9.0** (2026-10-14) – Workload, SQL Editor tabs/history/SELECT builder, Security and Config views (read-only),
@@ -115,6 +115,29 @@ Last updated 2026-10-26 (latest release 0.10.1; design round from `studio-design
   - **Studio's own queries** hidden in Cluster → Queries and Query History unless "Show Studio's own queries" is
     ticked (`history_store.is_studio_query`: `/* s2-… */` marker, system-view reads, session checks).
 
+- Network breaks without a restart (not committed yet, 2026-10-27; README → After a network break): `netguard.py` –
+  short TCP keepalive on every cluster / Viya connection (10 s + 3×5 s instead of Windows' 2 h) and bounded connects
+  (10 s TCP, 20 s cluster login); a watcher (2 s) that closes connections opened from a local address the route no
+  longer uses (VPN on another gateway) and notices sleep / resume; idle pooled connections pinged (≤ 3 s) after such an
+  event; a full pool waits ≤ 2 min; readable "… reconnects by itself" errors; a write cut off mid-way is never re-sent
+  ("may or may not have run"); kept-alive Viya connections replaced after an event, a silent GET retried fresh; SAS
+  sessions Viya ended meanwhile restarted with a one-time notice; SAS pre-warm retries after 10 s / at once on
+  `online`; a token renewal over a dead network keeps the sign-in; notebook kernels reconnect at the next cell;
+  health probes while down; Workspace line "Connection to SingleStore lost – retrying…" (`connection_health`) and
+  `s2-reconnected` to the views. Tests: `test_network_recovery.py` (offline, fault proxy + fake MySQL / Viya, MCP
+  protocol), `ui/test_network_ui.py` (cluster through a fault proxy).
+- SQL Editor (not committed yet): **Ask Claude speaks the tab's SAS dialect** – the question carries the tab's
+  language, library / caslib, tables and known columns, and once per session and language a SAS guide
+  (`sas_guide.py`, rules checked in SAS); the **SAS function matrix** (`data/sas_functions.json`, SAS/ACCESS's own
+  function map + every function run in PROC SQL / FedSQL / CAS with the pushdown verdict; `scripts/sas_functions.py`
+  re-verifies and renders the README table) feeds the guide and a new pre-run **Check the functions** bar
+  (unsupported functions, functions that stop pushdown on SingleStore libraries); explicit pass-through
+  (`connect` / `disconnect`) no longer asks for confirmation; the FedSQL Pushdown verdict is *Pulled* when the
+  driver trace shows only plain table reads (the plan claimed *Push Down* for GROUP BY + ORDER BY / LIMIT); every
+  Compute run resets syntax check mode / `&SYSCC` (one failed DATA step made all later runs of the session fail).
+  Measured: 15 / 80 → 80 / 80 of the assistant's answers run (README). Tests: `test_sas_guide.py`, `test_assistants.py`
+  (`--assistants --sas`).
+
 ## Backlog
 **Design review – what's left** (`../studio-design-review.md`; IDs from there)
 - Bigger ideas: a Home / overview start view (1), responsive tables with column priorities (3: L-6 Query text and
@@ -143,6 +166,19 @@ Last updated 2026-10-26 (latest release 0.10.1; design round from `studio-design
   node log files shipped (Fluent Bit) into a table; then an Audit tab with filters. Today: guidance tab only.
 
 **SAS in the Workspace**
+- Ask Claude in SAS tabs (done, not committed – see "Since 0.10.1"): ideas left – a read-only SAS tool for the
+  assistant (columns of any SAS table / caslib, `validate` a PROC SQL statement) so it doesn't depend on the columns
+  the editor already knows; the "in the Claude chat" mode only gets the tab's language in the question, not the guide.
+- CAS: no way to load a caslib's source table into the Workspace's CAS session from the editor (FedSQL in CAS only
+  sees loaded tables; a PROC CASUTIL load in plain SAS code runs in Compute's own CAS session). A "Load into this
+  session" tree action (`table.loadTable`, session scope) would let SpeedyStore caslib tables be queried live.
+- FedSQL on a SingleStore library: a SELECT with a subquery in WHERE fails as the editor runs it (`CREATE TABLE
+  WORK."_S2R…" AS …` is pushed down whole → SingleStore "Unknown database 'WORK'"; plain `proc fedsql; create table
+  work.x as …` fails the same way, so it's FedSQL's). The assistant writes a derived-table join instead; the editor
+  could warn before the run, or fetch such a SELECT without the CREATE TABLE (to check with SAS).
+- Function matrix: re-run `scripts/sas_functions.py --verify` after a Viya / SAS/ACCESS update; rows for
+  DATEPART / TIMEPART / HOUR … need a datetime column in the test tables; SQL_FUNCTIONS=ALL rows are from the engine's
+  map, not run (the S2 library is assigned without it).
 - FedSQL SQL text only for the automatic S2 library (DRIVER_TRACE is a LIBNAME option): libraries from the startup
   code could get `driver_trace=SQL …` in their own libname files if Jonas wants the text for them too.
 - A second Compute session per connection (two tabs running at once) – today they queue; only if the queue hurts.
@@ -183,6 +219,11 @@ Last updated 2026-10-26 (latest release 0.10.1; design round from `studio-design
   Design proposal locally in `docs/MULTI_USER_DESIGN.md` (not committed).
 
 ## Known small issues
+- Network breaks: a query whose connection goes silent *without* a route change or sleep (e.g. a firewall that drops
+  packets mid-query) still waits for the TCP keepalive (~25 s) before it's retried; a SAS job POST on a kept-alive
+  connection that went silent the same way waits for its HTTP timeout (60 s) – it's not re-sent. Entra (token) logins
+  to SingleStore: a silent token renewal while offline reports "sign in again" until the network is back.
+  SAS cells in notebooks (saspy) have their own sessions and aren't covered.
 - Notebook on Windows: calls waiting in C (socket read, lock, long C loop) still can't be interrupted – Restart
   kernel is offered after 5 s.
 - Other views rebuild their whole page on refresh like the Cluster Monitor did; if a click is lost there too, use

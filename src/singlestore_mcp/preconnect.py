@@ -52,8 +52,10 @@ def _close(conns: list[Any]) -> None:
 
 
 def _ping(conn: Any) -> None:
-    raw = getattr(conn, "_conn", conn)
-    raw.ping(reconnect=False)
+    # Bounded (netguard.PING_TIMEOUT_S): after a VPN switch or sleep a ping on a dead connection would otherwise hang.
+    from . import netguard
+
+    netguard.ping(getattr(conn, "_conn", conn))
 
 
 class Preconnected:

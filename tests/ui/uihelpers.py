@@ -30,8 +30,10 @@ class Errors:
 
 
 def frame_title(frame: Any) -> tuple[str, int]:
+    """(title, length of the page's text); the Studio splash's logo and status don't count as the page's text."""
     try:
-        return frame.evaluate("[document.title, document.body ? document.body.innerText.length : 0]")
+        return frame.evaluate("[document.title, document.body ? document.body.innerText.length"
+                              " - (document.getElementById('s2-splash')?.innerText.length ?? 0) : 0]")
     except Exception:  # noqa: BLE001 - detached / navigating
         return "", 0
 

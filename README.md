@@ -440,6 +440,11 @@ the same SQL can be tried SingleStore-native and through SAS side by side.
   **plain SAS code**, unwrapped: the statement at the cursor takes the whole
   step through its `run;` / `quit;`. Its printed output shows in the result
   pane.
+- Every Compute run starts with `options obs=max replace nosyntaxcheck;
+  %let syscc=0;`: a failed step (a DATA step reading a table that doesn't
+  exist, say) put the session in SAS's syntax check mode (OBS=0) with `&SYSCC`
+  set, and every later run in it then ended *SAS reported an error* without
+  output until the session was restarted.
 - PROC SQL: the library you pick is used for one-level names
   (`options user=`); without one they're WORK tables, as in SAS. FedSQL
   one-level names are WORK tables; in CAS they're in the picked caslib
@@ -562,7 +567,9 @@ After a FedSQL run the editor reads that file into `WORK._S2TRC` (not through th
 log: long lines would wrap), deletes it, and the Pushdown tab lists the
 statements as SingleStore got them (the `DEFAULT:` lines, names in their own
 case; `WHERE 1=0` probes left out); the verdict still comes from the FedSQL
-plan (`_method`). Libraries assigned elsewhere (startup code) have no trace:
+plan (`_method`) – except when the trace shows SingleStore got only plain table
+reads: the plan says *Push Down* then too (a GROUP BY with `ORDER BY` / `LIMIT`,
+`LIMIT` alone), so the verdict is *Pulled into SAS*. Libraries assigned elsewhere (startup code) have no trace:
 for them FedSQL shows the plan's verdict only. Tried and not working for FedSQL:
 `options sastrace=',,,d'` / `',,,ds'` (no trace lines) and
 `%log4sas_logger(App.TableServices, 'level=trace')` (nothing in the log).
@@ -573,6 +580,176 @@ time) and opens the History view on it: searching for it when the History list
 has its runs, otherwise (every run under the 1 s trace threshold – typical for
 a pushed-down count) on its **plan-cache entry**, listed at the top, selected
 and marked *from the SQL Editor*, with its totals, parameterized text and tuning.
+
+**Ask Claude in a SAS tab**
+
+In a tab that runs PROC SQL, FedSQL or FedSQL in CAS, **Ask Claude** answers in
+that dialect (never SingleStore SQL), as bare statements the editor wraps (no
+`proc sql; … quit;` unless you ask for a SAS program, e.g. explicit
+pass-through, a DATA step or a macro). The question carries:
+
+- the tab's language, library / caslib (and the SingleStore database behind
+  it, so Claude can check real table and column names with its read-only
+  tools), the library's tables (caslibs: loaded or not), the columns the editor
+  already knows (tables in the editor's SQL first) and the tab's options;
+- once per Claude session and language, a compact **SAS guide** for that
+  language only (`sas_guide.py`, ~1.1–1.4 K tokens): how the editor wraps and
+  splits statements, what may be written without asking (WORK / CASUSER), the
+  dialect's rules and pitfalls, checked in SAS (see below), and the function
+  lists from the function matrix (pushed down / runs in SAS / not available).
+
+Pitfalls the guides cover (each one tried in the Workspace's SAS session):
+PROC SQL has no `LIMIT` (OUTOBS in ⚙, or a plain `proc sql outobs=10;` step;
+`(obs=)` limits the rows read), `CALCULATED`, remerging, date literals
+`'01JAN2024'd`, explicit pass-through only as one plain SAS step
+(`connect using S2;` reuses the library's connection – the editor's write check
+treats `connect` / `disconnect` as reads, `execute … by` still asks).
+FedSQL: one-level names are WORK (always `library.table`), SASHELP can't be read
+(a concatenated library: copy it to WORK first), unquoted names are upper case so
+lower-case SingleStore tables need `S2."cars_big"`, no `CALCULATED` / data set
+options / CTEs / window functions / `catx`, dates as `DATE '2024-01-01'`
+(`'01JAN2024'd` is a syntax error), `LIMIT … OFFSET` – which FedSQL never sends
+to SingleStore (the driver trace shows a plain table read; a GROUP BY with
+`ORDER BY` / `LIMIT` isn't pushed either), so `select * from S2."cars_big" limit 5`
+reads all 20 M rows into SAS and took the test's Compute session down; PROC SQL's
+`(obs=5)` does go down as `LIMIT` – , `DROP TABLE … FORCE`
+instead of `{options replace=true}` (CAS only), and on a SingleStore library no
+subquery in `WHERE` (`x > (select avg(x) …)` / `in (select …)`: FedSQL pushes the
+editor's whole `CREATE TABLE WORK… AS` to SingleStore → *Unknown database
+'WORK'*; a join with a derived table works and is pushed down). FedSQL in CAS: only SELECT /
+CREATE TABLE AS / DROP TABLE, no CTEs, `ORDER BY` only with `LIMIT` (the result
+is a CAS table), only tables loaded in CAS (a SingleStore caslib's unloaded source
+table "does not exist"; a session-scope load from plain SAS code lands in another
+CAS session), `create table CASUSER.x {options replace=true} as …`.
+
+Measured with 20 realistic questions per language (`top 10 makes by average
+MSRP`, `join with a WORK table`, `count per month`, `create a table in WORK /
+CASUSER`, `date filter`, `explicit pass-through` …), the generated SQL run in
+SAS against SASHELP, the S2 library, PUBLIC / CFANS caslibs and WORK / CASUSER
+(Sonnet, *Balanced*):
+
+<!-- sas-assistant-results:begin -->
+| Tab language | Before (0.10.1) | After |
+|---|---|---|
+| PROC SQL | 8 / 20 | 20 / 20 |
+| FedSQL | 0 / 20 | 20 / 20 |
+| FedSQL in CAS | 3 / 20 | 20 / 20 |
+| Plain SAS (asked in a PROC SQL tab) | 4 / 20 | 20 / 20 |
+
+"Pass" = every SQL block of the answer ran without a SAS error and without
+asking for a write confirmation (each answer in a fresh SAS session; runs that
+failed only because Viya couldn't start a session were run again). Typical
+mistakes before: `LIMIT` in PROC SQL, one-level names in FedSQL (WORK, not the
+tab's library), `FETCH FIRST` / CTEs / `ORDER BY` without `LIMIT` in CAS,
+`catx` / window functions in FedSQL, tables created in the SingleStore database
+`MyDB` instead of WORK, SingleStore SQL (`information_schema`) in a SAS tab.
+<!-- sas-assistant-results:end -->
+
+**SAS function matrix**
+
+[`data/sas_functions.json`](src/singlestore_mcp/data/sas_functions.json) says,
+per function, whether PROC SQL, FedSQL and FedSQL in CAS have it and whether
+it is **pushed down** to SingleStore, its SingleStore equivalent and what to use
+instead. Sources: SAS/ACCESS to SingleStore's own function map (the LIBNAME
+options `SQL_FUNCTIONS_COPY=` – default list – and `SQL_FUNCTIONS=ALL`, dumped
+from Zeus), the FedSQL / CAS FedSQL / PROC SQL references on
+documentation.sas.com, and a run of every function in SAS
+(`scripts/sas_functions.py --verify`: PROC SQL and FedSQL on `S2.CARS` /
+`S2.PRDSAL`, FedSQL in CAS on the SpeedyStore table `CFANS.WORKFORCE_DATA`;
+the Pushdown verdict decides "pushed down"). It's used in three places:
+
+- the assistant's SAS guide (prefer functions that push down, say when one
+  doesn't, suggest the alternative);
+- the editor's pre-run check: before a SAS statement runs, **Check the
+  functions** lists functions the tab's dialect hasn't got and – when the
+  statement reads a SingleStore library / caslib – functions that stop pushdown
+  (*Run anyway* / *Cancel*; `vendor/sas-funcs.js`, the same rules as
+  `sas_functions.check`);
+- this table (`scripts/sas_functions.py --table` rewrites it from the JSON).
+
+✓ ↓ supported and pushed down · ✓ supported, runs in SAS / CAS · ✓ (↓) CAS:
+the SAS Embedded Process does part of it (e.g. the grouping) · ✓ (ALL) PROC SQL
+pushes it only with `SQL_FUNCTIONS=ALL` on the library · ✗ not available ·
+\* from the documentation, not run.
+
+<!-- sas-functions:begin -->
+| Function | Category | PROC SQL | FedSQL | FedSQL in CAS | SingleStore | Instead |
+|---|---|---|---|---|---|---|
+| `COUNT` | aggregate | ✓ ↓ | ✓ ↓ | ✓ (↓) | COUNT |  |
+| `COUNT(DISTINCT)` | aggregate | ✓ ↓ | ✓ ↓ | ✓ (↓) | COUNT(DISTINCT) |  |
+| `SUM` | aggregate | ✓ ↓ | ✓ ↓ | ✓ (↓) | SUM |  |
+| `AVG` | aggregate | ✓ ↓ | ✓ ↓ | ✓ (↓) | AVG |  |
+| `MEAN` | aggregate | ✓ ↓ | ✓ ↓ | ✓ (↓) | AVG | AVG |
+| `MIN` | aggregate | ✓ ↓ | ✓ ↓ | ✓ (↓) | MIN |  |
+| `MAX` | aggregate | ✓ ↓ | ✓ ↓ | ✓ (↓) | MAX |  |
+| `STD` | aggregate | ✓ | ✓ ↓ | ✓ (↓) | STDDEV_SAMP | PROC SQL: not pushed down - VAR (pushed down) and sqrt() it, or explicit pass-through with STDDEV_SAMP. FedSQL / CAS: STD or STDDEV |
+| `STDDEV` | aggregate | ✗ | ✓ ↓ | ✓ (↓) | STDDEV_SAMP | PROC SQL: STD |
+| `VAR` | aggregate | ✓ ↓ | ✗ | ✗ | VAR_SAMP | FedSQL / CAS: VARIANCE |
+| `VARIANCE` | aggregate | ✗ | ✓ ↓ | ✓ (↓) | VAR_SAMP | PROC SQL: VAR |
+| `N` | aggregate | ✓ ↓ | ✓ ↓ | ✓ (↓) | COUNT | COUNT(x) |
+| `NMISS` | aggregate | ✓ ↓ | ✓ | ✓ (↓) | SUM(x IS NULL) |  |
+| `MEDIAN` | aggregate | ✓ | ✗ | ✗ | MEDIAN | PROC SQL only (runs in SAS); in FedSQL / CAS MEDIAN is a row function, not an aggregate |
+| `RANGE` | aggregate | ✓ ↓ | ✓ | ✓ (↓) | MAX(x) - MIN(x) |  |
+| `ABS` | numeric | ✓ ↓ | ✓ ↓ | ✓ ↓ | ABS |  |
+| `CEIL` | numeric | ✓ ↓ | ✓ ↓ | ✓ ↓ | CEILING |  |
+| `FLOOR` | numeric | ✓ ↓ | ✓ ↓ | ✓ ↓ | FLOOR |  |
+| `ROUND` | numeric | ✓ (ALL) | ✓ ↓ | ✓ ↓ | ROUND | PROC SQL on SingleStore: ROUND isn't pushed down (only with SQL_FUNCTIONS=ALL); FLOOR(x * 100 + 0.5) / 100 is |
+| `INT` | numeric | ✓ | ✗ | ✗ | TRUNCATE(x, 0) | FLOOR (non-negative values) or CASE; FedSQL / CAS have no INT |
+| `MOD` | numeric | ✓ ↓ | ✓ ↓ | ✓ ↓ | MOD |  |
+| `SQRT` | numeric | ✓ ↓ | ✓ ↓ | ✓ ↓ | SQRT |  |
+| `EXP` | numeric | ✓ ↓ | ✓ ↓ | ✓ ↓ | EXP |  |
+| `LOG` | numeric | ✓ ↓ | ✓ ↓ | ✓ ↓ | LOG |  |
+| `LOG10` | numeric | ✓ ↓ | ✓ ↓ | ✓ ↓ | LOG10 |  |
+| `SIGN` | numeric | ✓ ↓ | ✓ ↓ | ✓ ↓ | SIGN |  |
+| `POWER` | numeric | ✗ | ✓ ↓ | ✓ ↓ | POWER | PROC SQL: x ** 2 |
+| `SIN` | numeric | ✓ ↓ | ✓ ↓ | ✓ ↓ | SIN |  |
+| `UPCASE` | character | ✓ ↓ | ✓ ↓ | ✓ ↓ | UCASE | FedSQL / CAS also have UPPER |
+| `UPPER` | character | ✓ ↓ | ✓ ↓ | ✓ ↓ | UPPER | PROC SQL: UPCASE |
+| `LOWCASE` | character | ✓ ↓ | ✓ ↓ | ✓ ↓ | LCASE |  |
+| `LOWER` | character | ✓ ↓ | ✓ ↓ | ✓ ↓ | LOWER |  |
+| `SUBSTR` | character | ✓ (ALL) | ✓ ↓ | ✓ ↓ | SUBSTRING | PROC SQL on SingleStore: not pushed down (only with SQL_FUNCTIONS=ALL); filter with LIKE 'abc%' or use explicit pass-through |
+| `SUBSTRING` | character | ✓ | ✓ ↓ | ✓ ↓ | SUBSTRING | PROC SQL: SUBSTR |
+| `LENGTH` | character | ✓ (ALL) | ✓ ↓ | ✓ ↓ | LENGTH | PROC SQL on SingleStore: not pushed down (only with SQL_FUNCTIONS=ALL) |
+| `TRIM` | character | ✓ | ✓ ↓ | ✓ ↓ | TRIM | PROC SQL on SingleStore: STRIP (pushed down as TRIM) |
+| `STRIP` | character | ✓ ↓ | ✓ ↓ | ✓ ↓ | TRIM |  |
+| `TRIMN` | character | ✓ ↓ | ✓ ↓ | ✓ ↓ | RTRIM |  |
+| `LEFT` | character | ✓ | ✓ ↓ | ✓ ↓ | LTRIM | PROC SQL on SingleStore: STRIP (pushed down) |
+| `COMPRESS` | character | ✓ (ALL) | ✓ ↓ | ✓ ↓ | REPLACE | PROC SQL on SingleStore: TRANWRD(x, ' ', '') (pushed down as REPLACE) |
+| `TRANWRD` | character | ✓ ↓ | ✓ ↓ | ✓ ↓ | REPLACE |  |
+| `INDEX` | character | ✓ ↓ | ✓ ↓ | ✓ ↓ | LOCATE |  |
+| `FIND` | character | ✓ | ✓ ↓ | ✓ ↓ | LOCATE / INSTR | INDEX (PROC SQL: pushed down as LOCATE) |
+| `SCAN` | character | ✓ | ✓ ↓ | ✓ ↓ | SUBSTRING_INDEX | explicit pass-through with SUBSTRING_INDEX |
+| `CATX` | character | ✓ | ✗ | ✗ | CONCAT_WS | Not in FedSQL / CAS: trim(a) \|\| ' - ' \|\| trim(b). PROC SQL on SingleStore: a \|\| ' - ' \|\| b pushes down (catx() doesn't) |
+| `CATS` | character | ✓ | ✗ | ✗ | CONCAT(TRIM(..)) | trim(a) \|\| trim(b); PROC SQL on SingleStore: a \|\| b pushes down |
+| `\|\|` | character | ✓ ↓ | ✓ ↓ | ✓ ↓ | CONCAT | FedSQL / CAS keep CHAR padding: trim(a) \|\| trim(b) |
+| `REPEAT` | character | ✓ (ALL) | ✓ ↓ | ✓ ↓ | REPEAT |  |
+| `SOUNDEX` | character | ✓ (ALL) | ✗ | ✗ | SOUNDEX | PROC SQL only |
+| `REVERSE` | character | ✓ | ✓ ↓ | ✓ ↓ | REVERSE |  |
+| `PROPCASE` | character | ✓ | ✓ ↓ | ✓ ↓ | - |  |
+| `TRANSLATE` | character | ✓ | ✗ | ✗ | - | PROC SQL only; FedSQL / CAS: nested REPLACE-style tranwrd() |
+| `COALESCEC` | character | ✓ | ✓ ↓ | ✓ ↓ | COALESCE | COALESCE (PROC SQL: pushed down) |
+| `TODAY` | date | ✓ ↓ | ✓ ↓ | ✓ | CURDATE() | CAS: compare with a DATE literal (TODAY() keeps the query in CAS) |
+| `YEAR` | date | ✓ ↓ | ✓ ↓ | ✓ ↓ | YEAR |  |
+| `MONTH` | date | ✓ ↓ | ✓ ↓ | ✓ ↓ | MONTH |  |
+| `DAY` | date | ✓ ↓ | ✓ ↓ | ✓ ↓ | DAYOFMONTH |  |
+| `QTR` | date | ✓ ↓ | ✓ ↓ | ✓ ↓ | QUARTER |  |
+| `WEEKDAY` | date | ✓ ↓ | ✓ ↓ | ✓ ↓ | DAYOFWEEK |  |
+| `INTNX` | date | ✓ | ✓ ↓ | ✓ ↓ | DATE_ADD | PROC SQL on SingleStore: filter with date literals, group with YEAR() / MONTH() (pushed down) |
+| `INTCK` | date | ✓ | ✓ ↓ | ✓ ↓ | TIMESTAMPDIFF / PERIOD_DIFF | PROC SQL on SingleStore: YEAR() / MONTH() arithmetic, or explicit pass-through with TIMESTAMPDIFF |
+| `MDY` | date | ✓ | ✓ ↓ | ✓ ↓ | MAKEDATE | a date literal ('01JAN2024'd / DATE '2024-01-01') |
+| `DATEPART` | date | ✓ (ALL) | ✗ | ✗ | DATE | PROC SQL only (FedSQL / CAS: CAST(x AS DATE)) |
+| `EXTRACT` | date | ✗ | ✗ | ✗ | EXTRACT | YEAR() / MONTH() / DAY() |
+| `CURRENT_DATE` | date | ✗ | ✓ ↓ | ✓ | CURRENT_DATE | PROC SQL: TODAY() |
+| `PUT (date format)` | conversion | ✓ | ✓ | ✓ ↓ | DATE_FORMAT | group by YEAR(d), MONTH(d) (pushed down) and format the result |
+| `COALESCE` | null | ✓ ↓ | ✓ ↓ | ✓ ↓ | COALESCE |  |
+| `IFN` | null | ✓ | ✗ | ✗ | IF() | CASE WHEN … THEN … ELSE … END (pushed down everywhere) |
+| `IFC` | null | ✓ | ✗ | ✗ | IF() | CASE WHEN … THEN … ELSE … END (pushed down everywhere) |
+| `NULLIF` | null | ✗ | ✓ ↓ | ✓ ↓ | NULLIF | PROC SQL: CASE WHEN x = v THEN . ELSE x END |
+| `MISSING` | null | ✓ | ✓ ↓ | ✓ ↓ | x IS NULL | x IS NULL (pushed down) |
+| `PUT (number)` | conversion | ✓ | ✓ | ✓ ↓ | FORMAT | aggregate first, format in the result (format= in PROC SQL) |
+| `INPUT` | conversion | ✓ | ✗ | ✗ | - | PROC SQL only; FedSQL / CAS: CAST(x AS DOUBLE) |
+| `CAST` | conversion | ✗ | ✓ ↓ | ✓ ↓ | CAST | PROC SQL has no CAST: PUT / INPUT |
+<!-- sas-functions:end -->
 
 ### Notebook
 
@@ -1731,6 +1908,10 @@ desktop window.
   ([`SKILL.md`](src/singlestore_mcp/skills/singlestore-sql/SKILL.md)), key
   learnings such as case-sensitive names and procedure syntax. Add to it as
   you find pitfalls.
+- **Knows SAS:** in a SQL Editor tab that runs PROC SQL, FedSQL or FedSQL in
+  CAS, the question also carries the tab's library / caslib and known columns
+  and, once per session and language, that language's SAS guide (see
+  [Ask Claude in a SAS tab](#sql-editor)).
 - **Quick answers:** each editor / notebook keeps one Claude process running
   (started when you open the panel), so questions don't wait for Claude Code to
   start; follow-ups keep the conversation. Idle processes close after 10
@@ -1762,7 +1943,54 @@ press **Try again** once a server runs again. SQL Editor text that couldn't be
 autosaved meanwhile is kept in that browser tab, can be copied from the
 *Session ended* page, and is saved to its editor tab as soon as the page
 reaches a server again. Database errors (VPN down, cluster unreachable) are
-not this: they show in the app as usual.
+not this: see the next section.
+
+### After a network break (VPN, sleep, Wi-Fi)
+
+The server recovers by itself when the VPN drops or reconnects (also on another
+gateway with a new address, e.g. 172.29.x → 172.16.x), the laptop wakes up or
+Wi-Fi changes — **no restart needed**. While SingleStore or SAS Viya can't be
+reached, the Workspace shows **Connection to SingleStore lost (since 14:02) –
+retrying…** at the bottom (hover: the error; *Retry now* checks at once); a tool
+call says so readably ("… reconnects by itself as soon as the cluster can be
+reached again"). Once the network is back the line goes away within a few
+seconds, a *Reconnected to SingleStore* message shows, the views reload what
+failed meanwhile (Cluster Monitor, Query History and alerts were polling anyway;
+the Schema Explorer reloads its failed lists) and you just carry on.
+
+What happens underneath (`netguard.py`):
+
+- **Dead connections are noticed in seconds, not hours.** Every connection to the
+  cluster (pool, standby, notebook kernels, Compare / Workload runs) and to Viya
+  has a short TCP keepalive (10 s idle, then 3 probes 5 s apart:
+  `SINGLESTORE_MCP_TCP_KEEPALIVE`) instead of Windows' two hours, and connecting
+  gives up after 10 s (a whole cluster login after 20 s).
+- **A VPN that moved** to another local address: a watcher (every 2 s) sees that
+  the route to the cluster / Viya now leaves from another address and closes the
+  connections opened from the old one at once — a query waiting on one is read
+  again on a fresh connection (a write that may have run is never sent twice).
+- **After sleep** (the clock jumped) or any failure, idle pooled connections are
+  checked with a ping (at most 3 s) before they're used again, and replaced if dead.
+  Kept-alive Viya connections are replaced instead of reused.
+- A call never waits on a hung connection for long: a full pool waits at most
+  2 minutes (`SINGLESTORE_MCP_POOL_WAIT`) and says why.
+- **SAS:** a Compute or CAS session Viya ended while the network was away is
+  started again with the automatic S2 library and the startup code; the next run's
+  log and the Workspace say once *The SAS session had ended … and was started again*
+  (WORK tables from before are gone). The SAS pre-warm / keep-alive retries 10 s
+  after a failed check (not after its 4 minutes), and at once when the page comes
+  back online or Viya answers again; a token renewal that fails because the network
+  is away says so and keeps the sign-in (not "sign in again"); proxy vs. direct is
+  chosen again after a failure.
+- While a service is down the server checks it again in the background (every few
+  seconds for two minutes, then every 30 s), so it's found back even when nothing
+  else asks. The MCP side never restarts the server over network errors.
+
+**Check it yourself:** open the Workspace, run a query, disconnect the VPN for a
+minute (or close the laptop lid), and reconnect. The bottom line appears while
+it's away and goes by itself; run the query again — it works without
+`restart_server`. A query running at the moment the VPN switches gateway is
+retried on a fresh connection.
 
 Who owns which address: every MCP client connection (Claude Desktop and
 Claude Code each start one server) holds a *slot* (a lock file in that folder)
@@ -1808,6 +2036,12 @@ All optional, as environment variables of the MCP server:
 | `SINGLESTORE_MCP_ASSISTANT_MODEL` / `_EFFORT` | `sonnet` / `medium` | The *Balanced* assistant profile |
 | `SINGLESTORE_MCP_ASSISTANT_TIMEOUT` | `300` | Seconds before an answer is abandoned |
 | `SINGLESTORE_MCP_POOL_SIZE` | `8` | Database connections in the server's pool |
+| `SINGLESTORE_MCP_POOL_WAIT` | `120` | Seconds a call waits for a free pooled connection before it gives up with a readable error |
+| `SINGLESTORE_MCP_TCP_KEEPALIVE` | `10,5,3` | TCP keepalive of every cluster / Viya connection: idle seconds, seconds between probes, probes (`0` = the OS default) |
+| `SINGLESTORE_MCP_CONNECT_TIMEOUT` | `10` | Seconds a TCP connect to the cluster or Viya may take |
+| `SINGLESTORE_MCP_CONNECT_DEADLINE` | `20` | Seconds a whole cluster login (TCP, TLS, sign-in, session settings) may take |
+| `SINGLESTORE_MCP_PING_TIMEOUT` | `3` | Seconds the ping that checks an idle pooled connection after sleep / a network change may take |
+| `SINGLESTORE_MCP_IDLE_PING` | `300` | A pooled connection idle this long is pinged before use |
 | `SINGLESTORE_MCP_NO_SUPERVISOR` | off | Run without the restart relay |
 | `SINGLESTORE_MCP_NO_STANDBY` | off | Don't keep a pre-loaded standby process for fast restarts |
 | `SINGLESTORE_MCP_STANDBY_DELAY` | `5` | Seconds after a start before the standby is prepared |
@@ -2304,6 +2538,14 @@ while Claude has the server's .exe open.
 - `test_tools.py`: model-visible tools, including Claude's 50,000-character result limit; app-only tools;
   error handling and safety guards; local writes.
 - `test_workload.py`: placeholders, validation and run comparison (offline), and a real 20 s run (cluster).
+- `test_network_recovery.py` (offline, ~35 s): network breaks without a restart. The pool against a tiny
+  MySQL-protocol server (`fake_mysql.py`) and the SAS Viya client against a stand-in Viya (`fake_viya.py`), each
+  behind a fault-injecting TCP proxy (`faultproxy.py`: drop, blackhole, refuse, slow, come back, move): dropped and
+  silent connections replaced, a readable error during an outage and success after it, a hanging login / full pool
+  bounded, a query on a connection whose route moved retried, SAS sessions restarted with a notice, the pre-warm
+  retrying at once, proxy / direct re-chosen, and an MCP protocol test (outage during a tool call → readable error →
+  the same server answers again). `ui/test_network_ui.py` (cluster): the Workspace through a fault proxy to the
+  real cluster shows "Connection to SingleStore lost – retrying…", recovers by itself and runs queries again.
 - `test_contrast.py` (offline): WCAG contrast of the engine-chip, primary-button, alert-badge, caslib-badge and
   "Ask Claude" colours in `shared.css`, light and dark. `test_presenter.py` (offline): presenter-mode labels and the
   "Studio's own queries" classifier.
@@ -2311,6 +2553,11 @@ while Claude has the server's .exe open.
   Compute, CAS and the pushdown chip), the Open / Save as dialogs' keyboard behaviour, presenter mode (no real
   connection name, host, user or e-mail in any view; results unmasked; off restores), the Studio's own queries hidden,
   and contrast measured on the rendered page in both themes.
+- `test_sas_guide.py`: the assistant's SAS guide per language (offline: only the tab's language, once per
+  session and language, the tab context in the question), the explicit pass-through write check, the SAS function
+  matrix and its check in Python and in node (`vendor/sas-funcs.js`); with `--sas` a sample of the matrix's
+  verified rows run again. `test_assistants.py` with `--assistants --sas`: Claude's PROC SQL / FedSQL / CAS
+  answers run in SAS. `ui/test_sas_ui.py`: the pre-run *Check the functions* bar.
 - `test_notebook.py`, `test_compare.py`, `test_assistants.py`, and `ui/test_apps.py` (Workspace views,
   SQL Editor, Query History, Workload, every standalone app). When a UI test fails, a screenshot is saved
   in `tests/ui/_artifacts/`. The UI fixtures (`ui`, the screenshot hook) are in `tests/conftest.py`, so one

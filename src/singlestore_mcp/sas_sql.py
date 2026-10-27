@@ -117,7 +117,9 @@ _SQL_WRITE = re.compile(
     r"^\s*(?:create\s+(?:or\s+replace\s+)?(?:unique\s+)?(?:table|view|index)\s+(?:if\s+not\s+exists\s+)?"
     r"(?:\w+\s+on\s+)?|insert\s+into\s+|update\s+|delete\s+from\s+|drop\s+(?:table|view|index)\s+(?:if\s+exists\s+)?"
     r"|alter\s+table\s+)", re.I)
-_SQL_READ = {"select", "describe", "validate", "explain", "with", "reset", "show"}
+# connect / disconnect open and close an explicit pass-through connection (reads: what runs there is a
+# ``select … from connection to`` or an ``execute (…) by``, and EXECUTE stays unknown - it can change data).
+_SQL_READ = {"select", "describe", "validate", "explain", "with", "reset", "show", "connect", "disconnect"}
 
 
 def _target_lib(rest: str, default_lib: str) -> str:
@@ -263,12 +265,13 @@ def wrap(language: str, sql: str, *, library: str | None = None, options: dict[s
         code = sql.strip()
         if pushdown:
             code = f"{TRACE_ON}\n{code}\n{TRACE_OFF}"
+        code = f"{SESSION_RESET}\n{code}"
         return {"code": code, "kind": "sas", "result": None, "capped": False}
     select = first_word(body) == "select" and not re.search(r"\binto\s*:", body, re.I)
     noexec = bool((options or {}).get("noexec"))
     if language == "procsql":
         opts, capped = proc_sql_options(options, max_rows)
-        lines = []
+        lines = [SESSION_RESET]
         if pushdown:
             lines.append(TRACE_ON)
         lib = (library or "").strip().upper()
@@ -289,7 +292,7 @@ def wrap(language: str, sql: str, *, library: str | None = None, options: dict[s
                 "result": ("WORK", table) if select and not noexec else None, "capped": capped}
     if language == "fedsql":
         head = "proc fedsql _method;" if pushdown else "proc fedsql;"
-        lines = [head]
+        lines = [SESSION_RESET, head]
         if select:
             lines.append(f'  drop table WORK."{table}" force;')
             lines.append(f'  create table WORK."{table}" as')
@@ -314,6 +317,11 @@ def wrap(language: str, sql: str, *, library: str | None = None, options: dict[s
 def _indent(sql: str) -> str:
     return "\n".join("  " + line if line.strip() else line for line in sql.splitlines())
 
+
+# A SAS error in a step (a DATA step reading a missing table, say) puts the Compute session in syntax check mode
+# (OBS=0, NOREPLACE) and leaves &SYSCC set: every later job of the session then ends in state "error" and writes
+# nothing, until the session restarts. Each run starts by undoing that (seen on Zeus; SAS's documented reset).
+SESSION_RESET = "options obs=max replace nosyntaxcheck; %let syscc=0;"
 
 TRACE_ON = "options sastrace=',,,d' sastraceloc=saslog nostsuffix sql_ip_trace=(note, source);"
 
@@ -511,6 +519,11 @@ def _fedsql_verdict(log_text: str, traced: list[dict[str, Any]] | None = None,
     else:
         verdict = "pulled"
         notes.append("Each table was read into SAS: " + ", ".join(other))
+    if traced and verdict != "pulled" and all(_is_pass_all(s["sql"]) for s in traced):
+        # The plan marks a scan "Push Down" also when SingleStore only got the plain table read (e.g. GROUP BY with
+        # ORDER BY / LIMIT, or LIMIT alone: FedSQL never sends LIMIT): the driver trace shows what it really got.
+        verdict = "pulled"
+        notes.append("SingleStore only got plain table reads (driver trace): FedSQL did the rest in SAS.")
     return {"verdict": verdict, "sent": sent, "notes": notes}
 
 

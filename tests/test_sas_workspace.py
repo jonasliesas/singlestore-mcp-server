@@ -9,6 +9,8 @@ import time
 import pytest
 from support import McpSession
 
+from singlestore_mcp import sas_sql
+
 pytestmark = pytest.mark.sas
 
 
@@ -72,7 +74,9 @@ def test_plain_sas_runs_unwrapped(sas: McpSession) -> None:
 
 
 def sas_trace_first(code: str) -> bool:
-    return code.splitlines()[1].startswith("proc means")
+    # The session reset (sas_sql.SESSION_RESET) comes first, then the trace options when pushdown is on.
+    lines = [x for x in code.splitlines() if x not in (sas_sql.SESSION_RESET, sas_sql.TRACE_ON)]
+    return lines[0].startswith("proc means")
 
 
 def test_fedsql_select(sas: McpSession) -> None:

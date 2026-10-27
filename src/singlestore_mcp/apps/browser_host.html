@@ -4,13 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SAS SpeedyStore Studio</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23820ddf'/%3E%3Cpath d='M18 5 9 18h6l-2 9 9-13h-6z' fill='white'/%3E%3C/svg%3E">
+<!--S2:FAVICON-->
 <style>
   :root { color-scheme: light dark; }
   html, body { margin: 0; height: 100%; background: light-dark(#ffffff, #1e1e1e); }
   iframe { display: block; width: 100%; height: 100vh; border: 0; }
   #status { font: 14px/1.5 system-ui, "Segoe UI", sans-serif; padding: 24px; color: light-dark(#555, #aaa); }
-  #conn { position: fixed; top: 8px; left: 50%; transform: translateX(-50%); z-index: 10; display: none;
+  #status:empty { display: none; }
+  #conn { position: fixed; top: 8px; left: 50%; transform: translateX(-50%); z-index: 60; display: none;
     font: 13px/1.4 system-ui, "Segoe UI", sans-serif; padding: 6px 12px; border-radius: 6px;
     background: light-dark(#fff8e1, #3a3220); color: light-dark(#6b4e00, #f3d9a0); border: 1px solid light-dark(#f0d48a, #6b5a2e);
     box-shadow: 0 2px 8px rgb(0 0 0 / 0.15); }
@@ -29,7 +30,8 @@
 </style>
 </head>
 <body>
-<div id="status">Loading…</div>
+<!--S2:SPLASH-->
+<div id="status"></div>
 <div id="conn" role="status" aria-live="polite"><span class="spin"></span>Reconnecting to the SingleStore MCP server…</div>
 <script type="module">
 // Minimal MCP Apps host: renders one app full-window and forwards its tool
@@ -61,6 +63,20 @@ function presenter() {
 const status = document.getElementById("status");
 const connEl = document.getElementById("conn");
 let frame = null;
+
+// ---------------------------------------------------------------- splash
+// The Studio logo until the app is usable: for the Workspace that is when it says so (s2-splash-done, once its
+// first view has its data; it sends its progress as s2-splash), for other apps when they have their opening result.
+// Never kept longer than that. From the desktop shortcut's "Starting…" page (#s2-continue) the logo carries on
+// without a second intro.
+const splash = window.S2Splash;
+splash.big(presenter());
+if (location.hash === "#s2-continue") {
+  splash.skipIntro();
+  history.replaceState(null, "", location.pathname + location.search);
+}
+let splashFallback = null;
+function splashDone() { clearTimeout(splashFallback); splash.done(); }
 
 // ---------------------------------------------------------------- connection state
 const DRAFT_TOOL = "sql_editor_save_draft";
@@ -242,6 +258,7 @@ function end(why) {
   frame?.remove();  // stops every timer and poll of the app
   frame = null;
   status.remove();
+  splash.hide();
   document.title = "Session ended · SAS SpeedyStore Studio";
   const drafts = Object.values(readDrafts());
   const box = el("div", { id: "ended", role: "alert" },
@@ -300,6 +317,8 @@ async function open() {
   const toolRes = await toolReq;
   if (!toolRes.ok) throw new Error("this link has expired");
   const tool = await toolRes.json();
+  const isStudio = /workspace\.html$/.test(tool._meta?.ui?.resourceUri ?? "");
+  splash.status(isStudio ? "Connecting to SingleStore…" : `Opening ${tool.title || tool.name}…`);
   opening = callTool(toolName, args);
   const htmlReq = get(`resource?uri=${encodeURIComponent(tool._meta.ui.resourceUri)}`).then((r) => r.text());
   await flushDrafts();  // before the app reads its saved state
@@ -310,6 +329,8 @@ async function open() {
   window.addEventListener("message", async (ev) => {
     if (!frame || ev.source !== frame.contentWindow) return;
     if (ev.data?.type === "s2-presenter-save") { try { localStorage.setItem(PRESENT_KEY, ev.data.on ? "1" : "0"); } catch {} return; }
+    if (ev.data?.type === "s2-splash") { splash.status(String(ev.data.text ?? "")); return; }
+    if (ev.data?.type === "s2-splash-done") { splashDone(); return; }
     const { id, method, params: p, jsonrpc } = ev.data ?? {};
     if (jsonrpc !== "2.0" || !method) return;
     switch (method) {
@@ -327,7 +348,11 @@ async function open() {
         });
       case "ui/notifications/initialized":
         send({ jsonrpc: "2.0", method: "ui/notifications/tool-input", params: { arguments: args } });
-        return send({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: await (opening ?? callTool(toolName, args)) });
+        send({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: await (opening ?? callTool(toolName, args)) });
+        // The Workspace says when its first view is usable; a safety net in case it can't.
+        if (isStudio && splash.active) splashFallback = setTimeout(splashDone, 20000);
+        else splashDone();
+        return;
       case "tools/call": {
         const result = await callTool(p.name, p.arguments);
         // Reset browser links from this page: carry on at the new link (this one's token is gone).
@@ -368,6 +393,7 @@ async function open() {
 
 open().catch((e) => {
   if (e instanceof SessionEnded || conn === "ended") return end("refused");
+  splash.hide();
   status.textContent = `Couldn't open the app: ${e.message}. Open the app in the browser again from Claude.`;
 });
 </script>

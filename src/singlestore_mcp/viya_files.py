@@ -419,7 +419,7 @@ def _srv(method: str, path: str, suffix: str = "", **kw: Any) -> tuple[int, Any,
         if sas_rest.session_gone(status, body) and not attempt:
             with sas_rest.compute.lock:
                 if sas_rest.compute.sid == sid:
-                    sas_rest.compute.sid = None
+                    sas_rest.compute.gone()
             continue
         return status, body, headers
     raise SasError("The SAS session ended and couldn't be restarted.")

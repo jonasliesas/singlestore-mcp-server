@@ -21,7 +21,7 @@ from typing import Any
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, ToolAnnotations
 
-from .. import assistant, fileio, result_stream, sas_viya, viya_files
+from .. import assistant, fileio, result_stream, sas_functions, sas_viya, viya_files
 from .. import sql_editor_state as editor_state
 from ..db import db
 from ._core import APP_ONLY, apps, head_hash, page_parts, register_app, tool_result, with_browser_link, without_vendors
@@ -748,16 +748,33 @@ def sql_editor_ask(
     selected: bool = False,
     last_result: str | None = None,
     profile: str | None = None,
+    language: str = "singlestore",
+    sas: dict[str, Any] | None = None,
 ) -> CallToolResult:
     """Answer a SQL Editor chat question in the app; the reply arrives in the editor's inbox.
 
-    ``profile`` picks speed vs depth: "fast", "balanced" (default) or "thorough".
+    ``profile`` picks speed vs depth: "fast", "balanced" (default) or "thorough". ``language``: what the tab runs
+    as (singlestore, procsql, fedsql, cas). For a SAS tab, ``sas`` is its context: ``library`` (library or caslib),
+    ``library_info`` ({name, engine/type, database, singlestore, singlestore_kind}), ``tables`` (names, or
+    {name, loaded}), ``columns`` ({"LIB.TABLE": [{name, type, length, format}]}) and ``options``; the question then
+    carries the SAS guide of that language (once per Claude session and language).
     """
     if not editor_id.strip() or not question.strip():
         raise ValueError("editor_id and question are required")
-    prompt = assistant.build_prompt(question, database, sql, selected, last_result)
+    guide = assistant.needs_guide(editor_id, language)
+    prompt = assistant.build_prompt(question, database, sql, selected, last_result, language=language, sas=sas, guide=guide)
     assistant.ask(editor_id, prompt, deliver_reply, profile)
-    return tool_result("Claude is answering in the editor.", {"editor_id": editor_id, "started": True})
+    assistant.mark_guided(editor_id, language)
+    return tool_result("Claude is answering in the editor.", {"editor_id": editor_id, "started": True, "sas_guide": guide})
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def sql_editor_sas_functions() -> CallToolResult:
+    """The SAS function matrix for the editor's pre-run check: per function (as called in SQL) whether PROC SQL,
+    FedSQL and FedSQL in CAS support it and push it down to SingleStore, its SingleStore equivalent and what to
+    use instead (data/sas_functions.json)."""
+    funcs = sas_functions.compact()
+    return tool_result(f"{len(funcs)} SAS functions", {"functions": funcs})
 
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)

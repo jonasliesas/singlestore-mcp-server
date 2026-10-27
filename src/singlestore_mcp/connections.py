@@ -603,13 +603,21 @@ def password_for(p: Profile) -> str:
     return get_password(p.name) or ""
 
 
+def _network_kwargs() -> dict[str, Any]:
+    """Bounded TCP connect and short TCP keepalive (``netguard``): a connection that died in a network break (VPN
+    switch, sleep) is noticed in seconds, not after Windows' two-hour keepalive."""
+    from . import netguard
+
+    return {"connect_timeout": max(1, int(netguard.CONNECT_TIMEOUT_S)), "socket_options": netguard.socket_options()}
+
+
 def connect_kwargs(p: Profile, password: str | None = None) -> dict[str, Any]:
     if p.url:
-        return {"host": p.url, "results_type": "dict"}
+        return {"host": p.url, "results_type": "dict", **_network_kwargs()}
     kw: dict[str, Any] = {
         "host": p.host, "port": p.port, "user": p.user,
         "password": password if password is not None else password_for(p),
-        "results_type": "dict", "ssl_disabled": p.ssl_disabled,
+        "results_type": "dict", "ssl_disabled": p.ssl_disabled, **_network_kwargs(),
     }
     if p.database:
         kw["database"] = p.database
@@ -696,7 +704,7 @@ def test(profile: dict[str, Any] | None = None, password: str | None = None, nam
             return {"ok": False, "error": str(exc), "needs_sign_in": True}
     started = time.perf_counter()
     try:
-        conn = s2.connect(**connect_kwargs(p, pw), autocommit=True, connect_timeout=8)
+        conn = s2.connect(**{**connect_kwargs(p, pw), "connect_timeout": 8}, autocommit=True)
         try:
             cur = conn.cursor()
             cur.execute("SELECT @@memsql_version AS v, CURRENT_USER() AS u")

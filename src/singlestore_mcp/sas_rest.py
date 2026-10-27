@@ -7,7 +7,9 @@ gives a connection's pair (``Compute``, ``Cas``); ``compute`` / ``cas`` are the 
 
 Every call to Viya is a round trip (and the token, TLS and proxy add to the first), so:
 
-- HTTP connections are kept open (``http.client`` keep-alive, one per thread and host);
+- HTTP connections are kept open (``http.client`` keep-alive, one per thread and host); after a network event
+  (sleep / resume, another route: ``netguard``) or ``HTTP_IDLE_S`` of idleness a kept connection isn't reused but
+  replaced, its socket has a short TCP keepalive, and connecting gives up after ``netguard.CONNECT_TIMEOUT_S``;
 - the Compute session is created once and reused (one job at a time, under a lock) until it expires, when
   it's recreated and the startup code runs again;
 - job state is long-polled (``?wait=``), result tables are read through the Compute data API in parallel.
@@ -36,11 +38,14 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from . import connections, sas_sql, sas_viya
+from . import connections, netguard, sas_sql, sas_viya
 from .sas_sql import SasError
 
 DEFAULT_TIMEOUT_MIN = 240  # a single job may run this long (SINGLESTORE_MCP_SAS_TIMEOUT_MIN; 0 = no limit)
 _WAIT = 20                 # long-poll seconds per state request
+HTTP_IDLE_S = 120.0        # a kept-alive connection idle longer than this is replaced, not reused
+RESTARTED = ("The SAS session had ended (connection loss or Viya's idle timeout) and was started again: the automatic "
+             "SingleStore library and the startup code ran again; WORK tables and macro variables from before are gone.")
 
 
 def job_timeout() -> float | None:
@@ -113,6 +118,8 @@ def _conn(url: str, verify: bool, timeout: float, direct: bool) -> tuple[http.cl
     if pool is None:
         pool = _local.pool = {}
     conn = pool.get(key)
+    if conn is not None and conn.sock is not None and _stale(conn):
+        conn.close()  # possibly dead after a network break: connect afresh instead of waiting on it
     if conn is None:
         conn = pool[key] = _open(scheme, host, port, proxy, verify, timeout)
     conn.timeout = timeout
@@ -122,6 +129,31 @@ def _conn(url: str, verify: bool, timeout: float, direct: bool) -> tuple[http.cl
     if proxy and scheme == "http":
         target = url
     return conn, target
+
+
+def _stale(conn: http.client.HTTPConnection) -> bool:
+    """A kept-alive connection not worth reusing: opened before a network event, idle long, or from an address the
+    route no longer uses (half-open after a VPN switch / sleep: a request on it would wait for its whole timeout)."""
+    return (getattr(conn, "_s2_epoch", None) != netguard.epoch()
+            or time.monotonic() - float(getattr(conn, "_s2_used", 0.0)) > HTTP_IDLE_S
+            or netguard.moved(getattr(conn, "_s2_info", None)))
+
+
+def _connect(conn: http.client.HTTPConnection, timeout: float) -> None:
+    """Connect (a proxy tunnel and TLS included) within ``netguard.CONNECT_TIMEOUT_S``, then wait up to ``timeout``
+    for answers; short TCP keepalive; the socket is watched (closed at once when the route moves)."""
+    conn.timeout = min(timeout, netguard.CONNECT_TIMEOUT_S)
+    try:
+        conn.connect()
+    finally:
+        conn.timeout = timeout
+    if conn.sock is not None:
+        conn.sock.settimeout(timeout)
+        netguard.tune(conn.sock)
+        netguard.track(conn.sock, "sas")
+        conn._s2_info = netguard.sock_info(conn.sock)  # type: ignore[attr-defined]
+        conn._s2_epoch = netguard.epoch()  # type: ignore[attr-defined]
+        conn._s2_used = time.monotonic()  # type: ignore[attr-defined]
 
 
 def _drop(url: str) -> None:
@@ -153,22 +185,29 @@ def _send(url: str, method: str, data: bytes | None, hdrs: dict[str, str], timeo
     reopened once. On a fresh connection a dropped connection is tried again twice (after 0.5 s and 1.5 s) when
     nothing was sent yet (the TLS handshake) or the request is idempotent – never a POST that may have arrived."""
     fresh_retries = 0
+    timed_out = False
     for _ in range(4):
         conn, target = _conn(url, verify, timeout, direct)
         reused = conn.sock is not None
         sent = False
         try:
             if conn.sock is None:
-                conn.connect()
+                _connect(conn, timeout)
             sent = True
             conn.request(method, target, body=data, headers=hdrs)
             resp = conn.getresponse()
             raw = resp.read()
             if resp.will_close:
                 _drop(url)
+            else:
+                conn._s2_used, conn._s2_epoch = time.monotonic(), netguard.epoch()  # type: ignore[attr-defined]
             return resp.status, {k.lower(): v for k, v in resp.getheaders()}, raw
         except TimeoutError:
             _drop(url)
+            # A kept-alive connection that went silent (half-open): an idempotent request gets one fresh try.
+            if reused and not timed_out and method.upper() in _IDEMPOTENT:
+                timed_out = True
+                continue
             raise
         except (OSError, http.client.HTTPException, EOFError) as exc:
             _drop(url)
@@ -212,7 +251,10 @@ def request(method: str, url: str, *, body: Any = None, accept: str = "applicati
             sas_viya._route["direct"] = direct
         break
     else:
-        raise SasError(f"Couldn't reach SAS Viya at {s['url']}: {last}") from last
+        netguard.failure("sas", last or "unreachable")
+        raise SasError(f"Couldn't reach SAS Viya at {s['url']}: {last}. It's retried by itself once the network (VPN) "
+                       "is back – no restart needed.") from last
+    netguard.success("sas")
     if status == 401 and auth:
         raise sas_viya.NeedsSignIn("SAS Viya refused the sign-in (401): sign in again in the Connections window.")
     if raw and 200 <= status < 300:
@@ -264,6 +306,15 @@ class Compute:
         self._auto_key: tuple[Any, ...] | None = None  # what it was assigned with (password only as a hash)
         self.sas9: dict[str, Any] | None = None       # SAS/CONNECT sign-on to SAS 9 and its libraries
         self.warming = False                          # a background warm-up (sas_prewarm) holds the lock now
+        self.ended = False                            # Viya ended the session (found gone): say so once restarted
+        self.notice: str | None = None                # RESTARTED, until the next run's log shows it
+
+    def gone(self) -> None:
+        """Viya says the session doesn't exist any more (it ended while the network was away, or idled out): the
+        next call starts a new one (startup code included) and the user is told once."""
+        if self.sid:
+            self.ended = True
+        self.sid = None
 
     # -- session
 
@@ -297,6 +348,12 @@ class Compute:
             # The automatic SingleStore library first, so the startup code can override it.
             self._ensure_auto()
             self.startup = self._run_startup(s.get("startup_code") or "")
+            if self.ended:
+                self.ended = False
+                if self.last_used:  # only when it had been used: WORK tables etc. from before are gone
+                    self.notice = RESTARTED
+                    netguard.notice("sas", f"SAS session ({s.get('name') or 'SAS Viya'}) restarted: it had ended "
+                                           "(connection loss or idle timeout). WORK tables from before are gone.")
             return self.sid
 
     # -- the automatic SingleStore library (LIBNAME <libref> SSTORE … from the active SingleStore connection)
@@ -364,7 +421,7 @@ class Compute:
             try:
                 self._ensure_auto()
             except _SessionGone:
-                self.sid = None
+                self.gone()
 
     def _run_startup(self, code: str) -> dict[str, Any]:
         if not code.strip():
@@ -478,7 +535,7 @@ class Compute:
                             self.cancel_job(job)
                     state = self._wait(job, ctl)
                 except _SessionGone:
-                    self.sid = None  # expired: start a new one (startup code runs again)
+                    self.gone()  # expired: start a new one (startup code runs again)
                     if ctl is not None and ctl.cancel.is_set():
                         raise SasStopped("Stopped: the SAS session was ended.") from None
                     if attempt:
@@ -493,6 +550,9 @@ class Compute:
                     log = log_f.result()
                     lst = lst_f.result() if lst_f else []
                 self.last_used = time.time()
+                if self.notice:
+                    log = [{"line": f"NOTE: {self.notice}", "type": "note"}, *log]
+                    self.notice = None
                 return {"state": state, "log": log, "listing": "\n".join(x["line"] for x in lst),
                         "ms": round((time.perf_counter() - started) * 1000, 1)}
         raise SasError("SAS session unavailable")
@@ -508,7 +568,7 @@ class Compute:
         with self.lock:
             status, body = get()
             if session_gone(status, body):
-                self.sid = None
+                self.gone()
                 status, body = get()
         if status == 404:
             raise LookupError(f"Not found in the SAS session: {urllib.parse.unquote(path)}")
@@ -539,7 +599,7 @@ class Compute:
             if any(session_gone(st, b) for st, b in answers) and not attempt:
                 with self.lock:
                     if self.sid == sid:
-                        self.sid = None
+                        self.gone()
                 continue
             out: dict[tuple[str, str], list[dict[str, Any]] | None] = {}
             for pair, (st, b) in zip(pairs, answers, strict=True):
@@ -650,6 +710,12 @@ class Cas:
         self.caslib: str | None = None
         self.loaded: set[str] = set()
         self.warming = False                          # a background warm-up (sas_prewarm) holds the lock now
+        self.ended = False                            # CAS ended the session (found gone): say so once restarted
+
+    def gone(self) -> None:
+        if self.sid:
+            self.ended = True
+        self.sid = None
 
     def _root(self) -> str:
         server = sas_viya.settings(self.conn).get("cas_server") or "cas-shared-default"
@@ -665,6 +731,10 @@ class Cas:
             if status not in (200, 201) or not isinstance(body, dict) or not body.get("session"):
                 raise _viya_error(status, body, f"Couldn't start a CAS session on {key[1]}")
             self.sid, self.key, self.caslib, self.loaded = body["session"], key, None, set()
+            if self.ended:
+                self.ended = False
+                netguard.notice("sas", f"CAS session ({s.get('name') or 'SAS Viya'}) restarted: it had ended "
+                                       "(connection loss or idle timeout). Session tables from before are gone.")
             return self.sid
 
     def close(self, force: bool = False) -> None:
@@ -707,7 +777,7 @@ class Cas:
                 status, body, _ = request("POST", f"{self._root()}/cas/sessions/{sid}/actions/{name}",
                                           body=params or {}, timeout=timeout, conn=self.conn)
                 if status in (404, 410) and not attempt:
-                    self.sid = None
+                    self.gone()
                     continue
                 break
         if status not in (200, 201) or not isinstance(body, dict):
@@ -871,7 +941,7 @@ def sas9_connect(force: bool = False, conn: str | None = None) -> dict[str, Any]
                 res = _sas9_sign_on(compute, code, server, wanted)
                 break
             except _SessionGone:
-                compute.sid = None
+                compute.gone()
                 if attempt:
                     raise SasError("The SAS session ended and couldn't be restarted.") from None
                 compute.session()
@@ -933,6 +1003,21 @@ def _sas9_sign_on(c: Compute, code: str, server: str, wanted: list[tuple[str, st
     assigned = [{"local": loc, "remote": rem} for loc, rem in pairs if loc not in skipped and loc not in failed]
     return {"ok": True, "server": server, "assigned": assigned, "skipped": skipped, "failed": failed,
             "missing": missing, "remote": remote}
+
+
+def _probe() -> None:
+    """Health probe while SAS Viya is unreachable: one unauthenticated request (any HTTP answer means it's back),
+    then the background warm-up / keep-alive check right away (``sas_prewarm``)."""
+    url = sas_viya.settings().get("url")
+    if not url:
+        return
+    request("GET", f"{url}/SASLogon/", accept="text/html, */*", timeout=8, auth=False)
+    from . import sas_prewarm
+
+    sas_prewarm.prewarm(retry=True)
+
+
+netguard.set_probe("sas", _probe)
 
 
 def reset(conn: str | None = None) -> None:

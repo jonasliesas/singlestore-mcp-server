@@ -688,6 +688,14 @@ function forgetSas() {
   sx.tables.clear(); sx.columns.clear(); sx.previews.clear(); sx.expanded.clear(); sx.code.clear();
 }
 // Another active SingleStore connection: the automatic SingleStore library points elsewhere (re-read the list).
+// Back after a network break: reload what failed while the cluster couldn't be reached.
+window.addEventListener("s2:reconnected", (e) => {
+  if (e.detail?.service !== "singlestore") return;
+  if (!state.dbs) loadDatabases();
+  for (const [db, t] of state.tables) if (t.status === "error") loadTables(db, true);
+  const sel = state.sel;
+  if (sel?.table && state.details.get(key(sel.db, sel.table))?.status === "error") loadDetail(sel.db, sel.table, true);
+});
 window.addEventListener("s2:connection-changed", () => {
   sx.libs.sas = null; sx.code.clear();
   for (const k of [...sx.tables.keys()]) if (k.startsWith("sas|")) sx.tables.delete(k);

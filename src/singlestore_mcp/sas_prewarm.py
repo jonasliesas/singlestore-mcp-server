@@ -12,6 +12,9 @@ the first PROC SQL / SAS library list doesn't wait ~15–35 s for a cold session
   ``KEEPALIVE_S`` ago, the warm-up reads the session's state (``GET /compute/sessions/{id}/state``, no SAS code)
   and the CAS session (``GET /cas/sessions/{id}``); a session that ended (Viya's idle timeout) is started again in
   the background. Nothing polls when no window asks, so it stops by itself.
+- After a network break: a check that couldn't reach Viya is tried again after ``RETRY_S`` (not after the 4-minute
+  keep-alive interval), and at once with ``retry`` (the Workspace's connection-health line asks when the page comes
+  back online, and ``netguard``'s probe when SAS Viya answers again); a session Viya ended meanwhile is restarted.
 - The SAS 9 sign-on (SAS/CONNECT) stays lazy: it runs when the Schema Explorer's SAS 9 source is opened.
 - Off per connection (Connections → SAS Viya → Edit → "Start the SAS session when the Workspace opens") or for
   the whole server with ``SINGLESTORE_MCP_SAS_PREWARM=0`` (the test suite does that unless a test turns it on).
@@ -33,7 +36,7 @@ from .sas_sql import SasError
 
 ENV = "SINGLESTORE_MCP_SAS_PREWARM"
 KEEPALIVE_S = 240.0      # a session is checked at most this often (the Workspace asks every ~4 minutes)
-RETRY_S = 60.0           # after "unreachable" / "error", another warm-up only after this long
+RETRY_S = 10.0           # after "unreachable" / "error", another warm-up only after this long (``retry``: at once)
 
 _lock = threading.RLock()
 _state: dict[str, dict[str, Any]] = {}       # connection -> what the last warm-up found
@@ -106,9 +109,10 @@ def status(conn: str | None = None) -> dict[str, Any]:
     return out
 
 
-def prewarm(conn: str | None = None, *, cas: bool = True) -> dict[str, Any]:
+def prewarm(conn: str | None = None, *, cas: bool = True, retry: bool = False) -> dict[str, Any]:
     """Start the connection's sessions in the background (default: the active connection) unless they're running
-    and were checked recently, or a warm-up is going on. Returns the status at once."""
+    and were checked recently, or a warm-up is going on. ``retry``: after "unreachable" / "error", try again now
+    (the network is back) instead of after ``RETRY_S``. Returns the status at once."""
     name = _name(conn)
     if not name:
         return status(conn)
@@ -121,9 +125,10 @@ def prewarm(conn: str | None = None, *, cas: bool = True) -> dict[str, Any]:
             return status(name)
         st = _state.get(name, {})
         now = time.time()
-        if compute.sid and now - float(st.get("checked") or 0) < KEEPALIVE_S:
+        troubled = st.get("state") in ("unreachable", "error")
+        if compute.sid and not troubled and now - float(st.get("checked") or 0) < KEEPALIVE_S:
             return status(name)
-        if not compute.sid and st.get("state") in ("unreachable", "error") and now - float(st.get("at") or 0) < RETRY_S:
+        if troubled and not retry and now - float(st.get("at") or 0) < RETRY_S:
             return status(name)
         if not compute.sid:
             # Signed in? From the stored token only (no network); the warm-up renews it if needed.
@@ -189,7 +194,7 @@ def _warm(name: str, with_cas: bool) -> None:
             compute.warming = True
             try:
                 if compute.sid and not _alive(compute):
-                    compute.sid = None  # Viya ended it (idle timeout): start a new one now, not at the next run
+                    compute.gone()  # Viya ended it (idle timeout, or while the network was away): start a new one now
                     _set(name, state="starting", started=time.time(), note=None)
                 fresh = not compute.sid
                 t = time.perf_counter()
@@ -208,7 +213,7 @@ def _warm(name: str, with_cas: bool) -> None:
                 t = time.perf_counter()
                 try:
                     if cas.sid and not _cas_alive(cas):
-                        cas.sid = None
+                        cas.gone()
                     if not cas.sid:
                         cas.session()
                         result["cas_ms"] = round((time.perf_counter() - t) * 1000)
@@ -223,7 +228,7 @@ def _warm(name: str, with_cas: bool) -> None:
         _set(name, state="ready", note=None, checked=time.time(), finished=time.time(), **result)
     except BaseException as exc:  # noqa: BLE001 - recorded for the status line; never raised
         state, note = _problem(exc)
-        _set(name, state=state, note=note, checked=time.time())
+        _set(name, state=state, note=note)  # not "checked": tried again after RETRY_S, not after KEEPALIVE_S
     finally:
         with _lock:
             if _threads.get(name) is threading.current_thread():

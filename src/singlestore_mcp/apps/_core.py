@@ -34,10 +34,13 @@ from mcp.server.apps import Apps, ResourceCsp, ResourcePermissions
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
 
+from ..netguard import Unreachable
+from . import splash
+
 _F = TypeVar("_F", bound=Callable[..., Any])
 
-# Failures the caller can act on: bad arguments, missing objects, SQL errors.
-_EXPECTED_ERRORS = (ValueError, LookupError, s2.Error)
+# Failures the caller can act on: bad arguments, missing objects, SQL errors, a network that's away.
+_EXPECTED_ERRORS = (ValueError, LookupError, s2.Error, Unreachable)
 
 
 def surface_errors(fn: _F) -> _F:
@@ -169,6 +172,7 @@ def build_page(template: str) -> str:
     if _HEAD_MARKER not in html:
         raise RuntimeError(f"{template} is missing the {_HEAD_MARKER} marker")
     html = _VENDOR_MARKER.sub(_vendor_inline, html)
+    html = splash.expand(html)  # the Studio splash (the Workspace)
     html = html.replace(_HEAD_MARKER, _head(), 1)
     build = hashlib.sha1(html.encode("utf-8")).hexdigest()[:8]
     meta = f'<meta name="s2-build" content="{build}">\n<meta name="s2-head" content="{head_hash()}">'

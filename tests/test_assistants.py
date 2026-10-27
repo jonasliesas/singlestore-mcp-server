@@ -70,3 +70,43 @@ def test_notebook_assistant(cluster: McpSession) -> None:
         assert secs is not None, f"no reply: {json.dumps(d)[:400]}"
     finally:
         cluster.call("sql_editor_ask_cancel", {"editor_id": nid})
+
+
+# SAS tabs: the question carries the tab's language, library / caslib and known columns plus that language's SAS
+# guide; the SQL the assistant answers with must run as that language in the Workspace's SAS session.
+SAS_ASKS = [
+    ("procsql", "SASHELP", "Top 5 makes by average MSRP in CARS",
+     {"SASHELP.CARS": [{"name": "Make", "type": "char"}, {"name": "MSRP", "type": "num"}]}),
+    ("fedsql", "S2", "Average MSRP per Origin in CARS, highest first",
+     {"S2.CARS": [{"name": "Origin", "type": "char"}, {"name": "MSRP", "type": "num"}]}),
+    ("cas", "PUBLIC", "Average LOAN per JOB in HMEQ, sorted from highest to lowest",
+     {"PUBLIC.HMEQ": [{"name": "JOB", "type": "char"}, {"name": "LOAN", "type": "num"}]}),
+]
+
+
+@pytest.mark.sas
+@pytest.mark.parametrize("lang,lib,question,columns", SAS_ASKS, ids=[a[0] for a in SAS_ASKS])
+def test_sql_editor_assistant_sas_sql_runs(sas: McpSession, lang: str, lib: str, question: str, columns: dict) -> None:
+    import re
+
+    from singlestore_mcp import sas_sql
+
+    eid = f"e-zzsas-{lang}"
+    ctx = {"library": lib, "columns": columns, "options": {"pushdown": True}}
+    started = sas.ok("sql_editor_ask", {"editor_id": eid, "question": question, "database": DB, "language": lang, "sas": ctx})
+    assert started["sas_guide"] is True
+    try:
+        d, secs = sas.wait_until("sql_editor_inbox", {"editor_id": eid, "after": 0},
+                                 lambda d: isinstance(d, dict) and d.get("messages") and not d.get("job"), 300, 2)
+        assert secs is not None, f"no reply: {json.dumps(d)[:400]}"
+        answer = d["messages"][-1]["text"]
+        blocks = [b.strip() for b in re.findall(r"```[\w-]*\n?([\s\S]*?)```", answer) if b.strip()]
+        assert blocks, answer[:800]
+        assert not re.match(r"\s*proc\s+(sql|fedsql)\b", blocks[0], re.I), f"wrapped in a PROC step:\n{answer[:800]}"
+        for block in blocks:
+            for stmt in ([block] if sas_sql.is_plain_sas(block) else sas_sql.split_statements(block)):
+                r = sas.ok("sas_query", {"language": lang, "sql": stmt, "library": lib, "max_rows": 20, "history": False},
+                           timeout=600)
+                assert not r.get("needs_confirmation") and not r.get("error"), f"{stmt}\n→ {r.get('error') or r.get('reason')}\n\n{answer[:1500]}"
+    finally:
+        sas.call("sql_editor_ask_cancel", {"editor_id": eid})

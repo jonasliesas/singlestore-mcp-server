@@ -16,6 +16,10 @@ Backlog and agreed designs: [ROADMAP.md](ROADMAP.md). User docs: [README.md](REA
 - State lives under `SINGLESTORE_MCP_HOME` (default `~/.singlestore-mcp`): SQLite history
   (`history_store.py`), SQL Editor drafts/tabs (`sql_editor_state.py`), workloads, connections.
 - `sas_viya.py` / `sas_ep.py` – SAS Viya access and the SAS EP (embedded process) analysis.
+- `netguard.py` – recovery from network breaks (keepalive, route/sleep watcher, health probes, the Workspace's
+  "connection lost" line). New code that opens cluster or Viya connections uses `connections.connect_kwargs` /
+  `db.open_connection` / `sas_rest.request`, so it gets the same timeouts; test network faults with
+  `tests/faultproxy.py` (+ `fake_mysql.py`, `fake_viya.py`).
 
 ## Running and testing
 - Start the server with `uv run --no-sync` (plain `uv run` fails on the locked .exe). After code

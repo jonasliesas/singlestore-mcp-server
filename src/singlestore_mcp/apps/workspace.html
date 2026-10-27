@@ -51,16 +51,29 @@
   .ws-badge { position: absolute; top: 1px; right: 7px; min-width: 16px; height: 16px; padding: 0 4px; box-sizing: border-box; border-radius: 8px;
     background: var(--s2-err-fill); color: #fff; font-size: 10px; font-weight: 600; line-height: 16px; text-align: center; pointer-events: none; }
   .ws-badge[hidden] { display: none; }
-  /* Product name at the top of the rail */
-  .ws-brand { display: flex; flex-direction: column; align-items: center; gap: 3px; width: 50px; padding: 2px 0 8px; margin-bottom: 4px;
-    border-bottom: 1px solid var(--s2-border-2); color: var(--s2-text); font-size: 10px; font-weight: 700; letter-spacing: .02em; line-height: 1.05; text-align: center; }
-  .ws-brand svg { width: 26px; height: 26px; }
-  .ws-brand small { display: block; font-size: 8px; font-weight: 600; color: var(--s2-text-2); letter-spacing: .04em; }
+  /* The Studio's mark at the top of the rail (the name is on the splash and above the app) */
+  .ws-brand { display: flex; justify-content: center; width: 48px; padding: 2px 0 9px; margin-bottom: 4px; border-bottom: 1px solid var(--s2-border-2); }
+  .ws-brand svg { width: 30px; height: 30px; display: block; }
+  /* Before the shell is built the splash (an overlay) needs the page's height (hosts size the frame to the page). */
+  #root:empty { height: 760px; }
+  html[data-display-mode="fullscreen"] #root:empty { height: calc(100vh / var(--s2-zoom)); }
+  /* Connection health: "Connection to SingleStore lost – retrying…" over the views while it's away */
+  .ws-net { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 3; max-width: calc(100% - 24px);
+    display: flex; align-items: center; gap: 8px; padding: 5px 14px; border-radius: 999px; box-sizing: border-box;
+    background: var(--s2-warn-bg); color: var(--s2-warn); border: 1px solid currentColor; font-size: var(--s2-fs-xs);
+    box-shadow: 0 2px 8px rgba(0,0,0,.12); pointer-events: auto; }
+  .ws-net[hidden] { display: none; }
+  .ws-net .spin { width: 10px; height: 10px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+    animation: ws-spin 0.9s linear infinite; flex: none; }
+  .ws-net button { border: 0; background: none; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; padding: 0; }
+  @keyframes ws-spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .ws-net .spin { animation: none; } }
   .ws-rail button.present[aria-pressed="true"] { background: var(--s2-warn-bg); color: var(--s2-warn); font-weight: var(--font-weight-semibold, 600); }
 </style>
 </head>
 <body>
-<div id="root"><div class="s2-empty"><span class="s2-spinner"></span> Opening SAS SpeedyStore Studio…</div></div>
+<!--S2:SPLASH-->
+<div id="root"></div>
 <script type="module">
 // The workspace hosts the other apps as views, each in its own iframe, and
 // plays the MCP Apps *host* for them: it answers their ui/initialize, gives
@@ -92,13 +105,35 @@ const ICONS = {
   fullscreen: '<path d="M4 9V4h5"/><path d="M20 9V4h-5"/><path d="M4 15v5h5"/><path d="M20 15v5h-5"/>',
   present: '<rect x="3" y="4" width="18" height="12" rx="1.5"/><line x1="12" y1="16" x2="12" y2="20"/><line x1="8" y1="20" x2="16" y2="20"/><circle cx="12" cy="10" r="2.5"/>',
 };
-// SAS SpeedyStore Studio's mark: SpeedyStore purple with a bolt (speed).
-function brandMark() {
-  const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  s.setAttribute("viewBox", "0 0 32 32"); s.setAttribute("aria-hidden", "true");
-  s.innerHTML = '<rect width="32" height="32" rx="7" fill="#820ddf"/><path d="M18 5 9 18h6l-2 9 9-13h-6z" fill="#fff"/>'; // static, trusted markup
+// SAS SpeedyStore Studio's mark (a data store with speed streaks): the splash's logo, kept before the splash goes,
+// without its sheen and with its own gradient id (the splash's animations only apply inside the splash).
+const MARK = (() => {
+  const s = document.getElementById("s2-splash-mark")?.cloneNode(true);
+  if (!s) return null;
+  s.removeAttribute("id");
+  s.querySelector("[clip-path]")?.remove();
+  s.innerHTML = s.innerHTML.replaceAll("s2m-", "s2r-"); // static, trusted markup
   return s;
-}
+})();
+const brandMark = () => MARK?.cloneNode(true) ?? svg(ICONS.schema);
+
+// ---------------------------------------------------------------- splash
+// The Studio logo (splash.html) until the first view is usable, then a short fade - never longer. Its status line
+// says what it waits for. In the browser view the host page shows the logo over this page (one animation from
+// the start), so this page hides its own and sends the host its progress.
+const splash = {
+  status(text) {
+    window.S2Splash?.status(text);
+    if (S2.inBrowserView()) window.parent.postMessage({ type: "s2-splash", text }, "*");
+  },
+  done() {
+    if (splash.over) return;
+    splash.over = true;
+    window.S2Splash?.done();
+    if (S2.inBrowserView()) window.parent.postMessage({ type: "s2-splash-done" }, "*");
+  },
+  over: false,
+};
 // Rail order follows this object's order (bottom: true goes to the bottom of the rail).
 const VIEWS = {
   schema: { label: "Schema", title: "Schema Explorer", uri: "ui://singlestore/schema-explorer.html", tool: "schema_explorer" },
@@ -152,7 +187,7 @@ const mainEl = h("div", { class: "ws-main" });
 function buildShell() {
   const rail = h("nav", { class: "ws-rail", "aria-label": "Workspace views" },
     h("div", { class: "ws-brand", role: "img", "aria-label": "SAS SpeedyStore Studio", title: `SAS SpeedyStore Studio · build ${S2.build}` },
-      brandMark(), h("span", {}, "Studio", h("small", {}, "SpeedyStore"))));
+      brandMark()));
   const railButton = (key, v) => (railButtons[key] = h("button", { title: v.title, "aria-label": v.title,
     onclick: () => openView(key === "notebook" ? (ws.lastNotebook ?? "notebook") : key) }, svg(ICONS[key]), v.label));
   for (const [key, v] of Object.entries(VIEWS)) if (!v.bottom) rail.append(railButton(key, v));
@@ -171,9 +206,10 @@ function buildShell() {
   if (S2.canFullscreen() && !S2.inBrowserView()) {
     rail.append(h("button", { class: "tool", title: "Full screen (Esc to exit)", "aria-label": "Full screen", onclick: () => S2.toggleFullscreen() }, svg(ICONS.fullscreen)));
   }
-  mainEl.append(tabsEl);
+  mainEl.append(tabsEl, healthEl);
   root.replaceChildren(h("div", { class: "ws" }, rail, mainEl));
   startAlertBadge();
+  startHealth();
   // Tab shortcuts while the focus is in the workspace itself (the SQL Editor forwards its own).
   window.addEventListener("keydown", (e) => {
     const action = tabKeyAction(e);
@@ -240,6 +276,59 @@ async function pollAlerts() {
     } catch { /* not allowed in this frame */ }
   }
   alertFirstPoll = false;
+}
+
+// ---------------------------------------------------------------- connection health
+// After a network break (VPN dropped or moved, sleep, Wi-Fi) the server notices and reconnects by itself (netguard);
+// this line says so while SingleStore or SAS Viya can't be reached ("… lost – retrying"), and when they're back the
+// views hear "s2-reconnected" (to reload what failed meanwhile) and the SAS session is checked at once. In-memory on
+// the server (no cluster query): every 30 s, every 3 s while something is down, and at once when the page comes back
+// online or is shown again.
+const HEALTH_MS = 30000, HEALTH_DOWN_MS = 3000;
+const healthText = h("span", {});
+const healthEl = h("div", { class: "ws-net", role: "status", "aria-live": "polite", hidden: true },
+  h("span", { class: "spin", "aria-hidden": "true" }), healthText,
+  h("button", { title: "Check again now", onclick: () => pollHealth("all") }, "Retry now"));
+const health = { down: new Set(), timer: null, lastNotice: 0, opened: Date.now() / 1000, busy: false };
+const SERVICE_NAMES = { singlestore: "SingleStore", sas: "SAS Viya" };
+function startHealth() {
+  setTimeout(() => pollHealth("none"), 2500);
+  window.addEventListener("online", () => pollHealth("all"));
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) pollHealth("down"); });
+}
+async function pollHealth(probe = "down") {
+  clearTimeout(health.timer);
+  if (health.busy) return;
+  health.busy = true;
+  let d = null;
+  try { d = await S2.callTool("connection_health", { probe, after_notice: health.lastNotice }); } catch { /* the page's own reconnect handles a server restart */ }
+  health.busy = false;
+  if (d) showHealth(d);
+  health.timer = setTimeout(() => pollHealth("down"), health.down.size ? HEALTH_DOWN_MS : HEALTH_MS);
+}
+function showHealth(d) {
+  const services = d.services ?? {};
+  const down = Object.entries(services).filter(([, s]) => s.state === "down");
+  const back = [...health.down].filter((k) => services[k]?.state !== "down");
+  health.down = new Set(down.map(([k]) => k));
+  if (down.length) {
+    const since = Math.min(...down.map(([, s]) => Number(s.since) || Date.now() / 1000));
+    const at = new Date(since * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const names = down.map(([k, s]) => s.name ?? SERVICE_NAMES[k] ?? k).join(" and ");
+    healthText.textContent = `Connection to ${names} lost (since ${at}) – retrying…`;
+    healthEl.title = down.map(([k, s]) => `${s.name ?? k}: ${s.error ?? "unreachable"}`).join("\n");
+  }
+  healthEl.hidden = !down.length;
+  for (const k of back) {
+    const name = services[k]?.name ?? SERVICE_NAMES[k] ?? k;
+    S2.toast(`Reconnected to ${name}`, "ok");
+    for (const view of Object.keys(ws.frames)) deliver(view, { type: "s2-reconnected", service: k });
+    if (k === "sas") sasPrewarm();
+  }
+  for (const n of d.notices ?? []) {
+    health.lastNotice = Math.max(health.lastNotice, Number(n.id) || 0);
+    if ((Number(n.at) || 0) >= health.opened - 60) S2.toast(n.text, "");
+  }
 }
 
 // ---------------------------------------------------------------- SAS session
@@ -532,6 +621,7 @@ async function createFrame(view, handoff) {
   const v = viewDef(view);
   const loading = h("div", { class: "ws-loading", dataset: { view } }, h("span", {}, h("span", { class: "s2-spinner" }), ` Loading ${v.title}…`));
   mainEl.append(loading);
+  splash.status(`Opening ${v.title}…`);
   const f = (ws.frames[view] = { iframe: null, pending: [], args: {}, result: null, ready: false });
   if (isSql(view)) {
     // The tab active at start gets the workspace's own result (with the SQL Claude sent);
@@ -573,6 +663,7 @@ async function createFrame(view, handoff) {
     mainEl.append(f.iframe);
   } catch (e) {
     loading.replaceChildren(S2.errorBox(new Error(`Couldn't load ${v.title}: ${e.message ?? e}`)));
+    splash.done();
   }
 }
 
@@ -670,6 +761,7 @@ window.addEventListener("message", async (ev) => {
         send(view, { jsonrpc: "2.0", method: "ui/notifications/tool-result", params: await openingResult(view) });
         f.ready = true;
         mainEl.querySelector(`.ws-loading[data-view="${view}"]`)?.remove();
+        requestAnimationFrame(() => splash.done());  // the first view is usable: the logo goes
         send(view, { type: "s2-visibility", hidden: ws.current !== view });
         for (const m of f.pending.splice(0)) send(view, m);
         return;
@@ -715,10 +807,11 @@ function pushContext() {
 // ---------------------------------------------------------------- host wiring
 let started = false;
 S2.onDisplayModeChange = () => {};
-await S2.connect({
+const app = await S2.connect({
   name: "singlestore-workspace",
   onToolInput(args) {
     ws.args = args ?? {};
+    splash.status("Connecting to SingleStore…");
     prefetchPage(viewDef(ws.args.view ?? "sql")?.uri);
     prefetchSqlTabs();
   },
@@ -737,6 +830,7 @@ await S2.connect({
       if (data.connection_error) S2.toast(`The active connection fails: ${data.connection_error.slice(0, 160)}`, "err");
     } catch (e) {
       root.replaceChildren(S2.errorBox(e));
+      splash.done();
     }
   },
   onHostContext(ctx) {
@@ -746,6 +840,7 @@ await S2.connect({
     }
   },
 });
+if (app && S2.inBrowserView() && !splash.over) window.S2Splash?.hide();  // the host page's logo is on top
 </script>
 </body>
 </html>

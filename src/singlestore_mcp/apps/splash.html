@@ -1,0 +1,91 @@
+<!-- SAS SpeedyStore Studio splash: one fragment, put in by splash.py at the S2:SPLASH marker (Workspace, browser host
+     page, the desktop shortcut's starting.html). Inline SVG + CSS only. Pages drive it with S2Splash.status(text) / .done(). -->
+<style>
+  #s2-splash { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; pointer-events: none;
+    background: var(--s2-bg, light-dark(#ffffff, #1e1e1e)); color: var(--s2-text, light-dark(#1f2328, #ececec));
+    font-family: var(--s2-font, system-ui, -apple-system, "Segoe UI", sans-serif); transition: opacity .28s ease-out; }
+  #s2-splash[data-state="done"] { opacity: 0; }
+  html[data-presenter-loading] #s2-splash { visibility: visible; }  /* nothing identifying in it */
+  #s2-splash .sp-card { display: flex; flex-direction: column; align-items: center; gap: 14px; margin-top: -4vh; }
+  #s2-splash svg { width: 84px; height: 84px; overflow: visible; filter: drop-shadow(0 6px 14px rgb(98 16 190 / .28)); }
+  #s2-splash .sp-name { font-size: 22px; font-weight: 650; letter-spacing: .01em; line-height: 1.2; white-space: nowrap; }
+  #s2-splash .sp-name b { font-weight: 650; color: light-dark(#6a0fc2, #c9a7ff); }
+  #s2-splash .sp-status { min-height: 1.4em; font-size: 13px; color: var(--s2-text-2, light-dark(#59636e, #a8a8a8)); }
+  #s2-splash[data-big] svg, html[data-presenter] #s2-splash svg { width: 104px; height: 104px; }
+  #s2-splash[data-big] .sp-name, html[data-presenter] #s2-splash .sp-name { font-size: 27px; }
+  #s2-splash[data-big] .sp-status, html[data-presenter] #s2-splash .sp-status { font-size: 15px; }
+  /* Intro (~1.2 s): the tile settles, the store slides in, its speed streaks draw out behind it, a sheen sweeps
+     across, the name and status fade up. Then a calm idle: the streaks breathe. Final states are the defaults, so
+     no animation (reduced motion) shows the finished logo. */
+  #s2-splash .sp-tile { transform-origin: 16px 16px; animation: sp-pop .42s cubic-bezier(.2,.8,.2,1.15) backwards; }
+  #s2-splash .sp-store { animation: sp-in .5s .1s cubic-bezier(.2,.8,.2,1) backwards; }
+  #s2-splash .sp-streak { stroke-dasharray: 8; animation: sp-draw .42s cubic-bezier(.3,.7,.2,1) backwards, sp-breathe 2.4s ease-in-out infinite; }
+  #s2-splash .sp-streak:nth-of-type(1) { animation-delay: .3s, 1.4s; }
+  #s2-splash .sp-streak:nth-of-type(2) { animation-delay: .38s, 1.6s; }
+  #s2-splash .sp-streak:nth-of-type(3) { animation-delay: .46s, 1.8s; }
+  #s2-splash .sp-sheen { transform: translateX(-40px); animation: sp-sweep .7s .62s ease-in-out both; }
+  #s2-splash .sp-name { animation: sp-up .45s .38s ease-out backwards; }
+  #s2-splash .sp-status { animation: sp-up .45s .6s ease-out backwards; }
+  #s2-splash[data-intro="off"] .sp-tile, #s2-splash[data-intro="off"] .sp-store, #s2-splash[data-intro="off"] .sp-name,
+  #s2-splash[data-intro="off"] .sp-status, #s2-splash[data-intro="off"] .sp-sheen { animation: none; }
+  #s2-splash[data-intro="off"] .sp-streak { animation: sp-breathe 2.4s ease-in-out infinite; }
+  @keyframes sp-pop { from { opacity: 0; transform: scale(.82); } }
+  @keyframes sp-in { from { opacity: 0; transform: translateX(-4px); } }
+  @keyframes sp-draw { from { stroke-dashoffset: 8; } }
+  @keyframes sp-sweep { from { transform: translateX(-40px); } to { transform: translateX(44px); } }
+  @keyframes sp-up { from { opacity: 0; transform: translateY(6px); } }
+  @keyframes sp-breathe { 50% { opacity: .45; } }
+  @media (prefers-reduced-motion: reduce) {
+    #s2-splash, #s2-splash * { animation: none !important; transition: none !important; }
+  }
+</style>
+<div id="s2-splash" role="status" aria-live="polite" aria-label="SAS SpeedyStore Studio is loading">
+  <div class="sp-card">
+    <svg id="s2-splash-mark" viewBox="0 0 32 32" aria-hidden="true">
+      <defs>
+        <linearGradient id="s2m-fill" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9024ec"/><stop offset="1" stop-color="#5a0db0"/></linearGradient>
+        <linearGradient id="s2m-shine" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset=".5" stop-color="#fff" stop-opacity=".38"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+        <clipPath id="s2m-clip"><rect width="32" height="32" rx="7.5"/></clipPath>
+      </defs>
+      <g class="sp-tile">
+        <rect width="32" height="32" rx="7.5" fill="url(#s2m-fill)"/>
+        <g fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round">
+          <path class="sp-streak" d="M9.6 12.4H4.2"/>
+          <path class="sp-streak" d="M9.6 16.3H2.9" stroke-opacity=".8"/>
+          <path class="sp-streak" d="M9.6 20.2H5.4" stroke-opacity=".6"/>
+        </g>
+        <g class="sp-store" transform="translate(19.5 16) skewX(-9) translate(-19.5 -16)">
+          <path d="M12.5 9.4v13.2a7 2.6 0 0 0 14 0V9.4z" fill="#fff"/>
+          <ellipse cx="19.5" cy="9.4" rx="7" ry="2.6" fill="#dcc6ff"/>
+          <path d="M12.5 13.9a7 2.6 0 0 0 14 0M12.5 18.3a7 2.6 0 0 0 14 0" fill="none" stroke="#6a12c9" stroke-width="1.3"/>
+        </g>
+        <g clip-path="url(#s2m-clip)"><rect class="sp-sheen" x="-4" y="-4" width="14" height="40" fill="url(#s2m-shine)" transform="skewX(-18)"/></g>
+      </g>
+    </svg>
+    <div class="sp-name">SAS SpeedyStore <b>Studio</b></div>
+    <div class="sp-status" id="s2-splash-status">Loading…</div>
+  </div>
+</div>
+<script>
+// done() fades the splash out at once (no minimum time); hide() removes it without a fade.
+(() => {
+  const el = document.getElementById("s2-splash"), statusEl = document.getElementById("s2-splash-status");
+  let gone = false;
+  const remove = () => el.remove();
+  window.S2Splash = {
+    get active() { return !gone; },
+    status(text) { if (!gone && text) statusEl.textContent = text; },
+    big(on) { el.toggleAttribute("data-big", Boolean(on)); },
+    skipIntro() { el.dataset.intro = "off"; },
+    done() {
+      if (gone) return;
+      gone = true;
+      el.dataset.state = "done";
+      if (matchMedia("(prefers-reduced-motion: reduce)").matches) return remove();
+      el.addEventListener("transitionend", remove, { once: true });
+      setTimeout(remove, 400);
+    },
+    hide() { gone = true; remove(); },
+  };
+})();
+</script>

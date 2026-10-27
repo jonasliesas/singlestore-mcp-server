@@ -682,3 +682,65 @@ def test_standalone_app_opens(ui, app_url, tool: str, args: dict, expect: str) -
     time.sleep(1.0)
     _no_problems(page, errors, tool)
 
+
+
+# ----------------------------------------------------------------------------- the Studio splash
+
+_SPLASH = "(e => e ? (e.dataset.state || 'shown') : 'gone')(document.getElementById('s2-splash'))"
+
+
+def _splash_states(page: Any, timeout: float = 30) -> list[str]:
+    """The host page's splash states seen until it is gone (shown -> done -> gone)."""
+    seen: list[str] = []
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        st = page.evaluate(_SPLASH)
+        if not seen or seen[-1] != st:
+            seen.append(st)
+        if st == "gone":
+            break
+        time.sleep(0.02)
+    return seen
+
+
+def test_splash_until_the_first_view_is_usable(ui, app_url) -> None:
+    """The Studio logo shows at once, says what it waits for, and fades out as soon as the SQL Editor has its data
+    (the Workspace's own copy is never left behind); the rail shows the same mark."""
+    page, errors = ui
+    _open(page, app_url("sql_editor", {"database": DB, "view": "sql"}))
+    assert page.evaluate(_SPLASH) == "shown"
+    assert page.evaluate("document.querySelector('#s2-splash .sp-name').innerText") == "SAS SpeedyStore Studio"
+    statuses = set()
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and page.evaluate(_SPLASH) == "shown":
+        statuses.add(page.evaluate("document.getElementById('s2-splash-status')?.textContent"))
+        time.sleep(0.02)
+    assert _splash_states(page)[-1] == "gone"
+    assert statuses & {"Connecting to SingleStore…", "Opening SQL Editor…"}, statuses
+    sql = find_frame(page, "SQL Editor", 5)
+    assert sql.evaluate("!!document.querySelector('.cm-content')"), "the logo went before the editor was there"
+    ws = find_frame(page, "SAS SpeedyStore Studio · Workspace", 5)
+    assert ws.evaluate("!document.getElementById('s2-splash')")
+    brand = ws.locator(".ws-brand")
+    assert brand.get_attribute("aria-label") == "SAS SpeedyStore Studio" and brand.inner_text().strip() == ""
+    assert ws.evaluate("document.querySelector('.ws-brand svg').getBoundingClientRect().width") >= 28
+    _no_problems(page, errors, "splash")
+
+
+def test_splash_other_app_and_reduced_motion(browser: Any, app_url) -> None:
+    """With reduced motion the logo stands still (no animation) and still goes once the app has its result."""
+    ctx = browser.new_context(viewport={"width": 1200, "height": 800}, reduced_motion="reduce")
+    try:
+        page = ctx.new_page()
+        from uihelpers import Errors
+
+        errors = Errors(page)
+        _open(page, app_url("query_history", {}))
+        assert page.evaluate(_SPLASH) in ("shown", "gone")
+        assert page.evaluate("document.getAnimations().filter(a => a.effect?.target?.closest?.('#s2-splash')).length") == 0
+        assert _splash_states(page)[-1] == "gone"
+        f = app_frame(page, 30)
+        assert wait_js(f, "/ms/i.test(document.body.innerText)", 30)
+        _no_problems(page, errors, "splash (reduced motion)")
+    finally:
+        ctx.close()

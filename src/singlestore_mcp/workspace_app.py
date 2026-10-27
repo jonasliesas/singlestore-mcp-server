@@ -156,30 +156,40 @@ def _warm_database() -> None:
         pass
 
 
-_SPLASH = """<!doctype html><html><head><meta charset="utf-8"><title>SAS SpeedyStore Studio</title>
-<style>html,body{height:100%;margin:0}body{display:grid;place-items:center;font:14px system-ui,'Segoe UI',sans-serif;
-color:#555;background:#fff}@media(prefers-color-scheme:dark){body{background:#1e1e1e;color:#aaa}}
-.s{width:18px;height:18px;border:2px solid #ccc;border-top-color:#7c3aed;border-radius:50%;
-display:inline-block;vertical-align:-4px;margin-right:8px;animation:r .8s linear infinite}@keyframes r{to{transform:rotate(360deg)}}
-</style></head><body><div id="m"><span class="s"></span>Starting SAS SpeedyStore Studio…</div>
+_SPLASH = """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>SAS SpeedyStore Studio</title>
+<!--S2:FAVICON-->
+<style>:root{color-scheme:light dark}html,body{height:100%;margin:0;background:light-dark(#fff,#1e1e1e)}</style>
+</head><body><!--S2:SPLASH-->
 <script>
 const target = __TARGET__, ping = target.split("?")[0] + "ping", t0 = Date.now();
+S2Splash.status("Starting the server…");
 (function poll() {
   fetch(ping + "?t=" + Date.now(), { mode: "no-cors", cache: "no-store" })
-    .then(() => location.replace(target))
+    // #s2-continue: the host page carries on with the logo as it is (no second intro).
+    .then(() => location.replace(target + "#s2-continue"))
     .catch(() => {
-      if (Date.now() - t0 > 90000) document.getElementById("m").textContent =
-        "The workspace didn't start. Close this window and try the shortcut again.";
+      if (Date.now() - t0 > 90000) S2Splash.status("The workspace didn't start. Close this window and try the shortcut again.");
       else setTimeout(poll, 250);
     });
 })();
 </script></body></html>"""
 
 
+def _splash_module():
+    """apps/splash.py loaded on its own: importing the apps package loads the whole server (seconds), and this page
+    must show at once."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_s2_splash", Path(__file__).with_name("apps") / "splash.py")
+    mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod
+
+
 def _splash(target: str) -> Path:
     """A local "Starting…" page that switches to ``target`` once the server answers."""
     path = data_dir() / "starting.html"
-    path.write_text(_SPLASH.replace("__TARGET__", json.dumps(target)), encoding="utf-8")
+    path.write_text(_splash_module().expand(_SPLASH).replace("__TARGET__", json.dumps(target)), encoding="utf-8")
     return path
 
 

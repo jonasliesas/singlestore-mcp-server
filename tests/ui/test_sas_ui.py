@@ -306,3 +306,26 @@ def test_fedsql_pushdown_find_in_query_history(workspace, sas: McpSession) -> No
                        " || [...document.querySelectorAll('.qh-table td.sql')].some((e) => e.textContent.toLowerCase().includes('count'))", 60),         text(qh)[-600:]
     errs = [e for e in errors.drain() if "favicon" not in e]
     assert not errs, errs
+
+
+def test_function_check_before_a_sas_run(workspace, sas: McpSession) -> None:
+    """The SAS function matrix's pre-run check: a function that stops pushdown on a SingleStore library (CATX in
+    PROC SQL) and one the dialect hasn't got (CATX in FedSQL) get "Check the functions" before anything runs."""
+    page, errors, ws, sql = workspace
+    s2libs = [x for x in sas.ok("sas_libraries")["libraries"] if x["singlestore"]]
+    if not s2libs:
+        pytest.skip("no SingleStore library in the SAS session")
+    lib = s2libs[0]["name"]
+    sql.get_by_label("Run as", exact=True).select_option("procsql")
+    assert wait_js(sql, f"[...document.querySelectorAll('.sq-tree .sq-row .name')].some((e) => e.textContent === '{lib}')", 180), text(sql)[-500:]
+    _set_sql(sql, f"select catx(' - ', a, b) as ab from {lib}.zz_any_table;")
+    assert wait_js(sql, "document.body.innerText.includes('Check the functions')", 15), text(sql)[-500:]
+    assert "not pushed down to SingleStore" in sql.locator(".sq-hint").inner_text()
+    sql.get_by_role("button", name="Cancel", exact=True).click()
+    sql.get_by_label("Run as", exact=True).select_option("fedsql")
+    _set_sql(sql, f"select catx(' - ', a, b) as ab from {lib}.zz_any_table;")
+    assert wait_js(sql, "document.body.innerText.includes('not available in FedSQL')", 15), text(sql)[-500:]
+    assert "trim(a)" in sql.locator(".sq-hint").inner_text()  # the alternative
+    sql.get_by_role("button", name="Cancel", exact=True).click()
+    errs = [e for e in errors.drain() if "favicon" not in e]
+    assert not errs, errs

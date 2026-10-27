@@ -9,6 +9,7 @@
 <!--S2:VENDOR:singlestore_functions.json-->
 <!--S2:VENDOR:s2-charts.js-->
 <!--S2:VENDOR:sas-complete.js-->
+<!--S2:VENDOR:sas-funcs.js-->
 <style>
   body { padding: 10px 12px; }
   /* Full height: header and panels take what they need, the editor body the rest (a header that wraps never
@@ -279,7 +280,16 @@ const sas = {
   columns: new Map(),            // "sas|LIB\u0000TABLE" -> {status, data, error}
   viya: null,                    // sas_connections_state: the saved SAS Viya connections and the active one
   colCache: new SasComplete.ColumnCache({ missingTtl: 60_000 }),  // autocomplete columns (see sasColumnSource)
+  funcs: null, funcsLoading: false,  // the SAS function matrix (sql_editor_sas_functions) for the pre-run check
 };
+// The SAS function matrix, loaded once when a tab first runs as SAS: which functions each dialect has and which
+// SingleStore runs (pushdown). The pre-run check (languageHint) skips it until it's there.
+async function loadSasFuncs() {
+  if (sas.funcs || sas.funcsLoading) return;
+  sas.funcsLoading = true;
+  try { sas.funcs = (await S2.callTool("sql_editor_sas_functions", {})).functions; } catch { /* the check is optional */ }
+  finally { sas.funcsLoading = false; }
+}
 async function loadViya(force = false) {
   if (sas.viya && !force) return;
   try { sas.viya = await S2.callTool("sas_connections_state", {}); } catch { sas.viya = null; }
@@ -344,7 +354,7 @@ window.addEventListener("s2:sas-connection-changed", () => {
 const srcOf = (lang = state.language) => (lang === "cas" ? "cas" : "sas");
 const curLib = (lang = state.language) => (lang === "cas" ? state.sasOpts.caslib : state.sasOpts.library);
 async function loadSasLibraries(force = false, lang = state.language) {
-  loadViya();
+  loadViya(); loadSasFuncs();
   const cas = lang === "cas";
   if (cas ? (sas.casLoading || (sas.caslibs && !force)) : (sas.libsLoading || (sas.libs && !force))) return;
   sasSession.refresh();
@@ -402,7 +412,7 @@ function setLanguage(lang, { quiet = false } = {}) {
   state.language = lang;
   state.treeSrc = srcForLang(lang);
   state.hint = null; state.langAsk = null;
-  if (isSas(lang)) loadSasLibraries();
+  if (isSas(lang)) { loadSasLibraries(); loadSasFuncs(); }
   view.dispatch({ effects: sqlCompartment.reconfigure(sqlExtension()) });
   renderHeader(); renderTree(); renderEditorBadge(); scheduleDraftSave();
   if (!quiet) S2.toast(`This tab now runs as ${langOf(lang).label}`, "ok");
@@ -1338,7 +1348,22 @@ function languageHint(sql, lang) {
   const db = refs.find((n) => s2Db(n) && !libMeta(n) && !sasLib(n));
   if (db && (sas.libs || sas.caslibs)) return { message: `${db} is a SingleStore database, not a ${lang === "cas" ? "caslib" : "SAS library"}.`, suggest: "singlestore" };
   if (lang === "procsql" && /\blimit\s+\d+\s*;?\s*$/i.test(text)) return { message: "PROC SQL has no LIMIT: set OUTOBS in the ⚙ options, or run it as FedSQL.", suggest: "fedsql" };
-  return null;
+  return functionHint(sql, lang);
+}
+// Functions the tab's dialect hasn't got, and (when the statement reads a SingleStore library / caslib) functions
+// that stop pushdown, from the SAS function matrix (vendor/sas-funcs.js; the same rules as sas_functions.py).
+function readsSingleStore(sql, lang) {
+  const cur = curLib(lang);
+  return SC.statementTables(sql, lang, cur).some((t) => {
+    const m = libMeta(t.lib, lang);
+    return !!(m && (m.singlestore || m.badge || /^(SSTORE|SINGLESTORE)$/i.test(m.engine ?? "")));
+  });
+}
+function functionHint(sql, lang) {
+  if (!sas.funcs) { loadSasFuncs(); return null; }
+  const found = SasFuncs.check(sql, lang, sas.funcs, readsSingleStore(sql, lang));
+  const message = SasFuncs.message(found, lang);
+  return message ? { message, suggest: null, kind: "functions" } : null;
 }
 function checkHint(sql, lang, database) {
   if (state.hintOk === sql) { state.hintOk = null; return true; }
@@ -1700,7 +1725,7 @@ function renderResults() {
   }
   if (state.hint) {
     const hn = state.hint;
-    statusEl.replaceChildren(h("span", { class: "s2-badge warn" }, "Check the language"), langBadge(hn.lang));
+    statusEl.replaceChildren(h("span", { class: "s2-badge warn" }, hn.kind === "functions" ? "Check the functions" : "Check the language"), langBadge(hn.lang));
     outEl.replaceChildren(h("div", { class: "sq-hint", role: "alertdialog" },
       h("span", {}, "⚠ ", hn.message),
       h("span", { class: "s2-spacer" }),
@@ -2740,6 +2765,34 @@ function editorContext() {
   return { sql, selected: !sel.empty, lastResult };
 }
 
+// What the assistant needs to answer in the tab's SAS dialect: its library / caslib (and the SingleStore database
+// behind it), that library's tables (caslibs: loaded or not), the columns the editor already knows (tables named in
+// the editor's SQL first, then others of the tab's library) and the tab's options. Null for SingleStore tabs.
+function sasAskContext(sqlText) {
+  const lang = state.language;
+  if (!isSas(lang)) return null;
+  const lib = curLib(lang);
+  const meta = lib ? libMeta(lib, lang) : null;
+  const pick = (m) => m && Object.fromEntries(["name", "engine", "type", "database", "singlestore", "singlestore_kind", "badge"]
+    .filter((k) => m[k] != null && m[k] !== "").map((k) => [k, m[k]]));
+  const tdata = lib ? sas.tables.get(`${srcOf(lang)}|${lib}`)?.data : null;
+  const tables = (tdata?.tables ?? []).slice(0, 150).map((t) => (lang === "cas" ? { name: t.name, loaded: !!t.loaded } : t.name));
+  const columns = {};
+  const add = (l, t) => {
+    if (Object.keys(columns).length >= 12) return;
+    const e = sas.colCache.get(colKey(lang, l, t));
+    if (e?.status === "ok") columns[`${l}.${e.name ?? t}`] = e.columns.slice(0, 120).map((c) => ({ name: c.name, type: c.type, length: c.length, format: c.format }));
+  };
+  for (const t of SC.statementTables(sqlText ?? "", lang, lib)) add(canonLib(t.lib, lang), canonTable(canonLib(t.lib, lang), t.table, lang));
+  const prefix = [tabConnName(), srcOf(lang), String(lib ?? "").toUpperCase()].join("\u0000") + "\u0000";
+  if (lib) for (const [k, e] of sas.colCache.map) if (k.startsWith(prefix) && e.status === "ok") add(canonLib(lib, lang), e.name ?? k.slice(prefix.length));
+  const s2libs = (lang === "cas" ? sas.caslibs : sas.libs)?.filter((l) => l.singlestore || l.badge).slice(0, 12)
+    .map((l) => ({ name: l.name, database: l.database ?? null })) ?? [];
+  const o = state.sasOpts;
+  return { library: lib ?? null, library_info: pick(meta), tables, columns, singlestore_libraries: s2libs,
+           options: { outobs: o.outobs, noexec: o.noexec, pushdown: o.pushdown } };
+}
+
 async function ask() {
   const question = askBox.value.trim();
   if (!question || chat.waiting) return;
@@ -2754,10 +2807,12 @@ async function ask() {
   if (mode === "app") {
     try {
       await S2.callTool("sql_editor_ask", { editor_id: editorId, question, database: state.database,
-        sql: ctx.sql, selected: ctx.selected, last_result: ctx.lastResult, profile: profileSelect.value });
+        sql: ctx.sql, selected: ctx.selected, last_result: ctx.lastResult, profile: profileSelect.value,
+        language: state.language, sas: sasAskContext(view.state.doc.toString()) });
     } catch (e) { failed = cleanError(e).message; }
   } else {
-    const parts = [`[SQL Editor ${editorId}${tab.label ? ` · tab ${tab.label}` : ""} · database ${state.database ?? "default"}] ${question}`];
+    const runsAs = isSas() ? ` · runs as ${langOf(state.language).label}${curLib() ? ` on ${curLib()}` : ""} (SAS: answer in that dialect)` : "";
+    const parts = [`[SQL Editor ${editorId}${tab.label ? ` · tab ${tab.label}` : ""} · database ${state.database ?? "default"}${runsAs}] ${question}`];
     if (ctx.sql) parts.push(`${ctx.selected ? "Selected SQL" : "Editor SQL"}:\n\`\`\`sql\n${ctx.sql.slice(0, 8000)}\n\`\`\``);
     if (ctx.lastResult) parts.push(`Last result: ${ctx.lastResult}`);
     parts.push(`(Answer with sql_editor_reply, editor_id "${editorId}", so it appears in the editor.)`);

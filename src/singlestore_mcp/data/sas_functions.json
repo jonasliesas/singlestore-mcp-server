@@ -1,0 +1,2522 @@
+{
+ "about": "Which functions each SAS SQL dialect of the SQL Editor supports and which are pushed down to SingleStore. procsql: PROC SQL on a SAS/ACCESS to SingleStore library (implicit pass-through); fedsql: PROC FEDSQL on that library; cas: FedSQL in CAS on a SAS SpeedyStore caslib. Edit by hand or re-verify with scripts/sas_functions.py --verify; scripts/sas_functions.py --table regenerates the README table.",
+ "sources": {
+  "access_map": "SAS/ACCESS to SingleStore's own SQL function map: LIBNAME option SQL_FUNCTIONS_COPY= (default list) and SQL_FUNCTIONS=ALL (extended list), dumped on SAS Viya (Zeus) 2026-10-27. Option docs: SAS/ACCESS for Relational Databases: Reference, SQL_FUNCTIONS= / SQL_FUNCTIONS_COPY= LIBNAME options (https://documentation.sas.com/?docsetId=acreldb).",
+  "fedsql": "SAS FedSQL Language Reference (https://documentation.sas.com/?docsetId=fedsqlref): functions, SELECT (LIMIT/OFFSET), identifiers, A High-Level Comparison of PROC SQL and FedSQL.",
+  "cas": "FedSQL Programming for SAS Cloud Analytic Services (https://documentation.sas.com/?docsetId=casfedsql): supported statements (SELECT, CREATE TABLE AS, DROP TABLE), implicit pass-through.",
+  "procsql": "SAS SQL Procedure User's Guide (https://documentation.sas.com/?docsetId=sqlproc) and SAS/ACCESS for Relational Databases: Reference, \"SQL Pass-Through Facility\" / \"Passing Functions to the DBMS Using PROC SQL\" (https://documentation.sas.com/?docsetId=acreldb).",
+  "verified": "Run in the Workspace's SAS session (scripts/sas_functions.py --verify): the statement ran or not, and the Pushdown verdict (PROC SQL sastrace, FedSQL _method plan + driver trace, CAS method=true plan)."
+ },
+ "test_tables": {
+  "procsql": {
+   "cars": {
+    "t": "S2.CARS",
+    "n": "msrp",
+    "c": "make",
+    "c2": "origin",
+    "ncyl": "cylinders"
+   },
+   "prdsal": {
+    "t": "S2.PRDSAL",
+    "d": "month",
+    "n": "actual",
+    "c": "product",
+    "dlit": "'01JAN1993'd"
+   }
+  },
+  "fedsql": {
+   "cars": {
+    "t": "S2.CARS",
+    "n": "\"MSRP\"",
+    "c": "\"Make\"",
+    "c2": "\"Origin\"",
+    "ncyl": "\"Cylinders\""
+   },
+   "prdsal": {
+    "t": "S2.PRDSAL",
+    "d": "\"MONTH\"",
+    "n": "\"ACTUAL\"",
+    "c": "\"PRODUCT\"",
+    "dlit": "date '1993-01-01'"
+   }
+  },
+  "cas": {
+   "cars": {
+    "t": "CFANS.WORKFORCE_DATA",
+    "n": "Annual_Salary",
+    "c": "Name",
+    "c2": "Gender",
+    "ncyl": "Sick_Days_Last_Year"
+   },
+   "prdsal": {
+    "t": "CFANS.WORKFORCE_DATA",
+    "d": "End_Date",
+    "n": "Annual_Salary",
+    "c": "Name",
+    "dlit": "date '2020-01-01'"
+   }
+  }
+ },
+ "functions": [
+  {
+   "name": "COUNT",
+   "category": "aggregate",
+   "kind": "agg",
+   "table": "cars",
+   "test": "count({n})",
+   "singlestore": "COUNT",
+   "access_map": "sql",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select origin, count(msrp) as v from S2.CARS group by origin",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select TXT_1.`Origin`, COUNT(TXT_1.`MSRP`) as `v` from `MyDB`.`CARS` TXT_1 group by TXT_1.`Origin`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select \"Origin\", count(\"MSRP\") as v from S2.CARS group by \"Origin\"",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select `MyDB`.`CARS`.`Origin`, COUNT (`MyDB`.`CARS`.`MSRP`)  as `V` from `MyDB`.`CARS` group by `MyDB`.`CARS`.`Origin`"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select Gender, count(Annual_Salary) as v from CFANS.WORKFORCE_DATA group by Gender",
+    "supported": true,
+    "pushdown": "partly"
+   }
+  },
+  {
+   "name": "COUNT(DISTINCT)",
+   "category": "aggregate",
+   "kind": "agg",
+   "table": "cars",
+   "test": "count(distinct {c2})",
+   "singlestore": "COUNT(DISTINCT)",
+   "access_map": "sql",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select origin, count(distinct origin) as v from S2.CARS group by origin",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select TXT_1.`Origin`, COUNT(distinct TXT_1.`Origin`) as `v` from `MyDB`.`CARS` TXT_1 group by TXT_1.`Origin`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select \"Origin\", count(distinct \"Origin\") as v from S2.CARS group by \"Origin\"",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select `MyDB`.`CARS`.`Origin`, COUNT ( distinct `MyDB`.`CARS`.`Origin`)  as `V` from `MyDB`.`CARS` group by `MyDB`.`CARS`.`Origin`"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select Gender, count(distinct Gender) as v from CFANS.WORKFORCE_DATA group by Gender",
+    "supported": true,
+    "pushdown": "partly"
+   }
+  },
+  {
+   "name": "SUM",
+   "category": "aggregate",
+   "kind": "agg",
+   "table": "cars",
+   "test": "sum({n})",
+   "singlestore": "SUM",
+   "access_map": "sql",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select origin, sum(msrp) as v from S2.CARS group by origin",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select TXT_1.`Origin`, SUM(TXT_1.`MSRP`) as `v` from `MyDB`.`CARS` TXT_1 group by TXT_1.`Origin`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select \"Origin\", sum(\"MSRP\") as v from S2.CARS group by \"Origin\"",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select `MyDB`.`CARS`.`Origin`, SUM (`MyDB`.`CARS`.`MSRP`)  as `V` from `MyDB`.`CARS` group by `MyDB`.`CARS`.`Origin`"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select Gender, sum(Annual_Salary) as v from CFANS.WORKFORCE_DATA group by Gender",
+    "supported": true,
+    "pushdown": "partly"
+   }
+  },
+  {
+   "name": "AVG",
+   "category": "aggregate",
+   "kind": "agg",
+   "table": "cars",
+   "test": "avg({n})",
+   "singlestore": "AVG",
+   "access_map": "sql",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select origin, avg(msrp) as v from S2.CARS group by origin",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select TXT_1.`Origin`, AVG(TXT_1.`MSRP`) as `v` from `MyDB`.`CARS` TXT_1 group by TXT_1.`Origin`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select \"Origin\", avg(\"MSRP\") as v from S2.CARS group by \"Origin\"",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select `MyDB`.`CARS`.`Origin`, AVG (`MyDB`.`CARS`.`MSRP`)  as `V` from `MyDB`.`CARS` group by `MyDB`.`CARS`.`Origin`"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select Gender, avg(Annual_Salary) as v from CFANS.WORKFORCE_DATA group by Gender",
+    "supported": true,
+    "pushdown": "partly"
+   }
+  },
+  {
+   "name": "MEAN",
+   "category": "aggregate",
+   "kind": "agg",
+   "table": "cars",
+   "test": "mean({n})",
+   "singlestore": "AVG",
+   "access_map": null,
+   "alternative": "AVG",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select origin, mean(msrp) as v from S2.CARS group by origin",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select TXT_1.`Origin`, AVG(TXT_1.`MSRP`) as `v` from `MyDB`.`CARS` TXT_1 group by TXT_1.`Origin`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select \"Origin\", mean(\"MSRP\") as v from S2.CARS group by \"Origin\"",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select `MyDB`.`CARS`.`Origin`, AVG (`MyDB`.`CARS`.`MSRP`)  as `V` from `MyDB`.`CARS` group by `MyDB`.`CARS`.`Origin`"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select Gender, mean(Annual_Salary) as v from CFANS.WORKFORCE_DATA group by Gender",
+    "supported": true,
+    "pushdown": "partly"
+   }
+  },
+  {
+   "name": "MIN",
+   "category": "aggregate",
+   "kind": "agg",
+   "table": "cars",
+   "test": "min({n})",
+   "singlestore": "MIN",
+   "access_map": "sql",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select origin, min(msrp) as v from S2.CARS group by origin",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select TXT_1.`Origin`, MIN(TXT_1.`MSRP`) as `v` from `MyDB`.`CARS` TXT_1 group by TXT_1.`Origin`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select \"Origin\", min(\"MSRP\") as v from S2.CARS group by \"Origin\"",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select `MyDB`.`CARS`.`Origin`, MIN (`MyDB`.`CARS`.`MSRP`)  as `V` from `MyDB`.`CARS` group by `MyDB`.`CARS`.`Origin`"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select Gender, min(Annual_Salary) as v from CFANS.WORKFORCE_DATA group by Gender",
+    "supported": true,
+    "pushdown": "partly"
+   }
+  },
+  {
+   "name": "MAX",
+   "category": "aggregate",
+   "kind": "agg",
+   "table": "cars",
+   "test": "max({n})",
+   "singlestore": "MAX",
+   "access_map": "sql",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select origin, max(msrp) as v from S2.CARS group by origin",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select TXT_1.`Origin`, MAX(TXT_1.`MSRP`) as `v` from `MyDB`.`CARS` TXT_1 group by TXT_1.`Origin`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select \"Origin\", max(\"MSRP\") as v from S2.CARS group by \"Origin\"",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select `MyDB`.`CARS`.`Origin`, MAX (`MyDB`.`CARS`.`MSRP`)  as `V` from `MyDB`.`CARS` group by `MyDB`.`CARS`.`Origin`"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select Gender, max(Annual_Salary) as v from CFANS.WORKFORCE_DATA group by Gender",
+    "supported": true,
+    "pushdown": "partly"
+   }
+  },
+  {
+   "name": "STD",
+   "category": "aggregate",
+   "kind": "agg",
+   "table": "cars",
+   "test": "std({n})",
+   "singlestore": "STDDEV_SAMP",
+   "access_map": null,
+   "alternative": "PROC SQL: not pushed down - VAR (pushed down) and sqrt() it, or explicit pass-through with STDDEV_SAMP. FedSQL / CAS: STD or STDDEV",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select origin, std(msrp) as v from S2.CARS group by origin",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `Origin`, `MSRP`  FROM `CARS`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select \"Origin\", std(\"MSRP\") as v from S2.CARS group by \"Origin\"",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "(FedSQL pushed a subquery to S2)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select Gender, std(Annual_Salary) as v from CFANS.WORKFORCE_DATA group by Gender",
+    "supported": true,
+    "pushdown": "partly"
+   }
+  },
+  {
+   "name": "STDDEV",
+   "category": "aggregate",
+   "kind": "agg",
+   "table": "cars",
+   "test": "stddev({n})",
+   "singlestore": "STDDEV_SAMP",
+   "access_map": null,
+   "alternative": "PROC SQL: STD",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select origin, stddev(msrp) as v from S2.CARS group by origin",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: Function STDDEV could not be located."
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select \"Origin\", stddev(\"MSRP\") as v from S2.CARS group by \"Origin\"",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "(FedSQL pushed a subquery to S2)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select Gender, stddev(Annual_Salary) as v from CFANS.WORKFORCE_DATA group by Gender",
+    "supported": true,
+    "pushdown": "partly"
+   }
+  },
+  {
+   "name": "VAR",
+   "category": "aggregate",
+   "kind": "agg",
+   "table": "cars",
+   "test": "var({n})",
+   "singlestore": "VAR_SAMP",
+   "access_map": "default",
+   "alternative": "FedSQL / CAS: VARIANCE",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select origin, var(msrp) as v from S2.CARS group by origin",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select TXT_1.`Origin`, VAR_SAMP(TXT_1.`MSRP`) as `v` from `MyDB`.`CARS` TXT_1 group by TXT_1.`Origin`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select \"Origin\", var(\"MSRP\") as v from S2.CARS group by \"Origin\"",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: [42000]Function VAR(DOUBLE) does not exist (0x81bfc10c)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select Gender, var(Annual_Salary) as v from CFANS.WORKFORCE_DATA group by Gender",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: Function VAR(DOUBLE) does not exist"
+   }
+  },
+  {
+   "name": "VARIANCE",
+   "category": "aggregate",
+   "kind": "agg",
+   "table": "cars",
+   "test": "variance({n})",
+   "singlestore": "VAR_SAMP",
+   "access_map": null,
+   "alternative": "PROC SQL: VAR",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select origin, variance(msrp) as v from S2.CARS group by origin",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: Function VARIANCE could not be located."
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select \"Origin\", variance(\"MSRP\") as v from S2.CARS group by \"Origin\"",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "(FedSQL pushed a subquery to S2)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select Gender, variance(Annual_Salary) as v from CFANS.WORKFORCE_DATA group by Gender",
+    "supported": true,
+    "pushdown": "partly"
+   }
+  },
+  {
+   "name": "N",
+   "category": "aggregate",
+   "kind": "agg",
+   "table": "cars",
+   "test": "n({n})",
+   "singlestore": "COUNT",
+   "access_map": null,
+   "alternative": "COUNT(x)",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select origin, n(msrp) as v from S2.CARS group by origin",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select TXT_1.`Origin`, COUNT(TXT_1.`MSRP`) as `v` from `MyDB`.`CARS` TXT_1 group by TXT_1.`Origin`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select \"Origin\", n(\"MSRP\") as v from S2.CARS group by \"Origin\"",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select `MyDB`.`CARS`.`Origin`, COUNT (`MyDB`.`CARS`.`MSRP`)  as `V` from `MyDB`.`CARS` group by `MyDB`.`CARS`.`Origin`"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select Gender, n(Annual_Salary) as v from CFANS.WORKFORCE_DATA group by Gender",
+    "supported": true,
+    "pushdown": "partly"
+   }
+  },
+  {
+   "name": "NMISS",
+   "category": "aggregate",
+   "kind": "agg",
+   "table": "cars",
+   "test": "nmiss({n})",
+   "singlestore": "SUM(x IS NULL)",
+   "access_map": null,
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select origin, nmiss(msrp) as v from S2.CARS group by origin",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select TXT_1.`Origin`, COUNT(*)-COUNT(TXT_1.`MSRP`) as `v` from `MyDB`.`CARS` TXT_1 group by TXT_1.`Origin`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select \"Origin\", nmiss(\"MSRP\") as v from S2.CARS group by \"Origin\"",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "select `MyDB`.`CARS`.`Origin`, `MyDB`.`CARS`.`MSRP` from `MyDB`.`CARS`"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select Gender, nmiss(Annual_Salary) as v from CFANS.WORKFORCE_DATA group by Gender",
+    "supported": true,
+    "pushdown": "partly"
+   }
+  },
+  {
+   "name": "MEDIAN",
+   "category": "aggregate",
+   "kind": "agg",
+   "table": "cars",
+   "test": "median({n})",
+   "singlestore": "MEDIAN",
+   "access_map": null,
+   "alternative": "PROC SQL only (runs in SAS); in FedSQL / CAS MEDIAN is a row function, not an aggregate",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select origin, median(msrp) as v from S2.CARS group by origin",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `Origin`, `MSRP`  FROM `CARS`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select \"Origin\", median(\"MSRP\") as v from S2.CARS group by \"Origin\"",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: [42000]Column \"CARS.MSRP\" must be GROUPed or used in an aggregate function (0x81bfc10c)",
+    "note": "MEDIAN(x) is the row function (median of its arguments): with GROUP BY it fails as a non-aggregate."
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select Gender, median(Annual_Salary) as v from CFANS.WORKFORCE_DATA group by Gender",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: Column \"WORKFORCE_DATA.Annual_Salary\" must be GROUPed or used in an aggregate function",
+    "note": "Same as FedSQL: a row function, not an aggregate."
+   }
+  },
+  {
+   "name": "RANGE",
+   "category": "aggregate",
+   "kind": "agg",
+   "table": "cars",
+   "test": "range({n})",
+   "singlestore": "MAX(x) - MIN(x)",
+   "access_map": null,
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select origin, range(msrp) as v from S2.CARS group by origin",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select TXT_1.`Origin`, MAX(TXT_1.`MSRP`)-MIN(TXT_1.`MSRP`) as `v` from `MyDB`.`CARS` TXT_1 group by TXT_1.`Origin`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select \"Origin\", range(\"MSRP\") as v from S2.CARS group by \"Origin\"",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "select `MyDB`.`CARS`.`Origin`, `MyDB`.`CARS`.`MSRP` from `MyDB`.`CARS`"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select Gender, range(Annual_Salary) as v from CFANS.WORKFORCE_DATA group by Gender",
+    "supported": true,
+    "pushdown": "partly"
+   }
+  },
+  {
+   "name": "ABS",
+   "category": "numeric",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "abs({n} - 30000)",
+   "singlestore": "ABS",
+   "access_map": "default",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select abs(msrp - 30000) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select ABS(TXT_1.`MSRP` - 30000) as `v`, COUNT(*) as `n` from `MyDB`.`CARS` TXT_1 group by (ABS(TXT_1.`MSRP` - 30000))"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select abs(\"MSRP\" - 30000) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select ABS ( (`MyDB`.`CARS`.`MSRP`-30000) )  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by ABS ( (`MyDB`.`CARS`.`MSRP`-30000) )"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select abs(Annual_Salary - 30000) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "CEIL",
+   "category": "numeric",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "ceil({n} / 1000)",
+   "singlestore": "CEILING",
+   "access_map": "default",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select ceil(msrp / 1000) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select CEILING(TXT_1.`MSRP` / 1000) as `v`, COUNT(*) as `n` from `MyDB`.`CARS` TXT_1 group by (CEILING(TXT_1.`MSRP` / 1000))"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select ceil(\"MSRP\" / 1000) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select CEIL ( (`MyDB`.`CARS`.`MSRP`/1000) )  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by CEIL ( (`MyDB`.`CARS`.`MSRP`/1000) )"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select ceil(Annual_Salary / 1000) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "FLOOR",
+   "category": "numeric",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "floor({n} / 1000)",
+   "singlestore": "FLOOR",
+   "access_map": "default",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select floor(msrp / 1000) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select FLOOR(TXT_1.`MSRP` / 1000) as `v`, COUNT(*) as `n` from `MyDB`.`CARS` TXT_1 group by (FLOOR(TXT_1.`MSRP` / 1000))"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select floor(\"MSRP\" / 1000) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select FLOOR ( (`MyDB`.`CARS`.`MSRP`/1000) )  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by FLOOR ( (`MyDB`.`CARS`.`MSRP`/1000) )"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select floor(Annual_Salary / 1000) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "ROUND",
+   "category": "numeric",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "round({n} / 7, 0.01)",
+   "singlestore": "ROUND",
+   "access_map": "all",
+   "alternative": "PROC SQL on SingleStore: ROUND isn't pushed down (only with SQL_FUNCTIONS=ALL); FLOOR(x * 100 + 0.5) / 100 is",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select round(msrp / 7, 0.01) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `MSRP`  FROM `CARS`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select round(\"MSRP\" / 7, 0.01) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select ROUND ( (`MyDB`.`CARS`.`MSRP`/7) , 0.01)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by ROUND ( (`MyDB`.`CARS`.`MSRP`/7) , 0.01)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select round(Annual_Salary / 7, 0.01) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "INT",
+   "category": "numeric",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "int({n} / 1000)",
+   "singlestore": "TRUNCATE(x, 0)",
+   "access_map": null,
+   "alternative": "FLOOR (non-negative values) or CASE; FedSQL / CAS have no INT",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select int(msrp / 1000) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `MSRP`  FROM `CARS`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select int(\"MSRP\" / 1000) as v, count(*) as n from S2.CARS group by 1",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: [42000]Syntax error at or near \"(\" (0x81bfc10c)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select int(Annual_Salary / 1000) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: Syntax error at or near \"(\""
+   }
+  },
+  {
+   "name": "MOD",
+   "category": "numeric",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "mod({n}, 7)",
+   "singlestore": "MOD",
+   "access_map": "default",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select mod(msrp, 7) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select MOD(TXT_1.`MSRP`, 7) as `v`, COUNT(*) as `n` from `MyDB`.`CARS` TXT_1 group by (MOD(TXT_1.`MSRP`, 7))"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select mod(\"MSRP\", 7) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select MOD (`MyDB`.`CARS`.`MSRP`, 7)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by MOD (`MyDB`.`CARS`.`MSRP`, 7)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select mod(Annual_Salary, 7) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "SQRT",
+   "category": "numeric",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "sqrt({n})",
+   "singlestore": "SQRT",
+   "access_map": "default",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select sqrt(msrp) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select SQRT(TXT_1.`MSRP`) as `v`, COUNT(*) as `n` from `MyDB`.`CARS` TXT_1 group by (SQRT(TXT_1.`MSRP`))"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select sqrt(\"MSRP\") as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select SQRT (`MyDB`.`CARS`.`MSRP`)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by SQRT (`MyDB`.`CARS`.`MSRP`)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select sqrt(Annual_Salary) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "EXP",
+   "category": "numeric",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "exp({n} / 100000)",
+   "singlestore": "EXP",
+   "access_map": "default",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select exp(msrp / 100000) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select EXP(TXT_1.`MSRP` / 100000) as `v`, COUNT(*) as `n` from `MyDB`.`CARS` TXT_1 group by (EXP(TXT_1.`MSRP` / 100000))"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select exp(\"MSRP\" / 100000) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select EXP ( (`MyDB`.`CARS`.`MSRP`/100000) )  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by EXP ( (`MyDB`.`CARS`.`MSRP`/100000) )"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select exp(Annual_Salary / 100000) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "LOG",
+   "category": "numeric",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "log({n})",
+   "singlestore": "LOG",
+   "access_map": "default",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select log(msrp) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select LOG(TXT_1.`MSRP`) as `v`, COUNT(*) as `n` from `MyDB`.`CARS` TXT_1 group by (LOG(TXT_1.`MSRP`))"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select log(\"MSRP\") as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select LOG (`MyDB`.`CARS`.`MSRP`)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by LOG (`MyDB`.`CARS`.`MSRP`)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select log(Annual_Salary) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "LOG10",
+   "category": "numeric",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "log10({n})",
+   "singlestore": "LOG10",
+   "access_map": "default",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select log10(msrp) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select LOG10(TXT_1.`MSRP`) as `v`, COUNT(*) as `n` from `MyDB`.`CARS` TXT_1 group by (LOG10(TXT_1.`MSRP`))"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select log10(\"MSRP\") as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select LOG10 (`MyDB`.`CARS`.`MSRP`)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by LOG10 (`MyDB`.`CARS`.`MSRP`)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select log10(Annual_Salary) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "SIGN",
+   "category": "numeric",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "sign({n} - 30000)",
+   "singlestore": "SIGN",
+   "access_map": "default",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select sign(msrp - 30000) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select SIGN(TXT_1.`MSRP` - 30000) as `v`, COUNT(*) as `n` from `MyDB`.`CARS` TXT_1 group by (SIGN(TXT_1.`MSRP` - 30000))"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select sign(\"MSRP\" - 30000) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select SIGN ( (`MyDB`.`CARS`.`MSRP`-30000) )  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by SIGN ( (`MyDB`.`CARS`.`MSRP`-30000) )"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select sign(Annual_Salary - 30000) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "POWER",
+   "category": "numeric",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "power({n}, 2)",
+   "singlestore": "POWER",
+   "access_map": null,
+   "alternative": "PROC SQL: x ** 2",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select power(msrp, 2) as v, count(*) as n from S2.CARS group by 1",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: Function POWER could not be located."
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select power(\"MSRP\", 2) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select POWER (`MyDB`.`CARS`.`MSRP`, 2)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by POWER (`MyDB`.`CARS`.`MSRP`, 2)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select power(Annual_Salary, 2) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "SIN",
+   "category": "numeric",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "sin({n})",
+   "singlestore": "SIN",
+   "access_map": "default",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select sin(msrp) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select SIN(TXT_1.`MSRP`) as `v`, COUNT(*) as `n` from `MyDB`.`CARS` TXT_1 group by (SIN(TXT_1.`MSRP`))"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select sin(\"MSRP\") as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select SIN (`MyDB`.`CARS`.`MSRP`)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by SIN (`MyDB`.`CARS`.`MSRP`)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select sin(Annual_Salary) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "UPCASE",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "upcase({c})",
+   "singlestore": "UCASE",
+   "access_map": "default",
+   "alternative": "FedSQL / CAS also have UPPER",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select upcase(make) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select UCASE(TXT_1.`Make`) as `v`, COUNT(*) as `n` from `MyDB`.`CARS` TXT_1 group by (UCASE(TXT_1.`Make`))"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select upcase(\"Make\") as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select UPPER (`MyDB`.`CARS`.`Make`)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by UPPER (`MyDB`.`CARS`.`Make`)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select upcase(Name) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "UPPER",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "upper({c})",
+   "singlestore": "UPPER",
+   "access_map": null,
+   "alternative": "PROC SQL: UPCASE",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select upper(make) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select UCASE(TXT_1.`Make`) as `v`, COUNT(*) as `n` from `MyDB`.`CARS` TXT_1 group by (UCASE(TXT_1.`Make`))"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select upper(\"Make\") as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select UPPER (`MyDB`.`CARS`.`Make`)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by UPPER (`MyDB`.`CARS`.`Make`)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select upper(Name) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "LOWCASE",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "lowcase({c})",
+   "singlestore": "LCASE",
+   "access_map": "default",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select lowcase(make) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select LCASE(TXT_1.`Make`) as `v`, COUNT(*) as `n` from `MyDB`.`CARS` TXT_1 group by (LCASE(TXT_1.`Make`))"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select lowcase(\"Make\") as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select LOWER (`MyDB`.`CARS`.`Make`)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by LOWER (`MyDB`.`CARS`.`Make`)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select lowcase(Name) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "LOWER",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "lower({c})",
+   "singlestore": "LOWER",
+   "access_map": null,
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select lower(make) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select LCASE(TXT_1.`Make`) as `v`, COUNT(*) as `n` from `MyDB`.`CARS` TXT_1 group by (LCASE(TXT_1.`Make`))"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select lower(\"Make\") as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select LOWER (`MyDB`.`CARS`.`Make`)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by LOWER (`MyDB`.`CARS`.`Make`)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select lower(Name) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "SUBSTR",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "substr({c}, 1, 3)",
+   "singlestore": "SUBSTRING",
+   "access_map": "all",
+   "alternative": "PROC SQL on SingleStore: not pushed down (only with SQL_FUNCTIONS=ALL); filter with LIKE 'abc%' or use explicit pass-through",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select substr(make, 1, 3) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `Make`  FROM `CARS`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select substr(\"Make\", 1, 3) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select SUBSTR (`MyDB`.`CARS`.`Make`, 1, 3)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by SUBSTR (`MyDB`.`CARS`.`Make`, 1, 3)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select substr(Name, 1, 3) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "SUBSTRING",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "substring({c} from 1 for 3)",
+   "singlestore": "SUBSTRING",
+   "access_map": null,
+   "alternative": "PROC SQL: SUBSTR",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select substring(make from 1 for 3) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `Make`  FROM `CARS`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select substring(\"Make\" from 1 for 3) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select SUBSTRING (`MyDB`.`CARS`.`Make` FROM 1 FOR 3)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by SUBSTRING (`MyDB`.`CARS`.`Make` FROM 1 FOR 3)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select substring(Name from 1 for 3) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "LENGTH",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "length({c})",
+   "singlestore": "LENGTH",
+   "access_map": "all",
+   "alternative": "PROC SQL on SingleStore: not pushed down (only with SQL_FUNCTIONS=ALL)",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select length(make) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "no"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select length(\"Make\") as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select LENGTH (`MyDB`.`CARS`.`Make`)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by LENGTH (`MyDB`.`CARS`.`Make`)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select length(Name) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "TRIM",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "trim({c})",
+   "singlestore": "TRIM",
+   "access_map": null,
+   "alternative": "PROC SQL on SingleStore: STRIP (pushed down as TRIM)",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select trim(make) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `Make`  FROM `CARS`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select trim(\"Make\") as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select TRIM(BOTH FROM `MyDB`.`CARS`.`Make`)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by TRIM(BOTH FROM `MyDB`.`CARS`.`Make`)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select trim(Name) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "STRIP",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "strip({c})",
+   "singlestore": "TRIM",
+   "access_map": "default",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select strip(make) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select TRIM(TXT_1.`Make`) as `v`, COUNT(*) as `n` from `MyDB`.`CARS` TXT_1 group by (TRIM(TXT_1.`Make`))"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select strip(\"Make\") as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select STRIP (`MyDB`.`CARS`.`Make`)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by STRIP (`MyDB`.`CARS`.`Make`)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select strip(Name) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "TRIMN",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "trimn({c})",
+   "singlestore": "RTRIM",
+   "access_map": "default",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select trimn(make) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select RTRIM(TXT_1.`Make`) as `v`, COUNT(*) as `n` from `MyDB`.`CARS` TXT_1 group by (RTRIM(TXT_1.`Make`))"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select trimn(\"Make\") as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select TRIMN (`MyDB`.`CARS`.`Make`)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by TRIMN (`MyDB`.`CARS`.`Make`)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select trimn(Name) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "LEFT",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "left({c})",
+   "singlestore": "LTRIM",
+   "access_map": null,
+   "alternative": "PROC SQL on SingleStore: STRIP (pushed down)",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select left(make) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `Make`  FROM `CARS`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select left(\"Make\") as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select LEFT (`MyDB`.`CARS`.`Make`)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by LEFT (`MyDB`.`CARS`.`Make`)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select left(Name) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "COMPRESS",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "compress({c})",
+   "singlestore": "REPLACE",
+   "access_map": "all",
+   "alternative": "PROC SQL on SingleStore: TRANWRD(x, ' ', '') (pushed down as REPLACE)",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select compress(make) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `Make`  FROM `CARS`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select compress(\"Make\") as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select COMPRESS (`MyDB`.`CARS`.`Make`)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by COMPRESS (`MyDB`.`CARS`.`Make`)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select compress(Name) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "TRANWRD",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "tranwrd({c}, 'a', 'A')",
+   "singlestore": "REPLACE",
+   "access_map": "default",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select tranwrd(make, 'a', 'A') as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select REPLACE(TXT_1.`Make`, cast ('a' as char(1)), cast ('A' as char(1))) as `v`, COUNT(*) as `n` from `MyDB`.`CARS` TXT_1 group by (REPLACE(TXT_1.`Make`, 'a', 'A'))"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select tranwrd(\"Make\", 'a', 'A') as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select TRANWRD (`MyDB`.`CARS`.`Make`, 'a', 'A')  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by TRANWRD (`MyDB`.`CARS`.`Make`, 'a', 'A')"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select tranwrd(Name, 'a', 'A') as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "INDEX",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "index({c}, 'a')",
+   "singlestore": "LOCATE",
+   "access_map": "default",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select index(make, 'a') as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select LOCATE('a',TXT_1.`Make`) as `v`, COUNT(*) as `n` from `MyDB`.`CARS` TXT_1 group by (LOCATE('a',TXT_1.`Make`))"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select index(\"Make\", 'a') as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select INDEX (`MyDB`.`CARS`.`Make`, 'a')  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by INDEX (`MyDB`.`CARS`.`Make`, 'a')"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select index(Name, 'a') as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "FIND",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "find({c}, 'a')",
+   "singlestore": "LOCATE / INSTR",
+   "access_map": null,
+   "alternative": "INDEX (PROC SQL: pushed down as LOCATE)",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select find(make, 'a') as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `Make`  FROM `CARS`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select find(\"Make\", 'a') as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select FIND (`MyDB`.`CARS`.`Make`, 'a')  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by FIND (`MyDB`.`CARS`.`Make`, 'a')"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select find(Name, 'a') as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "SCAN",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "scan({c}, 1, '-')",
+   "singlestore": "SUBSTRING_INDEX",
+   "access_map": null,
+   "alternative": "explicit pass-through with SUBSTRING_INDEX",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select scan(make, 1, '-') as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `Make`  FROM `CARS`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select scan(\"Make\", 1, '-') as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select SCAN (`MyDB`.`CARS`.`Make`, 1, '-')  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by SCAN (`MyDB`.`CARS`.`Make`, 1, '-')"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select scan(Name, 1, '-') as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "CATX",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "catx(' - ', {c}, {c2})",
+   "singlestore": "CONCAT_WS",
+   "access_map": null,
+   "alternative": "Not in FedSQL / CAS: trim(a) || ' - ' || trim(b). PROC SQL on SingleStore: a || ' - ' || b pushes down (catx() doesn't)",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select catx(' - ', make, origin) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `Make`, `Origin`  FROM `CARS`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select catx(' - ', \"Make\", \"Origin\") as v, count(*) as n from S2.CARS group by 1",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: [42000]Function CATX(CHAR, CHAR, CHAR) does not exist (0x81bfc10c)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select catx(' - ', Name, Gender) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: Function CATX(CHAR, CHAR, CHAR) does not exist"
+   }
+  },
+  {
+   "name": "CATS",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "cats({c}, {c2})",
+   "singlestore": "CONCAT(TRIM(..))",
+   "access_map": null,
+   "alternative": "trim(a) || trim(b); PROC SQL on SingleStore: a || b pushes down",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select cats(make, origin) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `Make`, `Origin`  FROM `CARS`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select cats(\"Make\", \"Origin\") as v, count(*) as n from S2.CARS group by 1",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: [42000]Function CATS(CHAR, CHAR) does not exist (0x81bfc10c)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select cats(Name, Gender) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: Function CATS(CHAR, CHAR) does not exist"
+   }
+  },
+  {
+   "name": "||",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "{c} || '-' || {c2}",
+   "singlestore": "CONCAT",
+   "access_map": null,
+   "alternative": "FedSQL / CAS keep CHAR padding: trim(a) || trim(b)",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select make || '-' || origin as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select  CONCAT(TXT_1.`Make` , cast ('-' as char(1)) , TXT_1.`Origin`)  as `v`, COUNT(*) as `n` from `MyDB`.`CARS` TXT_1 group by ( CONCAT(TXT_1.`Make` , '-' , TXT_1.`Origin`) )"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select \"Make\" || '-' || \"Origin\" as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select  ( ( (`MyDB`.`CARS`.`Make`||'-') ||`MyDB`.`CARS`.`Origin`) )  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by  ( ( (`MyDB`.`CARS`.`Make`||'-') ||`MyDB`.`CARS`.`Origin`) )"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select Name || '-' || Gender as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "REPEAT",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "repeat({c}, 1)",
+   "singlestore": "REPEAT",
+   "access_map": "all",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select repeat(make, 1) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `Make`  FROM `CARS`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select repeat(\"Make\", 1) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select REPEAT (`MyDB`.`CARS`.`Make`, 1)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by REPEAT (`MyDB`.`CARS`.`Make`, 1)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select repeat(Name, 1) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "SOUNDEX",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "soundex({c})",
+   "singlestore": "SOUNDEX",
+   "access_map": "all",
+   "alternative": "PROC SQL only",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select soundex(make) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `Make`  FROM `CARS`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select soundex(\"Make\") as v, count(*) as n from S2.CARS group by 1",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: [42000]Function SOUNDEX(CHAR) does not exist (0x81bfc10c)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select soundex(Name) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: Function SOUNDEX(CHAR) does not exist"
+   }
+  },
+  {
+   "name": "REVERSE",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "reverse({c})",
+   "singlestore": "REVERSE",
+   "access_map": null,
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select reverse(make) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `Make`  FROM `CARS`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select reverse(\"Make\") as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select REVERSE (`MyDB`.`CARS`.`Make`)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by REVERSE (`MyDB`.`CARS`.`Make`)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select reverse(Name) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "PROPCASE",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "propcase({c})",
+   "singlestore": "-",
+   "access_map": null,
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select propcase(make) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `Make`  FROM `CARS`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select propcase(\"Make\") as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select PROPCASE (`MyDB`.`CARS`.`Make`)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by PROPCASE (`MyDB`.`CARS`.`Make`)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select propcase(Name) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "TRANSLATE",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "translate({c}, 'A', 'a')",
+   "singlestore": "-",
+   "access_map": null,
+   "alternative": "PROC SQL only; FedSQL / CAS: nested REPLACE-style tranwrd()",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select translate(make, 'A', 'a') as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `Make`  FROM `CARS`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select translate(\"Make\", 'A', 'a') as v, count(*) as n from S2.CARS group by 1",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: [42000]Syntax error at or near \"translate\" (0x81bfc10c)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select translate(Name, 'A', 'a') as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: Syntax error at or near \"translate\""
+   }
+  },
+  {
+   "name": "COALESCEC",
+   "category": "character",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "coalescec({c}, 'none')",
+   "singlestore": "COALESCE",
+   "access_map": null,
+   "alternative": "COALESCE (PROC SQL: pushed down)",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select coalescec(make, 'none') as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `Make`  FROM `CARS`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select coalescec(\"Make\", 'none') as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select COALESCEC (`MyDB`.`CARS`.`Make`, 'none')  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by COALESCEC (`MyDB`.`CARS`.`Make`, 'none')"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select coalescec(Name, 'none') as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "TODAY",
+   "category": "date",
+   "kind": "scalar",
+   "table": "prdsal",
+   "test": "where:{d} < today()",
+   "singlestore": "CURDATE()",
+   "access_map": "all",
+   "alternative": "CAS: compare with a DATE literal (TODAY() keeps the query in CAS)",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select count(*) as n from S2.PRDSAL where month < today()",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select COUNT(*) as `n` from `MyDB`.`PRDSAL` TXT_1 where TXT_1.`MONTH` <  CAST('2026-10-26' AS DATE)",
+    "note": "SAS evaluates TODAY() once and sends the value: doesn't block pushdown."
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select count(*) as n from S2.PRDSAL where \"MONTH\" < today()",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select COUNT ( * )  as `N` from `MyDB`.`PRDSAL` where  ( (`MyDB`.`PRDSAL`.`MONTH`<TODAY () ) )"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select count(*) as n from CFANS.WORKFORCE_DATA where End_Date < today()",
+    "supported": true,
+    "pushdown": "no"
+   }
+  },
+  {
+   "name": "YEAR",
+   "category": "date",
+   "kind": "scalar",
+   "table": "prdsal",
+   "test": "year({d})",
+   "singlestore": "YEAR",
+   "access_map": "default",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select year(month) as v, count(*) as n from S2.PRDSAL group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select YEAR(TXT_1.`MONTH`) as `v`, COUNT(*) as `n` from `MyDB`.`PRDSAL` TXT_1 group by (YEAR(TXT_1.`MONTH`))"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select year(\"MONTH\") as v, count(*) as n from S2.PRDSAL group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select YEAR (`MyDB`.`PRDSAL`.`MONTH`)  as `V`, COUNT ( * )  as `N` from `MyDB`.`PRDSAL` group by YEAR (`MyDB`.`PRDSAL`.`MONTH`)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select year(End_Date) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "MONTH",
+   "category": "date",
+   "kind": "scalar",
+   "table": "prdsal",
+   "test": "month({d})",
+   "singlestore": "MONTH",
+   "access_map": "default",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select month(month) as v, count(*) as n from S2.PRDSAL group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select MONTH(TXT_1.`MONTH`) as `v`, COUNT(*) as `n` from `MyDB`.`PRDSAL` TXT_1 group by (MONTH(TXT_1.`MONTH`))"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select month(\"MONTH\") as v, count(*) as n from S2.PRDSAL group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select MONTH (`MyDB`.`PRDSAL`.`MONTH`)  as `V`, COUNT ( * )  as `N` from `MyDB`.`PRDSAL` group by MONTH (`MyDB`.`PRDSAL`.`MONTH`)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select month(End_Date) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "DAY",
+   "category": "date",
+   "kind": "scalar",
+   "table": "prdsal",
+   "test": "day({d})",
+   "singlestore": "DAYOFMONTH",
+   "access_map": "default",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select day(month) as v, count(*) as n from S2.PRDSAL group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select DAYOFMONTH(TXT_1.`MONTH`) as `v`, COUNT(*) as `n` from `MyDB`.`PRDSAL` TXT_1 group by (DAYOFMONTH(TXT_1.`MONTH`))"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select day(\"MONTH\") as v, count(*) as n from S2.PRDSAL group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select DAY (`MyDB`.`PRDSAL`.`MONTH`)  as `V`, COUNT ( * )  as `N` from `MyDB`.`PRDSAL` group by DAY (`MyDB`.`PRDSAL`.`MONTH`)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select day(End_Date) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "QTR",
+   "category": "date",
+   "kind": "scalar",
+   "table": "prdsal",
+   "test": "qtr({d})",
+   "singlestore": "QUARTER",
+   "access_map": "default",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select qtr(month) as v, count(*) as n from S2.PRDSAL group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select QUARTER(TXT_1.`MONTH`) as `v`, COUNT(*) as `n` from `MyDB`.`PRDSAL` TXT_1 group by (QUARTER(TXT_1.`MONTH`))"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select qtr(\"MONTH\") as v, count(*) as n from S2.PRDSAL group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select QTR (`MyDB`.`PRDSAL`.`MONTH`)  as `V`, COUNT ( * )  as `N` from `MyDB`.`PRDSAL` group by QTR (`MyDB`.`PRDSAL`.`MONTH`)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select qtr(End_Date) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "WEEKDAY",
+   "category": "date",
+   "kind": "scalar",
+   "table": "prdsal",
+   "test": "weekday({d})",
+   "singlestore": "DAYOFWEEK",
+   "access_map": "default",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select weekday(month) as v, count(*) as n from S2.PRDSAL group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select DAYOFWEEK(TXT_1.`MONTH`) as `v`, COUNT(*) as `n` from `MyDB`.`PRDSAL` TXT_1 group by (DAYOFWEEK(TXT_1.`MONTH`))"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select weekday(\"MONTH\") as v, count(*) as n from S2.PRDSAL group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select WEEKDAY (`MyDB`.`PRDSAL`.`MONTH`)  as `V`, COUNT ( * )  as `N` from `MyDB`.`PRDSAL` group by WEEKDAY (`MyDB`.`PRDSAL`.`MONTH`)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select weekday(End_Date) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "INTNX",
+   "category": "date",
+   "kind": "scalar",
+   "table": "prdsal",
+   "test": "intnx('month', {d}, 1)",
+   "singlestore": "DATE_ADD",
+   "access_map": null,
+   "alternative": "PROC SQL on SingleStore: filter with date literals, group with YEAR() / MONTH() (pushed down)",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select intnx('month', month, 1) as v, count(*) as n from S2.PRDSAL group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `MONTH`  FROM `PRDSAL`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select intnx('month', \"MONTH\", 1) as v, count(*) as n from S2.PRDSAL group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select INTNX ('month', `MyDB`.`PRDSAL`.`MONTH`, 1)  as `V`, COUNT ( * )  as `N` from `MyDB`.`PRDSAL` group by INTNX ('month', `MyDB`.`PRDSAL`.`MONTH`, 1)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select intnx('month', End_Date, 1) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "INTCK",
+   "category": "date",
+   "kind": "scalar",
+   "table": "prdsal",
+   "test": "intck('month', {dlit}, {d})",
+   "singlestore": "TIMESTAMPDIFF / PERIOD_DIFF",
+   "access_map": null,
+   "alternative": "PROC SQL on SingleStore: YEAR() / MONTH() arithmetic, or explicit pass-through with TIMESTAMPDIFF",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select intck('month', '01JAN1993'd, month) as v, count(*) as n from S2.PRDSAL group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `MONTH`  FROM `PRDSAL`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select intck('month', date '1993-01-01', \"MONTH\") as v, count(*) as n from S2.PRDSAL group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select INTCK ('month', DATE '1993-01-01', `MyDB`.`PRDSAL`.`MONTH`)  as `V`, COUNT ( * )  as `N` from `MyDB`.`PRDSAL` group by INTCK ('month', DATE '1993-01-01', `MyDB`.`PRDSAL`.`MONTH`)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select intck('month', date '2020-01-01', End_Date) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "MDY",
+   "category": "date",
+   "kind": "scalar",
+   "table": "prdsal",
+   "test": "mdy(1, 1, year({d}))",
+   "singlestore": "MAKEDATE",
+   "access_map": null,
+   "alternative": "a date literal ('01JAN2024'd / DATE '2024-01-01')",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select mdy(1, 1, year(month)) as v, count(*) as n from S2.PRDSAL group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `MONTH`  FROM `PRDSAL`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select mdy(1, 1, year(\"MONTH\")) as v, count(*) as n from S2.PRDSAL group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select MDY (1, 1, YEAR (`MyDB`.`PRDSAL`.`MONTH`) )  as `V`, COUNT ( * )  as `N` from `MyDB`.`PRDSAL` group by MDY (1, 1, YEAR (`MyDB`.`PRDSAL`.`MONTH`) )"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select mdy(1, 1, year(End_Date)) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "DATEPART",
+   "category": "date",
+   "kind": "scalar",
+   "table": "prdsal",
+   "test": "datepart(dhms({d}, 0, 0, 0))",
+   "singlestore": "DATE",
+   "access_map": "all",
+   "alternative": "PROC SQL only (FedSQL / CAS: CAST(x AS DATE))",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select datepart(dhms(month, 0, 0, 0)) as v, count(*) as n from S2.PRDSAL group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `MONTH`  FROM `PRDSAL`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select datepart(dhms(\"MONTH\", 0, 0, 0)) as v, count(*) as n from S2.PRDSAL group by 1",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: [42000]Function DATEPART(DOUBLE) does not exist (0x81bfc10c)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select datepart(dhms(End_Date, 0, 0, 0)) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: Function DATEPART(DOUBLE) does not exist"
+   }
+  },
+  {
+   "name": "EXTRACT",
+   "category": "date",
+   "kind": "scalar",
+   "table": "prdsal",
+   "test": "extract(year from {d})",
+   "singlestore": "EXTRACT",
+   "access_map": null,
+   "alternative": "YEAR() / MONTH() / DAY()",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select extract(year from month) as v, count(*) as n from S2.PRDSAL group by 1",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR 22-322: Syntax error, expecting one of the following: !, !!, &, (, ), *, **, +, ',', -, '.', /, <, <=, <>, =, >, >=, ?, AND, "
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select extract(year from \"MONTH\") as v, count(*) as n from S2.PRDSAL group by 1",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: [42000]Function pg_catalog.date_part(CHAR, DATE) does not exist (0x81bfc10c)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select extract(year from End_Date) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: Function pg_catalog.date_part(CHAR, DATE) does not exist"
+   }
+  },
+  {
+   "name": "CURRENT_DATE",
+   "category": "date",
+   "kind": "scalar",
+   "table": "prdsal",
+   "test": "where:{d} < current_date",
+   "singlestore": "CURRENT_DATE",
+   "access_map": null,
+   "alternative": "PROC SQL: TODAY()",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select count(*) as n from S2.PRDSAL where month < current_date",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: Expression using less than  (<) has components that are of different data types."
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select count(*) as n from S2.PRDSAL where \"MONTH\" < current_date",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select COUNT ( * )  as `N` from `MyDB`.`PRDSAL` where  ( (`MyDB`.`PRDSAL`.`MONTH`<CURRENT_DATE) )"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select count(*) as n from CFANS.WORKFORCE_DATA where End_Date < current_date",
+    "supported": true,
+    "pushdown": "no"
+   }
+  },
+  {
+   "name": "PUT (date format)",
+   "category": "conversion",
+   "kind": "scalar",
+   "table": "prdsal",
+   "test": "put({d}, yymmn6.)",
+   "singlestore": "DATE_FORMAT",
+   "access_map": null,
+   "alternative": "group by YEAR(d), MONTH(d) (pushed down) and format the result",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select put(month, yymmn6.) as v, count(*) as n from S2.PRDSAL group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `MONTH`  FROM `PRDSAL`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select put(\"MONTH\", yymmn6.) as v, count(*) as n from S2.PRDSAL group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "select `MyDB`.`PRDSAL`.`MONTH` from `MyDB`.`PRDSAL`"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select put(End_Date, yymmn6.) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "COALESCE",
+   "category": "null",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "coalesce({ncyl}, 0)",
+   "singlestore": "COALESCE",
+   "access_map": "default",
+   "alternative": "",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select coalesce(cylinders, 0) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select COALESCE(TXT_1.`Cylinders`, 0) as `v`, COUNT(*) as `n` from `MyDB`.`CARS` TXT_1 group by (COALESCE(TXT_1.`Cylinders`, 0))"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select coalesce(\"Cylinders\", 0) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select COALESCE( `MyDB`.`CARS`.`Cylinders`, 0)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by COALESCE( `MyDB`.`CARS`.`Cylinders`, 0)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select coalesce(Sick_Days_Last_Year, 0) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "IFN",
+   "category": "null",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "ifn({n} > 30000, 1, 0)",
+   "singlestore": "IF()",
+   "access_map": null,
+   "alternative": "CASE WHEN … THEN … ELSE … END (pushed down everywhere)",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select ifn(msrp > 30000, 1, 0) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "no"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select ifn(\"MSRP\" > 30000, 1, 0) as v, count(*) as n from S2.CARS group by 1",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: [42000]Function IFN(bool, INTEGER, INTEGER) does not exist (0x81bfc10c)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select ifn(Annual_Salary > 30000, 1, 0) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: Function IFN(bool, INTEGER, INTEGER) does not exist"
+   }
+  },
+  {
+   "name": "IFC",
+   "category": "null",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "ifc({n} > 30000, 'hi', 'lo')",
+   "singlestore": "IF()",
+   "access_map": null,
+   "alternative": "CASE WHEN … THEN … ELSE … END (pushed down everywhere)",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select ifc(msrp > 30000, 'hi', 'lo') as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `MSRP`  FROM `CARS`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select ifc(\"MSRP\" > 30000, 'hi', 'lo') as v, count(*) as n from S2.CARS group by 1",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: [42000]Function IFC(bool, CHAR, CHAR) does not exist (0x81bfc10c)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select ifc(Annual_Salary > 30000, 'hi', 'lo') as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: Function IFC(bool, CHAR, CHAR) does not exist"
+   }
+  },
+  {
+   "name": "NULLIF",
+   "category": "null",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "nullif({ncyl}, 4)",
+   "singlestore": "NULLIF",
+   "access_map": null,
+   "alternative": "PROC SQL: CASE WHEN x = v THEN . ELSE x END",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select nullif(cylinders, 4) as v, count(*) as n from S2.CARS group by 1",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: Function NULLIF could not be located."
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select nullif(\"Cylinders\", 4) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select NULLIF( `MyDB`.`CARS`.`Cylinders`, 4)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by NULLIF( `MyDB`.`CARS`.`Cylinders`, 4)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select nullif(Sick_Days_Last_Year, 4) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "MISSING",
+   "category": "null",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "missing({ncyl})",
+   "singlestore": "x IS NULL",
+   "access_map": null,
+   "alternative": "x IS NULL (pushed down)",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select missing(cylinders) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "no"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select missing(\"Cylinders\") as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select MISSING (`MyDB`.`CARS`.`Cylinders`)  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by MISSING (`MyDB`.`CARS`.`Cylinders`)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select missing(Sick_Days_Last_Year) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "PUT (number)",
+   "category": "conversion",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "put({n}, dollar10.)",
+   "singlestore": "FORMAT",
+   "access_map": null,
+   "alternative": "aggregate first, format in the result (format= in PROC SQL)",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select put(msrp, dollar10.) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `MSRP`  FROM `CARS`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select put(\"MSRP\", dollar10.) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "select `MyDB`.`CARS`.`MSRP` from `MyDB`.`CARS`"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select put(Annual_Salary, dollar10.) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  },
+  {
+   "name": "INPUT",
+   "category": "conversion",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "input(substr({c2}, 1, 1), $1.)",
+   "singlestore": "-",
+   "access_map": null,
+   "alternative": "PROC SQL only; FedSQL / CAS: CAST(x AS DOUBLE)",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select input(substr(origin, 1, 1), $1.) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "no",
+    "sent": "SELECT  `Origin`  FROM `CARS`"
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select input(substr(\"Origin\", 1, 1), $1.) as v, count(*) as n from S2.CARS group by 1",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: [42000]Syntax error at or near \"$1.\" (0x81bfc10c)"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select input(substr(Gender, 1, 1), $1.) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR: Syntax error at or near \"$1.\""
+   }
+  },
+  {
+   "name": "CAST",
+   "category": "conversion",
+   "kind": "scalar",
+   "table": "cars",
+   "test": "cast({n} as varchar(20))",
+   "singlestore": "CAST",
+   "access_map": null,
+   "alternative": "PROC SQL has no CAST: PUT / INPUT",
+   "procsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select cast(msrp as varchar(20)) as v, count(*) as n from S2.CARS group by 1",
+    "supported": false,
+    "pushdown": "n/a",
+    "error": "ERROR 22-322: Syntax error, expecting one of the following: !, !!, &, (, ), *, **, +, ',', -, '.', /, <, <=, <>, =, >, >=, ?, AND, "
+   },
+   "fedsql": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select cast(\"MSRP\" as varchar(20)) as v, count(*) as n from S2.CARS group by 1",
+    "supported": true,
+    "pushdown": "yes",
+    "sent": "select  cast(`MyDB`.`CARS`.`MSRP` as VARCHAR (20) )  as `V`, COUNT ( * )  as `N` from `MyDB`.`CARS` group by  cast(`MyDB`.`CARS`.`MSRP` as VARCHAR (20) )"
+   },
+   "cas": {
+    "how": "verified",
+    "date": "2026-10-27",
+    "sql": "select cast(Annual_Salary as varchar(20)) as v, count(*) as n from CFANS.WORKFORCE_DATA group by 1",
+    "supported": true,
+    "pushdown": "yes"
+   }
+  }
+ ],
+ "notes": [
+  "PROC SQL: what SAS/ACCESS passes is its SQL function map (access_map: 'default' = passed, 'all' = only with the LIBNAME option SQL_FUNCTIONS=ALL); COUNT / SUM / AVG / MIN / MAX and SQL operators are always passed. The runs confirm the map; a function SingleStore doesn't get makes SAS read the rows (verdict 'pulled' / 'partly').",
+  "FedSQL: the SingleStore driver sends most SAS functions by name (e.g. INTNX, COMPRESS, LEFT, SUBSTR) and this cluster (SAS SpeedyStore) ran them in SingleStore; pushdown is judged from the driver trace (DRIVER_TRACE=SQL): PUT() only sent the column.",
+  "FedSQL in CAS on a SAS SpeedyStore caslib: 'yes' = the method=true plan shows the whole query pushed down ({Push Down}); 'partly' = the SAS Embedded Process did part of it (aggregates: grouping/ordering pushed, the Agg stage in CAS); 'no' = CAS did it (e.g. a TODAY() / CURRENT_DATE filter).",
+  "A different SingleStore cluster (without SAS SpeedyStore) or a newer SAS/ACCESS can change these results: re-run scripts/sas_functions.py --verify."
+ ]
+}

@@ -181,7 +181,8 @@ def test_wrap_proc_sql_select() -> None:
                max_rows=1000, pushdown=True)
     assert w["kind"] == "select" and w["result"] == ("WORK", "_S2RES") and not w["capped"]
     code = w["code"]
-    assert code.splitlines()[0] == s.TRACE_ON and code.splitlines()[-1] == s.TRACE_OFF
+    lines = code.splitlines()
+    assert lines[0] == s.SESSION_RESET and lines[1] == s.TRACE_ON and lines[-1] == s.TRACE_OFF
     assert "options user=S2SASH;" in code and "options user=work;" in code
     assert "proc sql outobs=10 feedback;" in code
     assert "create table WORK._S2RES as\n  select * from s2sash.cars;" in code
@@ -198,9 +199,18 @@ def test_wrap_proc_sql_caps_and_statements() -> None:
     assert "options user" not in w["code"] and "drop table work.a;" in w["code"]
 
 
+def test_wrap_resets_syntax_check_mode() -> None:
+    """A failed step leaves the Compute session in syntax check mode (OBS=0) with &SYSCC set, and every later run
+    ended "SAS reported an error" (seen on Zeus): each Compute run starts by undoing that; CAS actions don't need it."""
+    for lang, sql in (("procsql", "select 1 as x from a"), ("fedsql", "select 1 as x from a"), ("procsql", "proc print data=a; run;")):
+        assert s.wrap(lang, sql)["code"].startswith(s.SESSION_RESET + "\n"), (lang, sql)
+    assert "nosyntaxcheck" in s.SESSION_RESET and "%let syscc=0;" in s.SESSION_RESET
+    assert s.SESSION_RESET not in s.wrap("cas", "select 1 as x from a")["actions"][0][1]["query"]
+
+
 def test_wrap_fedsql_and_cas() -> None:
     w = s.wrap("fedsql", 'select "Make" from s2sash."cars"', pushdown=True)
-    assert w["code"].startswith("proc fedsql _method;")
+    assert w["code"].startswith(s.SESSION_RESET + "\nproc fedsql _method;")
     assert 'drop table WORK."_S2RES" force;' in w["code"]
     c = s.wrap("cas", 'select * from SASDP."CARS"', library="SASDP", pushdown=True)
     action, params = c["actions"][0]
@@ -208,7 +218,7 @@ def test_wrap_fedsql_and_cas() -> None:
     assert params["query"].startswith('create table CASUSER."_S2RES" {options replace=true} as select')
     assert "caslib='SASDP'" in c["code"]
     plain = s.wrap("cas", "proc print data=sashelp.class; run;")
-    assert plain["kind"] == "sas" and plain["code"] == "proc print data=sashelp.class; run;"
+    assert plain["kind"] == "sas" and plain["code"] == s.SESSION_RESET + "\nproc print data=sashelp.class; run;"
     with pytest.raises(ValueError):
         s.wrap("procsql", " ; ")
 

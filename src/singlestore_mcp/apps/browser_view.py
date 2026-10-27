@@ -36,6 +36,7 @@ from typing import Any, Protocol
 from mcp.server.mcpserver.exceptions import ToolError
 
 from ..browser_address import new_token
+from . import splash
 from ._core import page_html
 
 HOST_NAME = "singlestore-browser-view"
@@ -267,7 +268,7 @@ class BrowserView:
                     return self._send(404, b"Not found", "text/plain")
                 query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
                 if route == "":
-                    return self._send(200, _HOST_PAGE.read_bytes(), "text/html; charset=utf-8")
+                    return self._send(200, splash.expand(_HOST_PAGE.read_text(encoding="utf-8")).encode("utf-8"), "text/html; charset=utf-8")
                 if route == "ping":
                     return self._json(200, {"ok": True})
                 if route == "session":  # what the page needs to reconnect on its own

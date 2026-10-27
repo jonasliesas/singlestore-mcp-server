@@ -106,10 +106,40 @@ _S2_GRID_ROWS = 1000
 _S2_FETCH_LIMIT = int(_s2_os.environ.get("SINGLESTORE_MCP_NOTEBOOK_FETCH_LIMIT", "100000"))
 
 
+def _s2_net():
+    """Bounded connect and a short TCP keepalive (SINGLESTORE_MCP_TCP_KEEPALIVE "idle,interval,count", as the MCP
+    server): a connection that died in a network break (VPN switch, sleep) fails in seconds instead of hanging."""
+    import inspect as _insp, socket as _so
+    raw = _s2_os.environ.get("SINGLESTORE_MCP_TCP_KEEPALIVE", "10,5,3").strip().lower()
+    kw = {"connect_timeout": 10}
+    if raw in ("0", "off", "no", "false") or "socket_options" not in _insp.signature(_s2.connect).parameters:
+        return kw  # (an older driver without socket_options: its default keepalive)
+    try:
+        idle, intvl, cnt = (max(1, int(float(x))) for x in raw.split(","))
+    except ValueError:
+        idle, intvl, cnt = 10, 5, 3
+    opts = {_so.SOL_SOCKET: {_so.SO_KEEPALIVE: 1}}
+    probe = _so.socket()
+    try:
+        for name, value in (("TCP_KEEPIDLE", idle), ("TCP_KEEPINTVL", intvl), ("TCP_KEEPCNT", cnt)):
+            opt = getattr(_so, name, None)
+            if opt is None:
+                continue
+            try:
+                probe.setsockopt(_so.IPPROTO_TCP, opt, value)
+                opts.setdefault(_so.IPPROTO_TCP, {})[opt] = value
+            except OSError:
+                pass
+    finally:
+        probe.close()
+    kw["socket_options"] = opts
+    return kw
+
+
 def _s2_connect():
     url = _s2_os.environ.get("SINGLESTORE_URL")
     if url:
-        return _s2.connect(url, autocommit=True)
+        return _s2.connect(url, autocommit=True, **_s2_net())
     kw = dict(
         host=_s2_os.environ["SINGLESTORE_HOST"],
         port=int(_s2_os.environ.get("SINGLESTORE_PORT", "3306")),
@@ -121,6 +151,7 @@ def _s2_connect():
     if _s2_os.environ.get("SINGLESTORE_DATABASE"):
         kw["database"] = _s2_os.environ["SINGLESTORE_DATABASE"]
     kw.update(_s2_tls())
+    kw.update(_s2_net())
     return _s2.connect(**kw)
 
 
@@ -369,10 +400,20 @@ def _s2_execute(sql, database=None, ns=None):
             conn.reset()
             _s2_current_db[0] = None
     try:
-        if db and _s2_current_db[0] != db:
-            cur.execute("USE `" + db.replace("`", "``") + "`")
-            _s2_current_db[0] = db
-        cur.execute("SET SESSION sql_select_limit = %d" % _S2_FETCH_LIMIT)
+        for attempt in (0, 1):
+            try:
+                if db and _s2_current_db[0] != db:
+                    cur.execute("USE `" + db.replace("`", "``") + "`")
+                    _s2_current_db[0] = db
+                cur.execute("SET SESSION sql_select_limit = %d" % _S2_FETCH_LIMIT)
+                break
+            except (_s2.InterfaceError, _s2.OperationalError, OSError) as exc:
+                # The connection died in a network break (nothing of the cell ran yet): reconnect once.
+                code = getattr(exc, "errno", None)
+                if attempt or not (isinstance(exc, (_s2.InterfaceError, OSError)) or code in (2006, 2013, 2055)):
+                    raise
+                conn.reset()
+                cur = conn.cursor()
         for stmt in _s2_split(sql):
             result = _s2_interruptible(lambda: _s2_run_statement(cur, stmt))
             if stmt.split(None, 1)[0].upper() == "USE":

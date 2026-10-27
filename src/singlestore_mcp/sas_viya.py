@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlsplit
 
-from . import connections, fileio
+from . import connections, fileio, netguard
 from .paths import data_dir
 
 _LEGACY_SECRET = "sas-viya#token"  # the one token of the old single-settings sas.json
@@ -320,7 +320,8 @@ def _http(method: str, url: str, *, data: dict[str, str] | None = None, headers:
             last = exc
     else:
         base = url.split("/SASLogon")[0].split("/compute")[0].split("/identities")[0]
-        raise RuntimeError(f"Couldn't reach SAS Viya at {base}: {getattr(last, 'reason', last)}") from last
+        # netguard.Unreachable is a RuntimeError too (callers that catch RuntimeError keep working).
+        raise netguard.Unreachable(f"Couldn't reach SAS Viya at {base}: {getattr(last, 'reason', last)}") from last
     try:
         return status, json.loads(raw or b"null")
     except ValueError:
@@ -418,6 +419,11 @@ def token(min_valid: int = 300, name: str | None = None) -> str:
                                     t.get("client_id") or s["client_id"], s["ssl_verify"])
                 fresh.setdefault("refresh_token", t["refresh"])
                 return _store(name, fresh, t.get("client_id") or s["client_id"], t.get("source") or "sign-in", s["url"])["access"]
+            except netguard.Unreachable as exc:
+                # The network is away (VPN off, sleep): the sign-in is fine and is renewed once Viya answers again.
+                netguard.failure("sas", exc)
+                raise netguard.Unreachable(f"Couldn't renew the SAS Viya sign-in ({name}): {exc}. The sign-in is kept and "
+                                           "renewed by itself once the network (VPN) is back.") from exc
             except Exception as exc:  # noqa: BLE001 - expired / revoked refresh token
                 raise NeedsSignIn(f"The SAS Viya sign-in ({name}) has expired ({exc}). Sign in again in the Connections window.") from exc
         raise NeedsSignIn(f"The SAS Viya sign-in ({name}) has expired. Sign in again in the Connections window.")

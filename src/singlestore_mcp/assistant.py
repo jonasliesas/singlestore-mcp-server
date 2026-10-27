@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import connections as _connections
+from . import sas_guide
 from .paths import data_dir
 
 READONLY_SERVER = "singlestore_ro"
@@ -63,6 +64,12 @@ renders plain text, **bold**, `inline code` and ```sql blocks, so never use \
 Markdown tables or headings.
 - Write SingleStore SQL (MySQL-compatible, with SingleStore extensions). \
 Database and table names are case-sensitive.
+- Unless the question says the editor tab runs SAS (PROC SQL, FedSQL or FedSQL \
+in CAS): then every SQL block is in that dialect - never SingleStore SQL - and \
+follows the SAS guide that comes with the question (the latest guide wins when \
+the tab's language changes). The editor wraps the SQL itself, so give bare \
+statements; a whole SAS program (proc …; … quit;) only when the user asks for \
+SAS code or the task needs one.
 - You can inspect the database with the singlestore_ro tools: list_databases, \
 list_tables, describe_table and read_query (read-only statements only). Check \
 table and column names before using them, and test the SQL you suggest when \
@@ -417,8 +424,40 @@ def cancel(editor_id: str) -> bool:
     return True
 
 
-def build_prompt(question: str, database: str | None, sql: str | None, selected: bool, last_result: str | None) -> str:
-    parts = [f"Current database: {database or '(default)'}", f"Question: {question}"]
+_guided: dict[str, str] = {}  # editor id -> the SAS language whose guide its Claude session has had
+
+
+def needs_guide(editor_id: str, language: str) -> bool:
+    """Whether this question must carry the SAS guide: the editor's session hasn't had the guide of this
+    language yet (a new session, or the tab's language changed since)."""
+    if language not in sas_guide.LANGUAGES:
+        return False
+    with _lock:
+        return editor_id not in _sessions or _guided.get(editor_id) != language
+
+
+def mark_guided(editor_id: str, language: str) -> None:
+    with _lock:
+        if language in sas_guide.LANGUAGES:
+            _guided[editor_id] = language
+        else:
+            _guided.pop(editor_id, None)
+
+
+def build_prompt(question: str, database: str | None, sql: str | None, selected: bool, last_result: str | None,
+                 *, language: str = "singlestore", sas: dict[str, Any] | None = None, guide: bool = True) -> str:
+    """The question with the editor's context. ``language``: what the tab runs as (singlestore, procsql, fedsql,
+    cas); for a SAS tab ``sas`` is its context (library / caslib, tables, known columns, options; see
+    ``sas_guide.context_text``) and ``guide`` adds that language's SAS guide (only when the session lacks it)."""
+    if language in sas_guide.LANGUAGES:
+        parts = [f"The editor tab runs {sas_guide.LABELS[language]} in SAS (not SingleStore SQL). "
+                 f"SingleStore database of the tab (for your tools): {database or '(default)'}",
+                 sas_guide.context_text(language, sas)]
+        if guide:
+            parts.append(f"SAS guide for {sas_guide.LABELS[language]}:\n{sas_guide.guide(language)}")
+        parts.append(f"Question: {question}")
+    else:
+        parts = [f"Current database: {database or '(default)'}", f"Question: {question}"]
     if sql:
         label = "Selected SQL in the editor" if selected else "SQL in the editor"
         parts.append(f"{label}:\n```sql\n{sql[:8000]}\n```")
