@@ -13,6 +13,11 @@ environment, so the MCP server needs no data-science packages:
 
 Kernels close after 30 idle minutes, and when the MCP server exits (the
 bridge sees stdin close).
+
+Server mode with ``STUDIO_NOTEBOOKS=gateway`` (``server_mode.notebooks_mode()``): kernels run behind the hub's kernel
+broker on Jupyter Enterprise Gateway instead (``notebook_gateway.GatewayKernel``, same events as the bridge), and
+package installs / listing run in a short-lived kernel of the user (``pip install --target`` into the user's own
+folder, ``STUDIO_PIP_MODE``).
 """
 
 from __future__ import annotations
@@ -75,7 +80,23 @@ _setup = {"state": "idle", "log": [], "started": None}
 _setup_lock = threading.Lock()
 
 
+def _gateway() -> bool:
+    """Server mode, kernels behind the kernel gateway (STUDIO_NOTEBOOKS=gateway)."""
+    from . import server_mode
+
+    return server_mode.enabled() and server_mode.notebooks_mode() == "gateway"
+
+
 def environment_status() -> dict[str, Any]:
+    if _gateway():
+        from . import server_mode
+
+        with _setup_lock:
+            state, log = _setup["state"], _setup["log"][-12:]
+        mode = server_mode.pip_settings()[0]
+        return {"state": "installing" if state == "installing" else "ready", "python": "kernel gateway",
+                "packages": PACKAGES, "missing": [], "log": log, "kernels": "gateway", "pip_mode": mode,
+                "note": server_mode.PIP_OFF if mode == "off" else None}
     py = kernel_python()
     with _setup_lock:
         state = _setup["state"]
@@ -118,6 +139,8 @@ def _shared_environment() -> bool:
 def setup() -> dict[str, Any]:
     """Create the notebook environment, or add missing packages, in the background (idempotent)."""
     _check_enabled()
+    if _gateway():
+        return environment_status()  # the image's environment, on the gateway
     if _shared_environment() and not kernel_python():
         raise LookupError("The notebook Python environment isn't installed on this server (the Studio admin sets "
                           "STUDIO_NOTEBOOK_PYTHON).")
@@ -137,7 +160,12 @@ _REQUIREMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?((
 def install_packages(specs: list[str]) -> dict[str, Any]:
     """Install packages into the notebook environment in the background (progress via environment_status)."""
     _check_enabled()
-    if _shared_environment():
+    if _gateway():
+        from . import server_mode
+
+        if server_mode.pip_settings()[0] == "off":
+            raise server_mode.FeatureOff(server_mode.PIP_OFF)
+    elif _shared_environment():
         from . import server_mode
 
         raise server_mode.FeatureOff("On this server the notebook environment is shared by every user: packages are "
@@ -148,13 +176,13 @@ def install_packages(specs: list[str]) -> dict[str, Any]:
     bad = [x for x in specs if not _REQUIREMENT.match(x)]
     if bad:
         raise ValueError(f"Not a package name: {', '.join(bad)} (use names like pandas, plotly==5.24 or scikit-learn>=1.5).")
-    if not kernel_python():
+    if not _gateway() and not kernel_python():
         raise LookupError("The notebook Python environment isn't installed yet.")
     with _setup_lock:
         if _setup["state"] == "installing":
             raise ValueError("Another install is still running.")
         _setup.update(state="installing", log=["Starting…"], started=time.time())
-    threading.Thread(target=_install, args=(specs,), daemon=True).start()
+    threading.Thread(target=_install_gateway if _gateway() else _install, args=(specs,), daemon=True).start()
     return environment_status()
 
 
@@ -171,6 +199,15 @@ print(json.dumps(sorted(out.values(), key=lambda p: p["name"].lower())))
 
 def list_packages() -> list[dict[str, str]]:
     """Installed distributions in the notebook environment: name, version, summary."""
+    core = {p.lower().replace("_", "-") for p in PACKAGES}
+    if _gateway():
+        _check_enabled()
+        from . import notebook_gateway
+
+        pkgs = notebook_gateway.list_packages(_LIST_SCRIPT)
+        for p in pkgs:
+            p["core"] = p["name"].lower().replace("_", "-") in core
+        return pkgs
     py = kernel_python()
     if not py:
         raise LookupError("The notebook Python environment isn't installed yet.")
@@ -178,7 +215,6 @@ def list_packages() -> list[dict[str, str]]:
                           errors="replace", timeout=60, creationflags=_NO_WINDOW)
     if proc.returncode != 0:
         raise RuntimeError(f"Couldn't list packages: {proc.stderr.strip()[-300:]}")
-    core = {p.lower().replace("_", "-") for p in PACKAGES}
     pkgs = json.loads(proc.stdout)
     for p in pkgs:
         p["core"] = p["name"].lower().replace("_", "-") in core
@@ -220,6 +256,21 @@ def _install(extra: list[str] | None = None) -> None:
         if not extra:
             _stamp().write_text(",".join(PACKAGES), encoding="utf-8")
         _log("Done." + (" Restart the kernel (↻) to use the new packages." if extra else ""))
+        with _setup_lock:
+            _setup["state"] = "idle"
+    except Exception as exc:  # noqa: BLE001 - shown in the app
+        _log(f"Error: {exc}")
+        with _setup_lock:
+            _setup["state"] = "error"
+
+
+def _install_gateway(specs: list[str]) -> None:
+    """The user's packages, installed on the kernel gateway (their own --target folder)."""
+    from . import notebook_gateway
+
+    try:
+        notebook_gateway.install(specs, _log)
+        _log("Done. Restart the kernel to use the new packages.")
         with _setup_lock:
             _setup["state"] = "idle"
     except Exception as exc:  # noqa: BLE001 - shown in the app
@@ -288,6 +339,18 @@ def _server_kernel_env(env: dict[str, str], active: Any) -> None:
         env["SINGLESTORE_MCP_SAS_TOKEN_CMD"] = json.dumps(kernel_tokens.command("sas", env.get("SINGLESTORE_MCP_SAS_CONNECTION", "")))
 
 
+def _gateway_prelude() -> str:
+    """Gateway kernels: the active connections' settings (no secrets) and token commands via the hub's relay."""
+    from . import connections, notebook_gateway, sas_viya
+
+    env = connections.apply_env({})
+    env.update(sas_viya.kernel_env())
+    active = connections.active()
+    s2 = active.name if active is not None and not active.builtin else None
+    return notebook_gateway.prelude(notebook_gateway.kernel_settings(env), "__RELAY__", s2,
+                                    env.get("SINGLESTORE_MCP_SAS_CONNECTION") or None)
+
+
 def _kernel_cwd() -> str | None:
     """Where a kernel starts: on the server the user's own folder (My files); on a laptop as before."""
     return str(Path.home()) if _shared_environment() else None
@@ -336,38 +399,8 @@ class _Kernel:
                 msg = json.loads(line)
             except ValueError:
                 continue
-            event = msg.get("event")
-            if event == "ready":
-                self.ready.set()
-            elif event == "error" and "id" not in msg:
-                self.error = msg.get("message")
-                self.ready.set()
-            elif event == "restarted":
-                self.error = None
-            run = _runs.get(msg.get("id", ""))
-            if not run:
-                continue
-            with _lock:
-                if event == "output":
-                    run.outputs.append(msg["output"])
-                elif event == "clear":
-                    run.outputs.clear()
-                    run.cleared += 1
-                elif event == "done":
-                    run.done, run.status, run.execution_count = True, msg.get("status"), msg.get("execution_count")
-                    self.busy_runs.discard(run.id)
-                    self.last_used = time.time()
-        # Bridge ended: finish anything still waiting.
-        with _lock:
-            for rid in list(self.busy_runs):
-                run = _runs.get(rid)
-                if run and not run.done:
-                    detail = "".join(self.stderr).strip()[-400:]
-                    run.outputs.append({"output_type": "error", "ename": "KernelDied",
-                                        "evalue": "The Python kernel stopped." + (f" {detail}" if detail else ""), "traceback": []})
-                    run.done, run.status = True, "error"
-            self.busy_runs.clear()
-        self.ready.set()
+            _dispatch(self, msg)
+        _ended(self)  # bridge ended
 
     def close(self) -> None:
         try:
@@ -385,17 +418,73 @@ class _Kernel:
         threading.Thread(target=reap, daemon=True).start()
 
 
-_kernels: dict[str, _Kernel] = {}
+def _dispatch(k: Any, msg: dict[str, Any]) -> None:
+    """One bridge event (local bridge or gateway kernel) into the kernel's state and its runs."""
+    event = msg.get("event")
+    if event == "ready":
+        k.ready.set()
+    elif event == "error" and "id" not in msg:
+        k.error = msg.get("message")
+        k.ready.set()
+    elif event == "restarted":
+        k.error = None
+    run = _runs.get(msg.get("id", ""))
+    if not run:
+        return
+    with _lock:
+        if event == "output":
+            run.outputs.append(msg["output"])
+        elif event == "clear":
+            run.outputs.clear()
+            run.cleared += 1
+        elif event == "done":
+            run.done, run.status, run.execution_count = True, msg.get("status"), msg.get("execution_count")
+            k.busy_runs.discard(run.id)
+            k.last_used = time.time()
+
+
+def _ended(k: Any) -> None:
+    """The kernel ended: finish anything still waiting."""
+    with _lock:
+        for rid in list(k.busy_runs):
+            run = _runs.get(rid)
+            if run and not run.done:
+                detail = "".join(k.stderr).strip()[-400:]
+                run.outputs.append({"output_type": "error", "ename": "KernelDied",
+                                    "evalue": "The Python kernel stopped." + (f" {detail}" if detail else ""), "traceback": []})
+                run.done, run.status = True, "error"
+        k.busy_runs.clear()
+    k.ready.set()
+
+
+def _max_kernels() -> int:
+    if _gateway():
+        from . import server_mode
+
+        return max(1, int((server_mode.gateway() or {}).get("max_kernels") or _MAX_KERNELS))
+    return _MAX_KERNELS
+
+
+def _new_kernel(notebook_id: str, python: Path | None) -> Any:
+    if _gateway():
+        from . import notebook_gateway
+
+        return notebook_gateway.GatewayKernel(notebook_id, _dispatch, _ended, code_before=_gateway_prelude())
+    assert python is not None
+    return _Kernel(notebook_id, python)
+
+
+_kernels: dict[str, Any] = {}
 _runs: dict[str, _Run] = {}
 _lock = threading.Lock()
 _ids = itertools.count(1)
 _reaper_started = False
 
 
-def _kernel_for(notebook_id: str) -> _Kernel:
+def _kernel_for(notebook_id: str) -> Any:
     _check_enabled()
-    python = kernel_python()
-    if not python:
+    python = None if _gateway() else kernel_python()
+    if not python and not _gateway():
         raise LookupError("The notebook Python environment isn't installed yet.")
     with _lock:
         k = _kernels.get(notebook_id)
@@ -404,11 +493,11 @@ def _kernel_for(notebook_id: str) -> _Kernel:
         if k:
             k.close()
         idle = sorted((x for x in _kernels.values() if not x.busy_runs), key=lambda x: x.last_used)
-        while len(_kernels) >= _MAX_KERNELS and idle:
+        while len(_kernels) >= _max_kernels() and idle:
             old = idle.pop(0)
             old.close()
             _kernels.pop(old.notebook_id, None)
-        k = _Kernel(notebook_id, python)
+        k = _new_kernel(notebook_id, python)
         _kernels[notebook_id] = k
         _start_reaper()
         return k

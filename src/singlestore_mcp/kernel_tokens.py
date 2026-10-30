@@ -12,8 +12,14 @@ an environment). So the Studio serves its own kernels instead:
   server (``SINGLESTORE_MCP_KERNEL_TOKENS`` = its base URL) and prints the token. Stdlib only, quick to start.
 
 No isolation between users' kernels on a shared server (they run as one OS user): another user's code could read
-this kernel's environment. That is the known limit of local notebooks (test use with a few trusted users only); the
-kernel gateway (step 2a) replaces this.
+this kernel's environment. That is the known limit of local notebooks (test use with a few trusted users only).
+
+Kernel gateway (``STUDIO_NOTEBOOKS=gateway``, step 2a): the kernels run in another pod and can't reach 127.0.0.1 here.
+They ask the hub's token relay instead (``hub/gateway.py``: ``<relay>/k/<kernel secret>/sas|s2/<connection>``), which
+finds the kernel's user and asks that user's Studio's service above. The kernel's token command is then
+``<kernel python> -I -c RELAY_CLIENT sas|s2 <connection>`` (the same client as ``_main``; the kernel's environment
+has no singlestore_mcp). ``s2`` answers the connection's password for password logins (the gateway kernel gets no
+password in its environment), its token otherwise.
 """
 
 from __future__ import annotations
@@ -38,7 +44,7 @@ def _token(kind: str, name: str) -> str:
     if kind == "s2":
         from . import connections
 
-        return connections.token_for(connections.get(name))
+        return connections.password_for(connections.get(name))
     raise LookupError(f"unknown token kind {kind!r}")
 
 
@@ -89,15 +95,15 @@ def command(kind: str, name: str) -> list[str]:
     return [sys.executable, "-m", "singlestore_mcp.kernel_tokens", kind, name]
 
 
-def _main(argv: list[str]) -> int:
-    import os
-    import urllib.error
-    import urllib.request
-
+# The kernel's side: ask the token service (local) or the hub's relay (gateway) and print the token. Stdlib only,
+# runs as ``python -I -c RELAY_CLIENT kind name`` in a kernel without singlestore_mcp.
+RELAY_CLIENT = r"""
+import os, sys, urllib.error, urllib.parse, urllib.request
+def _relay(argv):
     if len(argv) != 2 or argv[0] not in ("sas", "s2"):
-        print("usage: python -m singlestore_mcp.kernel_tokens sas|s2 <connection>", file=sys.stderr)
+        print("usage: sas|s2 <connection>", file=sys.stderr)
         return 2
-    base = os.environ.get(ENV)
+    base = os.environ.get("SINGLESTORE_MCP_KERNEL_TOKENS")
     if not base:
         print("This kernel has no token service (start it from Studio again).", file=sys.stderr)
         return 1
@@ -111,6 +117,15 @@ def _main(argv: list[str]) -> int:
     except OSError as exc:
         print(f"Studio didn't answer the token request: {exc}", file=sys.stderr)
     return 1
+if __name__ == "__main__":
+    sys.exit(_relay(sys.argv[1:]))
+"""
+
+
+def _main(argv: list[str]) -> int:
+    ns: dict[str, Any] = {"__name__": "kernel_tokens_client"}
+    exec(RELAY_CLIENT, ns)  # noqa: S102 - our own constant source
+    return ns["_relay"](argv)
 
 
 if __name__ == "__main__":

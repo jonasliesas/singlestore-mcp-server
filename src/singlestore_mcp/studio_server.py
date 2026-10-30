@@ -12,6 +12,7 @@ Started by the hub, it reads one JSON line from stdin before anything else::
 
     {"token": "<path token>", "secret_key": "<Fernet key>", "user": "<SAS user id>",
      "public_base": "/studio/", "sas_client": {"id": "...", "secret": "..."},
+     "gateway": {"url": "http://127.0.0.1:<broker port>", "key": "<this Studio's key>", "max_kernels": 3},
      "seed": {"viya": {...}, "singlestore": {...}}}
 
 so nothing secret is in its command line or environment (another process of the same OS user could read those).
@@ -185,6 +186,7 @@ def main(argv: list[str] | None = None) -> int:
     server_mode.set_user(cfg.get("user") or os.environ.get("SINGLESTORE_STUDIO_USER") or None)
     sas_client = cfg.get("sas_client") or {}
     server_mode.set_sas_client(sas_client.get("id"), sas_client.get("secret"))
+    server_mode.set_gateway(cfg.get("gateway"))  # STUDIO_NOTEBOOKS=gateway: the hub's kernel broker + this Studio's key
     public_base = cfg.get("public_base") or os.environ.get("SINGLESTORE_STUDIO_PUBLIC_BASE") or None
     bind = os.environ.get("SINGLESTORE_STUDIO_BIND", "127.0.0.1")
     port = int(os.environ.get("SINGLESTORE_STUDIO_PORT", "0") or 0)

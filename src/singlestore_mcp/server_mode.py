@@ -9,6 +9,9 @@ SINGLESTORE_MCP_SERVER_MODE=1. This module holds the switches the rest of the co
 - ``keyring_enabled()``     - the OS credential store; off in server mode (secrets go to the encrypted file store)
 - ``secret_key()``          - the key of the user's encrypted secrets file, handed over by the hub (never on disk)
 - ``sas_client_secret()``   - the secret of the hub's SAS Logon client (refreshing the user's Viya token)
+- ``notebooks_mode()``      - where kernels run: ``local`` (this process starts them) or ``gateway`` (behind the hub's
+                              kernel broker and Jupyter Enterprise Gateway, ``set_gateway``)
+- ``pip_settings()``        - package installs for notebook users: ``mirror`` | ``pypi`` | ``off`` (+ the mirror's index)
 - ``features()``            - the same switches for the apps' UI
 
 Outside server mode every switch answers as before (notebooks, assistants and the keyring on), so the
@@ -21,7 +24,8 @@ import os
 from typing import Any
 
 _TRUE = ("1", "true", "yes", "on")
-_state: dict[str, Any] = {"secret_key": None, "sas_client_secret": None, "user": None, "notebooks": None, "token_hook": None}
+_state: dict[str, Any] = {"secret_key": None, "sas_client_secret": None, "user": None, "notebooks": None, "token_hook": None,
+                          "gateway": None}
 
 
 def _flag(name: str, default: bool) -> bool:
@@ -46,6 +50,42 @@ def notebooks_enabled() -> bool:
 def set_notebooks(allowed: bool | None) -> None:
     """Server mode: notebooks on/off for this Studio's user (None: the SINGLESTORE_MCP_NOTEBOOKS switch)."""
     _state["notebooks"] = allowed
+
+
+def notebooks_mode() -> str:
+    """``local`` (kernels in this process, as on a laptop) or ``gateway`` (server mode, SINGLESTORE_MCP_NOTEBOOKS_MODE)."""
+    if not enabled():
+        return "local"
+    return "gateway" if os.environ.get("SINGLESTORE_MCP_NOTEBOOKS_MODE", "").strip().lower() == "gateway" else "local"
+
+
+def set_gateway(settings: dict[str, Any] | None) -> None:
+    """Server mode with the kernel gateway: the hub's kernel broker for this Studio (``url``, this Studio's ``key``,
+    ``max_kernels``), handed over on stdin - never in the environment."""
+    _state["gateway"] = dict(settings) if settings else None
+
+
+def gateway() -> dict[str, Any] | None:
+    return _state["gateway"]
+
+
+PIP_MODES = ("mirror", "pypi", "off")
+
+
+def pip_settings() -> tuple[str, str]:
+    """STUDIO_PIP_MODE (mirror | pypi | off; default mirror when STUDIO_PIP_INDEX_URL is set, else off) and the
+    mirror's index URL. Read by the hub, the Studios (SINGLESTORE_MCP_PIP_MODE) and the kernel gateway."""
+    index = (os.environ.get("STUDIO_PIP_INDEX_URL") or os.environ.get("SINGLESTORE_MCP_PIP_INDEX_URL") or "").strip()
+    raw = (os.environ.get("STUDIO_PIP_MODE") or os.environ.get("SINGLESTORE_MCP_PIP_MODE") or "").strip().lower()
+    mode = raw or ("mirror" if index else "off")
+    if mode not in PIP_MODES:
+        raise SystemExit("STUDIO_PIP_MODE is mirror (with STUDIO_PIP_INDEX_URL), pypi or off.")
+    if mode == "mirror" and not index:
+        raise SystemExit("STUDIO_PIP_MODE=mirror needs STUDIO_PIP_INDEX_URL (the PyPI mirror's /simple index).")
+    return mode, index
+
+
+PIP_OFF = "Package installs are off on this server (STUDIO_PIP_MODE=off): only the image's packages are available."
 
 
 def assistant_enabled() -> bool:
