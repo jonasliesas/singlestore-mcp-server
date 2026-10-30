@@ -64,6 +64,10 @@ class ConnectionSettings:
 
         host = os.environ.get("SINGLESTORE_HOST")
         if not host:
+            from . import server_mode
+
+            if server_mode.enabled():
+                raise ConfigurationError("No SingleStore connection yet: add one in Connections (+ New connection).")
             raise ConfigurationError(
                 "Set SINGLESTORE_HOST (and SINGLESTORE_USER / "
                 "SINGLESTORE_PASSWORD / SINGLESTORE_DATABASE), or set "

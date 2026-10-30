@@ -167,6 +167,17 @@ def without_vendors(html: str, have: dict[str, str] | None) -> tuple[str, list[s
     return html, omitted
 
 
+# Server mode: the file browser's local files are the user's own folder in Studio on the server, not "this computer".
+_LOCAL_FILES = ('label: "This computer", title: "Files on this computer (the SQL folder and your user folder)"',
+                'label: "My files", title: "Your own files in Studio on the server (the SQL folder is inside)"')
+
+
+def _server_wording(html: str) -> str:
+    from .. import server_mode
+
+    return html.replace(*_LOCAL_FILES) if server_mode.enabled() else html
+
+
 def build_page(template: str) -> str:
     html = (_HERE / template).read_text(encoding="utf-8")
     if _HEAD_MARKER not in html:
@@ -174,6 +185,7 @@ def build_page(template: str) -> str:
     html = _VENDOR_MARKER.sub(_vendor_inline, html)
     html = splash.expand(html)  # the Studio splash (the Workspace)
     html = html.replace(_HEAD_MARKER, _head(), 1)
+    html = _server_wording(html)
     build = hashlib.sha1(html.encode("utf-8")).hexdigest()[:8]
     meta = f'<meta name="s2-build" content="{build}">\n<meta name="s2-head" content="{head_hash()}">'
     return html.replace("<head>", f"<head>\n{meta}", 1)

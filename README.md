@@ -2279,6 +2279,21 @@ environment in `~/.singlestore-mcp`.
   preview and your confirmation (see [Security](#security)).
 - Notebook code runs with your Windows user rights, like any local Jupyter.
 
+### Studio on a server (pilot)
+
+SAS SpeedyStore Studio can also run on a server for several colleagues, without Claude: a small hub signs users in
+with their SAS user on SAS Logon (Viya), starts one Studio per user with its own folder, and proxies it behind
+`https://<studio host>/studio/`. SAS work runs as the signed-in user (their Viya token is pre-loaded); each user adds
+their own SingleStore connection. Notebooks and Ask Claude are off in this first step.
+
+```powershell
+.\scripts\studio-hub-local.ps1          # try it on this PC: http://127.0.0.1:8800/
+```
+
+Container image, Kubernetes manifests and every setting: [deploy/README.md](deploy/README.md); what the Viya and
+Kubernetes admins do (OAuth client in SAS Logon, ingress/TLS, storage, network, secrets):
+[deploy/ADMIN-GUIDE.md](deploy/ADMIN-GUIDE.md).
+
 ## Setup
 
 Uses [`uv`](https://docs.astral.sh/uv/) to manage the Python environment,

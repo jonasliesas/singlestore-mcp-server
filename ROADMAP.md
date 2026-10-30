@@ -214,9 +214,23 @@ Last updated 2026-10-27 (latest release 0.10.1; design round from `studio-design
 - Re-check warm/cold split after lowering the trace threshold for a while; the daily `_hello_world` check fails
   because its output table exists (tell its owner).
 
-## On hold
-- **Multi-user Workspace** on a server with login – until Jonas decides the app will be used at that scale.
-  Design proposal locally in `docs/MULTI_USER_DESIGN.md` (not committed).
+## Server pilot (branch `claude/server-pilot`) – SAS SpeedyStore Studio for colleagues
+Decided by Jonas 2026-10-30: colleagues (not customers), multi-user from the start, in SAS's network in the same
+Kubernetes as the Zeus Viya, sign-in with SAS user + password via SAS Logon on Zeus (no Entra/SSO yet), notebooks off
+in step 1, "Ask Claude" off by default (switchable later with an Anthropic / Foundry API key). Design background:
+`docs/MULTI_USER_DESIGN.md` (local, not committed). How to run / deploy: [deploy/README.md](deploy/README.md),
+[deploy/ADMIN-GUIDE.md](deploy/ADMIN-GUIDE.md).
+- **Step 1 (built):** server mode for Studio (`studio_server.py`, `server_mode.py`: no stdio/Claude, encrypted file
+  store with a hub-derived key per user, notebooks / Ask Claude / browser sign-ins off, "My files" = the user's
+  folder); hub (`hub/`: SAS Logon Authorization Code + PKCE – own client with redirect or the `vscode` paste-the-code
+  fallback –, one Studio process per user with the user's Viya token pre-loaded, proxy behind `/studio/`, cookies +
+  CSRF, idle stop, max users, admin page, audit log, `/healthz`); `deploy/Dockerfile`; `deploy/k8s/` manifests;
+  tests with a fake SAS Logon (`test_hub.py`, `test_hub_e2e.py`, `test_server_mode.py`).
+- **Next in step 1:** Jonas signs in against Zeus locally (`scripts/studio-hub-local.ps1`) and with a colleague; the
+  Viya admin registers the client (ADMIN-GUIDE §2); image build + deploy by the K8s admin; measure memory per user.
+- **Step 2:** notebooks (one pod / OS user per Studio, egress limits, PyPI mirror), Ask Claude via an org key with
+  per-user limits, shared metrics sampler instead of one per Studio, more than one hub replica (sessions out of memory),
+  SingleStore per-user JWT logins.
 
 ## Known small issues
 - Network breaks: a query whose connection goes silent *without* a route change or sleep (e.g. a firewall that drops

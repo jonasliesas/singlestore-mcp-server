@@ -83,7 +83,11 @@ the statement in a ```sql block for them to review and run."""
 
 
 def find_claude() -> str | None:
-    """Path of the Claude Code executable, or None if it isn't installed."""
+    """Path of the Claude Code executable, or None if it isn't installed (or the assistants are off: server mode)."""
+    from . import server_mode
+
+    if not server_mode.assistant_enabled():
+        return None
     configured = os.environ.get("SINGLESTORE_MCP_CLAUDE")
     if configured:
         return configured if Path(configured).exists() else None
@@ -205,6 +209,10 @@ def _system_prompt(kind: str = "sql_editor") -> str:
 
 
 def status() -> dict[str, Any]:
+    from . import server_mode
+
+    if not server_mode.assistant_enabled():
+        return {"available": False, "disabled": True, "reason": server_mode.ASSISTANT_OFF}
     claude = find_claude()
     if not claude:
         return {

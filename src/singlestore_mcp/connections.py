@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import fileio
+from . import fileio, server_mode
 from .paths import data_dir
 
 ENV_PROFILE = "Environment variables"
@@ -102,6 +102,11 @@ class _FileSecrets:
     def _fernet(self):
         from cryptography.fernet import Fernet
 
+        hub_key = server_mode.secret_key()
+        if hub_key and not self.kr:
+            # Server mode: the key comes from the hub (derived from its master key, never written to the user's
+            # volume), so a copy of the volume alone doesn't open the secrets.
+            return Fernet(hub_key)
         if self.kr:
             key = self.kr.get_password(_SERVICE, "__secrets_file_key__")
             if not key:
@@ -143,7 +148,9 @@ class _FileSecrets:
 
 
 def _keyring():
-    """The OS credential store, or None if there's no usable one."""
+    """The OS credential store, or None if there's no usable one (or it's switched off: server mode)."""
+    if not server_mode.keyring_enabled():
+        return None
     try:
         import keyring
 
@@ -163,6 +170,8 @@ def password_store() -> str:
         if "SecretService" in type(kr.get_keyring()).__module__:
             friendly = "Secret Service (Linux keyring)"
         return friendly or f"OS keyring ({backend})"
+    if server_mode.secret_key():
+        return "encrypted file in your Studio folder on the server"
     return f"encrypted file in {data_dir()}"
 
 
@@ -326,6 +335,8 @@ def _auth_type(profile: dict[str, Any]) -> str:
     auth = str(profile.get("auth") or "password")
     if auth not in AUTH_TYPES:
         raise ValueError(f"Unknown authentication {auth!r}.")
+    if auth in ("browser_sso", "entra") and server_mode.enabled():
+        raise ValueError(server_mode.SIGN_IN_OFF)
     if auth != "password" and profile.get("ssl_disabled"):
         raise ValueError("Token logins (JWT / SSO) need TLS: turn 'TLS off' off.")
     return auth
@@ -453,6 +464,8 @@ def sso_sign_in(name: str, timeout: int = 120) -> dict[str, Any]:
     """Browser SSO (Helios): opens SingleStore's sign-in page, waits for the token, caches it."""
     from singlestoredb import auth as s2auth
 
+    if server_mode.enabled():
+        raise ValueError(server_mode.SIGN_IN_OFF)
     p = get(name)
     if p.auth == "entra":
         return entra_sign_in(p, timeout)

@@ -1,0 +1,15 @@
+.venv
+.git
+.claude
+.github
+.vscode
+docs
+perf
+tests
+claude-skills
+scripts
+**/__pycache__
+*.pyc
+.env
+.env.*
+!.env.example

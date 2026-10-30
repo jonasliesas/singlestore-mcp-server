@@ -1,0 +1,40 @@
+# Settings without secrets. Every key is described in deploy/README.md ("Settings").
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: studio-config
+  namespace: speedystore-studio
+  labels:
+    app.kubernetes.io/name: speedystore-studio
+data:
+  # The address users open (the Ingress host below). Cookies are Secure and the OAuth redirect URI is
+  # <STUDIO_PUBLIC_URL>/oauth/callback.
+  STUDIO_PUBLIC_URL: "https://studio.<internal-domain>"
+  # The Viya whose SAS Logon signs users in (Zeus).
+  STUDIO_VIYA_URL: "https://<zeus-viya-host>"
+  STUDIO_VIYA_NAME: "Zeus"
+  STUDIO_VIYA_VERIFY: "1"
+  # Sign-in: "redirect" with the client the Viya admin registered (preferred), or "paste" with the built-in
+  # vscode client (fallback, no registration: users paste the code SAS Logon shows).
+  STUDIO_OAUTH_MODE: "redirect"
+  STUDIO_OAUTH_CLIENT_ID: "speedystore-studio"
+  # Empty: SAS Logon grants the client's registered scopes (["openid", "*"]: the user's own groups), as for vscode.
+  STUDIO_OAUTH_SCOPE: ""
+  # SAS user ids (as SAS Logon / identities know them), comma-separated.
+  STUDIO_ADMINS: "<sas-user-id>"
+  # Empty: every SAS user who can sign in to this Viya. Else a comma-separated list of SAS user ids.
+  STUDIO_ALLOWED_USERS: ""
+  STUDIO_MAX_USERS: "20"
+  STUDIO_IDLE_MINUTES: "30"
+  STUDIO_SESSION_HOURS: "10"
+  # Pre-filled SingleStore connection for every new user (no user name or password: each user adds their own).
+  STUDIO_DEFAULT_S2_NAME: "SingleStore"
+  STUDIO_DEFAULT_S2_HOST: "<singlestore-host-or-service>"
+  STUDIO_DEFAULT_S2_PORT: "3306"
+  STUDIO_DEFAULT_S2_DATABASE: ""
+  # Step 1 of the pilot: notebooks and Ask Claude off.
+  STUDIO_NOTEBOOKS: "0"
+  STUDIO_ASSISTANT: "0"
+  STUDIO_METRICS: "1"
+  # The Ingress sets X-Forwarded-For; the pod accepts traffic from the ingress controller only (NetworkPolicy).
+  STUDIO_TRUST_FORWARDED: "1"

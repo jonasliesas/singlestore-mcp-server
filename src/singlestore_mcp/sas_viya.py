@@ -382,7 +382,10 @@ def _import_foreign(name: str, url: str, verify: bool) -> dict[str, Any] | None:
 
 
 def _post_token(url: str, data: dict[str, str], client_id: str, verify: bool) -> dict[str, Any]:
-    basic = base64.b64encode(f"{client_id}:".encode()).decode()
+    # A public client (vscode) has no secret; the server hub's own client may have one (server mode only).
+    from . import server_mode
+
+    basic = base64.b64encode(f"{client_id}:{server_mode.sas_client_secret(client_id) or ''}".encode()).decode()
     status, body = _http("POST", f"{url}/SASLogon/oauth/token", data={**data, "client_id": client_id}, verify=verify,
                          headers={"Content-Type": "application/x-www-form-urlencoded", "Authorization": f"Basic {basic}",
                                   "Accept": "application/json"})
@@ -444,10 +447,13 @@ def sign_in_start(name: str | None = None) -> dict[str, Any]:
         _pending.clear()
         _pending.update(verifier=verifier, name=s["name"], url=s["url"], client_id=s["client_id"],
                         verify=s["ssl_verify"], started=time.time())
-    try:
-        webbrowser.open(auth_url)
-    except Exception:  # noqa: BLE001 - the app shows the link too
-        pass
+    from . import server_mode
+
+    if not server_mode.enabled():  # on a server the browser is the user's own: the app shows the link
+        try:
+            webbrowser.open(auth_url)
+        except Exception:  # noqa: BLE001 - the app shows the link too
+            pass
     return {"authorize_url": auth_url, "name": s["name"]}
 
 

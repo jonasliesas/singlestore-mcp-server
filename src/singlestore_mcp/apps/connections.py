@@ -13,7 +13,7 @@ from typing import Any
 
 from mcp.types import CallToolResult, ToolAnnotations
 
-from .. import connections, sas_viya
+from .. import connections, sas_viya, server_mode
 from ._core import APP_ONLY, apps, browser_url, register_app, reset_browser_links, tool_result, with_browser_link
 
 URI = "ui://singlestore/connections.html"
@@ -29,6 +29,7 @@ def _state() -> dict[str, Any]:
         "active": act.name if act else None,
         "connections": [p.public() for p in connections.profiles()],
         "password_store": connections.password_store(),
+        "server": server_mode.enabled(),  # on the server the hub owns the browser links (no "Reset browser links")
     }
 
 

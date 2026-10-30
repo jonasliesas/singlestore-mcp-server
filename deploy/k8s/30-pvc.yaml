@@ -1,0 +1,15 @@
+# The users' folders (connections, encrypted secrets, editor tabs, files, history) and the hub's audit log.
+# ReadWriteOnce is enough: one hub pod (replicas: 1). Size: ~50-500 MB per user (query history copy grows).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: studio-data
+  namespace: speedystore-studio
+  labels:
+    app.kubernetes.io/name: speedystore-studio
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: "<storage-class>"   # e.g. the one the Viya deployment uses for RWO volumes
+  resources:
+    requests:
+      storage: 20Gi

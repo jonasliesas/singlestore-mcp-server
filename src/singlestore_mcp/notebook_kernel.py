@@ -101,8 +101,16 @@ def _missing_packages() -> list[str]:
     return [p for p in PACKAGES if p not in have] if have != {"ok"} else [p for p in PACKAGES[5:]]
 
 
+def _check_enabled() -> None:
+    from . import server_mode
+
+    if not server_mode.notebooks_enabled():
+        raise PermissionError(server_mode.NOTEBOOKS_OFF)
+
+
 def setup() -> dict[str, Any]:
     """Create the notebook environment, or add missing packages, in the background (idempotent)."""
+    _check_enabled()
     with _setup_lock:
         if _setup["state"] == "installing" or (kernel_python() and not _missing_packages()):
             return environment_status()
@@ -118,7 +126,8 @@ _REQUIREMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?((
 
 def install_packages(specs: list[str]) -> dict[str, Any]:
     """Install packages into the notebook environment in the background (progress via environment_status)."""
-    specs = [x.strip() for x in specs if x.strip()]
+    _check_enabled()
+    specs =[x.strip() for x in specs if x.strip()]
     if not specs:
         raise ValueError("Name at least one package.")
     bad = [x for x in specs if not _REQUIREMENT.match(x)]
@@ -342,6 +351,7 @@ _reaper_started = False
 
 
 def _kernel_for(notebook_id: str) -> _Kernel:
+    _check_enabled()
     python = kernel_python()
     if not python:
         raise LookupError("The notebook Python environment isn't installed yet.")

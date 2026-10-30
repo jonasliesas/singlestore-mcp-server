@@ -85,8 +85,18 @@ class BrowserView:
     across restarts (or a function returning that store, called at start); its address is reused."""
 
     def __init__(self, mcp: Any, port: int = 0, token: str | None = None,
-                 store: AddressStore | Callable[[], AddressStore | None] | None = None) -> None:
+                 store: AddressStore | Callable[[], AddressStore | None] | None = None, *,
+                 bind: str = "127.0.0.1", public_base: str | None = None,
+                 allowed_hosts: tuple[str, ...] = (), allowed_origins: tuple[str, ...] = ()) -> None:
+        """Server mode (``studio_server``): ``bind`` is the listen address, ``public_base`` the address the user's
+        browser opens (e.g. "/studio/" behind the hub: links say that instead of 127.0.0.1:<port>/<token>/), and
+        ``allowed_hosts`` / ``allowed_origins`` the Host and Origin values accepted besides the listen address."""
         self._mcp = mcp
+        self._bind_host = bind
+        self._public_base = public_base
+        self._allowed_hosts = tuple(allowed_hosts)
+        self._allowed_origins = tuple(allowed_origins)
+        self.extra_routes: dict[str, Callable[[Any], Any]] = {}  # POST <token>/<route> -> fn(json body) -> json
         self._port = port
         self._token = token or new_token()
         self._fixed = bool(port or token)
@@ -169,6 +179,8 @@ class BrowserView:
             raise ValueError(f"{tool!r} is not an app tool")
         port = self._httpd.server_address[1]  # type: ignore[union-attr]
         query = urllib.parse.urlencode({"tool": tool, "args": json.dumps(arguments)})
+        if self._public_base is not None:
+            return f"{self._public_base}?{query}"
         return f"http://127.0.0.1:{port}/{self._token}/?{query}"
 
     def _ensure_started(self) -> None:
@@ -205,7 +217,7 @@ class BrowserView:
             deadline = time.monotonic() + (BIND_WAIT_S if self._kept else 0)
             while True:
                 try:
-                    return _ExclusiveHTTPServer(("127.0.0.1", self._port), handler)
+                    return _ExclusiveHTTPServer((self._bind_host, self._port), handler)
                 except OSError:
                     if time.monotonic() >= deadline:
                         if not self._kept:
@@ -215,7 +227,7 @@ class BrowserView:
         # A new port: not one another client's slot keeps (that client would find it taken when it restarts).
         others = getattr(self._store, "other_ports", lambda: set())()
         for _ in range(5):
-            httpd = _ExclusiveHTTPServer(("127.0.0.1", 0), handler)
+            httpd = _ExclusiveHTTPServer((self._bind_host, 0), handler)
             if httpd.server_address[1] not in others:
                 break
             httpd.server_close()
@@ -240,10 +252,18 @@ class BrowserView:
             def _origin(self) -> str:
                 return f"http://127.0.0.1:{self.server.server_address[1]}"
 
+            def _hosts(self) -> tuple[str, ...]:
+                port = self.server.server_address[1]
+                own = {f"127.0.0.1:{port}", f"{view._bind_host}:{port}"}
+                return (*own, *view._allowed_hosts)
+
+            def _origins(self) -> tuple[str, ...]:
+                return (*(f"http://{h}" for h in self._hosts()), *view._allowed_origins)
+
             def _authorized(self) -> tuple[bool, str]:
                 parts = urllib.parse.urlsplit(self.path)
                 prefix = f"/{view._token}/"
-                if self.headers.get("Host") != self._origin().removeprefix("http://"):
+                if self.headers.get("Host") not in self._hosts():
                     return False, ""
                 if not secrets.compare_digest(parts.path[: len(prefix)], prefix):
                     return False, ""
@@ -268,7 +288,10 @@ class BrowserView:
                     return self._send(404, b"Not found", "text/plain")
                 query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
                 if route == "":
-                    return self._send(200, splash.expand(_HOST_PAGE.read_text(encoding="utf-8")).encode("utf-8"), "text/html; charset=utf-8")
+                    page = splash.expand(_HOST_PAGE.read_text(encoding="utf-8"))
+                    if view._public_base is not None:  # server mode: the hub's account page (sign out) next to it
+                        page = page.replace("<!--S2:SERVER-->", '<script>window.S2_SERVER = { account: "../account" };</script>', 1)
+                    return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
                 if route == "ping":
                     return self._json(200, {"ok": True})
                 if route == "session":  # what the page needs to reconnect on its own
@@ -288,13 +311,23 @@ class BrowserView:
 
             def do_POST(self) -> None:  # noqa: N802
                 ok, route = self._authorized()
-                if not ok or route != "call" or self.headers.get("Origin") != self._origin():
-                    return self._send(403, b"Forbidden", "text/plain")
+                extra = view.extra_routes.get(route) if ok else None
                 length = int(self.headers.get("Content-Length") or 0)
                 if length > _MAX_BODY:
+                    self.close_connection = True
                     return self._send(413, b"Too large", "text/plain")
+                # Read the body before answering, even a refusal: on Windows, closing a socket with unread data
+                # resets the connection, and the client sees an abort instead of the 403.
+                raw = self.rfile.read(length) if length else b""
+                if not ok or (route != "call" and extra is None) or self.headers.get("Origin") not in self._origins():
+                    return self._send(403, b"Forbidden", "text/plain")
+                if extra is not None:  # server mode: the hub's own calls (e.g. a fresh SAS Viya sign-in)
+                    try:
+                        return self._json(200, extra(json.loads(raw or b"{}")))
+                    except (ValueError, TypeError, KeyError) as exc:
+                        return self._json(400, {"error": str(exc)[:300]})
                 try:
-                    body = json.loads(self.rfile.read(length) or b"{}")
+                    body = json.loads(raw or b"{}")
                     name, arguments = body["name"], body.get("arguments") or {}
                 except (ValueError, KeyError, TypeError):
                     return self._json(400, {"error": "expected {name, arguments}"})

@@ -16,6 +16,9 @@ Backlog and agreed designs: [ROADMAP.md](ROADMAP.md). User docs: [README.md](REA
 - State lives under `SINGLESTORE_MCP_HOME` (default `~/.singlestore-mcp`): SQLite history
   (`history_store.py`), SQL Editor drafts/tabs (`sql_editor_state.py`), workloads, connections.
 - `sas_viya.py` / `sas_ep.py` – SAS Viya access and the SAS EP (embedded process) analysis.
+- Server pilot: `server_mode.py` (switches: notebooks / assistants / keyring off, hub key for secrets),
+  `studio_server.py` (one user's Studio as an HTTP app), `hub/` (SAS Logon sign-in, one Studio process per user,
+  proxy, admin, audit). Deploy files in `deploy/`. Keep normal (stdio) behaviour unchanged when server mode is off.
 - `netguard.py` – recovery from network breaks (keepalive, route/sleep watcher, health probes, the Workspace's
   "connection lost" line). New code that opens cluster or Viya connections uses `connections.connect_kwargs` /
   `db.open_connection` / `sas_rest.request`, so it gets the same timeouts; test network faults with

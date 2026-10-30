@@ -21,7 +21,7 @@ from typing import Any
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, ToolAnnotations
 
-from .. import assistant, fileio, result_stream, sas_functions, sas_viya, viya_files
+from .. import assistant, fileio, result_stream, sas_functions, sas_viya, server_mode, viya_files
 from .. import sql_editor_state as editor_state
 from ..db import db
 from ._core import APP_ONLY, apps, head_hash, page_parts, register_app, tool_result, with_browser_link, without_vendors
@@ -150,7 +150,7 @@ def sql_editor(
             _prefetch_schema(first)
     _start_sas_prewarm()
     data: dict[str, Any] = {"databases": databases, "database": database, "sql": sql, "view": view, "table": table,
-                            "connection_error": connection_error, "tab_id": tab_id}
+                            "connection_error": connection_error, "tab_id": tab_id, "features": server_mode.features()}
     summary = f"SingleStore Workspace opened on the {view} view{f', database {database}' if database else ''}."
     if connection_error:
         summary += f" The active connection fails ({connection_error[:200]}); the user can fix or switch it in Connections."
@@ -388,6 +388,9 @@ def _relative(path: Path) -> str:
 def _known_folders() -> list[dict[str, str]]:
     """Shortcuts for the file browser: the SQL folder plus Documents, Desktop, Downloads, Home."""
     found: dict[str, Path] = {"SQL folder": sql_dir()}
+    if server_mode.enabled():  # on the server: the user's own Studio folder only (not the server's user folders)
+        found["My files"] = Path.home()
+        return [{"label": k, "path": str(v)} for k, v in found.items() if v.is_dir()]
     if os.name == "nt":
         try:
             import winreg

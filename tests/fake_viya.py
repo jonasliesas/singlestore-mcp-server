@@ -42,8 +42,7 @@ class FakeViya:
 
             def _handle(self) -> None:
                 n = int(self.headers.get("Content-Length") or 0)
-                if n:
-                    self.rfile.read(n)
+                raw = self.rfile.read(n) if n else b""
                 path = self.path.split("?")[0]
                 if "://" in path:  # sent through an HTTP proxy: the absolute URL
                     path = "/" + path.split("://", 1)[1].split("/", 1)[-1]
@@ -51,7 +50,19 @@ class FakeViya:
                     viya.requests.append((self.command, path))
                 if viya.answer_delay:
                     time.sleep(viya.answer_delay)
-                status, body, ctype = viya.route(self.command, path)
+                query = self.path.split("?", 1)[1] if "?" in self.path else ""
+                reply = viya.route_full(self.command, path, query, raw, self.headers)
+                status, body, ctype = reply[:3]
+                if len(reply) > 3:  # extra headers (a redirect)
+                    data = b"" if body is None else (body.encode() if isinstance(body, str) else json.dumps(body).encode())
+                    self.send_response(status)
+                    self.send_header("Content-Type", ctype)
+                    self.send_header("Content-Length", str(len(data)))
+                    for k, v in reply[3].items():
+                        self.send_header(k, v)
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
                 self._reply(status, body, ctype)
 
             do_GET = do_POST = do_PUT = do_DELETE = _handle
@@ -60,6 +71,10 @@ class FakeViya:
         self._httpd.daemon_threads = True
         self.port = self._httpd.server_address[1]
         threading.Thread(target=self._httpd.serve_forever, name="fake-viya", daemon=True).start()
+
+    def route_full(self, method: str, path: str, query: str, body: bytes, headers: object) -> tuple:
+        """The whole request (subclasses: SAS Logon); by default only method and path matter."""
+        return self.route(method, path)
 
     def route(self, method: str, path: str) -> tuple[int, object, str]:
         js = "application/json"

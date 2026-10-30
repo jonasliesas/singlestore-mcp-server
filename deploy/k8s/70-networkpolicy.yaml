@@ -1,0 +1,50 @@
+# In: only the ingress controller, on the hub's port. Out: DNS, the SingleStore cluster and SAS Viya - nothing else
+# (no internet, no other namespaces, no cloud metadata endpoint). Needs a CNI that enforces NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: studio-hub
+  namespace: speedystore-studio
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: speedystore-studio
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: "<ingress-controller-namespace>"   # e.g. ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8800
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # SingleStore: the cluster's aggregator endpoint(s). In the same Kubernetes cluster (SingleStore Operator) use a
+    # namespaceSelector for its namespace instead of the ipBlock.
+    - to:
+        - ipBlock:
+            cidr: "<singlestore-aggregator-ip>/32"
+      ports:
+        - protocol: TCP
+          port: 3306
+    # SAS Viya (SAS Logon, identities, compute, CAS REST): through the Viya ingress. If users and the hub reach Viya
+    # at the same host name, this is the ingress controller's address (in-cluster: its namespace, port 443).
+    - to:
+        - ipBlock:
+            cidr: "<viya-ingress-ip>/32"
+      ports:
+        - protocol: TCP
+          port: 443

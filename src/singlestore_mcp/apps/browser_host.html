@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SAS SpeedyStore Studio</title>
 <!--S2:FAVICON-->
+<!--S2:SERVER-->
 <style>
   :root { color-scheme: light dark; }
   html, body { margin: 0; height: 100%; background: light-dark(#ffffff, #1e1e1e); }
@@ -261,13 +262,18 @@ function end(why) {
   splash.hide();
   document.title = "Session ended · SAS SpeedyStore Studio";
   const drafts = Object.values(readDrafts());
+  // On a server (behind the Studio hub) the hub stops a Studio after a while without use, or at sign-out.
+  const onServer = Boolean(window.S2_SERVER);
   const box = el("div", { id: "ended", role: "alert" },
-    el("h1", {}, "Session ended"),
-    el("p", {}, why === "refused"
+    el("h1", {}, onServer ? "Studio stopped" : "Session ended"),
+    el("p", {}, onServer
+      ? "Your Studio was stopped (unused for a while, signed out, or stopped by an admin). Your tabs and files are kept."
+      : why === "refused"
       ? "This link isn't valid any more: browser links were reset, or another SingleStore MCP server now uses this address."
       : "The SingleStore MCP server that served this page isn't running any more (Claude was closed or the server stopped)."),
-    el("p", {}, "Reopen the app from Claude (ask for the app or its browser link again) or with the SingleStore Workspace desktop shortcut."),
-    el("button", { onclick: () => location.reload() }, "Try again"),
+    el("p", {}, onServer ? "Start it again (you may be asked to sign in)."
+      : "Reopen the app from Claude (ask for the app or its browser link again) or with the SingleStore Workspace desktop shortcut."),
+    el("button", { onclick: () => location.reload() }, onServer ? "Start Studio again" : "Try again"),
     drafts.length ? el("div", { class: "drafts" },
       el("strong", {}, `Unsaved editor text (${drafts.length}) is kept in this browser tab.`),
       el("p", {}, "It's saved to the SQL Editor when this page reconnects (Try again). You can also copy it:"),
@@ -331,6 +337,7 @@ async function open() {
     if (ev.data?.type === "s2-presenter-save") { try { localStorage.setItem(PRESENT_KEY, ev.data.on ? "1" : "0"); } catch {} return; }
     if (ev.data?.type === "s2-splash") { splash.status(String(ev.data.text ?? "")); return; }
     if (ev.data?.type === "s2-splash-done") { splashDone(); return; }
+    if (ev.data?.type === "s2-account" && window.S2_SERVER?.account) { location.href = window.S2_SERVER.account; return; }
     const { id, method, params: p, jsonrpc } = ev.data ?? {};
     if (jsonrpc !== "2.0" || !method) return;
     switch (method) {

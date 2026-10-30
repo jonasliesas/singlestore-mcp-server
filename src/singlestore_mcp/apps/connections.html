@@ -325,11 +325,11 @@ function render() {
         c.builtin ? null : h("button", { class: "s2-btn ghost", title: "Delete this connection and its saved password", onclick: (e) => remove(c, e.currentTarget) }, "Delete"),
       ].filter(Boolean)));
   }) : [h("div", { class: "s2-empty" }, "No connections yet. Add one with + New connection.")]));
-  footEl.replaceChildren(
+  footEl.replaceChildren(...[
     `Passwords are stored in: ${d.password_store}. The list itself (no passwords) is in ~/.singlestore-mcp/connections.json. `,
-    h("button", { class: "s2-btn ghost", style: { fontSize: "11px", padding: "1px 6px" }, disabled: st.busy,
+    d.server ? null : h("button", { class: "s2-btn ghost", style: { fontSize: "11px", padding: "1px 6px" }, disabled: st.busy,
       title: "Give browser links a new secret: every open browser tab and link made before stops working. Restarts keep the links.",
-      onclick: (e) => resetLinks(e.currentTarget) }, "Reset browser links"));
+      onclick: (e) => resetLinks(e.currentTarget) }, "Reset browser links")].filter(Boolean));
 }
 
 // ---------------------------------------------------------------- form

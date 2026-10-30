@@ -1,0 +1,101 @@
+# One pod: the hub plus one Studio process per signed-in user (same container, own folder per user).
+# replicas must stay 1: sessions and the user -> process map live in the hub's memory.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: studio-hub
+  namespace: speedystore-studio
+  labels:
+    app.kubernetes.io/name: speedystore-studio
+    app.kubernetes.io/component: hub
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # the RWO volume can't be mounted by two pods at once
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: speedystore-studio
+      app.kubernetes.io/component: hub
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: speedystore-studio
+        app.kubernetes.io/component: hub
+    spec:
+      automountServiceAccountToken: false   # the hub never talks to the Kubernetes API
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # imagePullSecrets:
+      #   - name: <registry-pull-secret>
+      containers:
+        - name: hub
+          image: "<registry>/speedystore-studio:<version>"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8800
+          envFrom:
+            - configMapRef:
+                name: studio-config
+            - secretRef:
+                name: studio-secrets
+          env:
+            - name: STUDIO_DATA_DIR
+              value: /data
+            - name: STUDIO_HUB_BIND
+              value: "0.0.0.0"
+            - name: STUDIO_HUB_PORT
+              value: "8800"
+            # If SAS Logon's certificate is signed by an internal CA, mount the CA bundle and point Python at it:
+            # - name: SSL_CERT_FILE
+            #   value: /etc/studio-ca/ca.pem
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            # Starting point for ~20 users: ~150-300 MB per running Studio + the hub. Measure in the pilot.
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            # - name: studio-ca
+            #   mountPath: /etc/studio-ca
+            #   readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: studio-data
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi
+        # - name: studio-ca
+        #   configMap:
+        #     name: <ca-bundle-configmap>

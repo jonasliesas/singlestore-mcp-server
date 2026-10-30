@@ -1,0 +1,34 @@
+# TLS ends at the ingress controller (the one the Viya deployment uses, or another internal one).
+# The certificate: an internal-CA certificate for studio.<internal-domain> in the Secret studio-tls
+# (or let cert-manager issue it: uncomment the annotation and name your ClusterIssuer).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: studio-hub
+  namespace: speedystore-studio
+  labels:
+    app.kubernetes.io/name: speedystore-studio
+  annotations:
+    # ingress-nginx: long SQL runs and large result pages go through the hub.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "4m"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # cert-manager.io/cluster-issuer: "<internal-ca-issuer>"
+spec:
+  ingressClassName: "<ingress-class>"   # e.g. nginx
+  tls:
+    - hosts:
+        - "studio.<internal-domain>"
+      secretName: studio-tls
+  rules:
+    - host: "studio.<internal-domain>"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: studio-hub
+                port:
+                  name: http

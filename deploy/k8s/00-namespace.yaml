@@ -1,0 +1,12 @@
+# SAS SpeedyStore Studio (server pilot) - its own namespace next to the Viya deployment.
+# Documents for the Kubernetes admin: review, fill in the <placeholders>, then apply in this order
+# (00 … 70). Nothing here changes the Viya namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: speedystore-studio
+  labels:
+    app.kubernetes.io/part-of: speedystore-studio
+    # Pod Security Standards: the pod runs non-root, read-only root FS, no privileges.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest

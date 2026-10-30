@@ -2737,6 +2737,12 @@ function waitingNote() {
 }
 
 function renderChat() {
+  // Switched off on the server (server mode): no Ask Claude button; its title says why.
+  if (chat.assistant?.disabled) {
+    if (chat.open) toggleChat(false);
+    claudeBtn.style.display = "none";  // .s2-btn's display wins over [hidden]
+    claudeBtn.title = chat.assistant.reason ?? "";
+  }
   renderModeOptions();
   const items = chat.messages.map((msg) =>
     msg.from === "you" ? h("div", { class: "sq-msg you" }, msg.text)
