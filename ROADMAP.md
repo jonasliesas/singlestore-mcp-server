@@ -247,8 +247,10 @@ in step 1, "Ask Claude" off by default (switchable later with an Anthropic / Fou
   - **2b – one pod per kernel when needed** (customers / partners, audit that must prove who did what): switch the
     gateway to its Kubernetes process proxy (a deployment change, Studio unchanged) + NetworkPolicy, read-only root and
     limits on the kernel pods; the hub then needs a Role to manage pods in its namespace.
-  - Option to check: "Python in SAS" cells via `PROC PYTHON` in the user's own Compute session, if Zeus has Python
-    configured (isolated by Viya, nothing from the K8s admins).
+  - "Python in SAS" cells via `PROC PYTHON` in the user's own Compute session (isolated by Viya, nothing from the K8s
+    admins). **Checked on Zeus 2026-10-30:** Python 3.12.12 (RHEL), pandas 2.3.3, numpy 2.5.4, swat 1.18.1,
+    singlestoredb 1.18.1, pyarrow 26.0.0, scikit-learn 1.9.1; first call ~8 s (Python start), then ~0 s; state is kept
+    between PROC PYTHON steps of the same SAS session ("Resuming Python state"). Can ship before 2a.
   - Who gets notebooks: the `STUDIO_NOTEBOOK_GROUP` SAS group (see the hub's group access). Groups decided
     2026-10-30: `SpeedyStoreStudioUsers` (app) and `SpeedyStoreStudioNotebooks` (notebooks); Jonas creates them on
     Zeus on 2026-11-02, so the local hub test can check real group membership.
