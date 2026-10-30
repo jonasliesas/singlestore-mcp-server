@@ -133,6 +133,13 @@
   .sk-reshard { border-top: 1px solid var(--s2-border-2); padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
   .sk-reshard p { margin: 0; }
   .sk-reshard .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .sk-script { border: 1px solid var(--s2-border); border-radius: var(--s2-radius-sm, 6px); background: var(--s2-bg-2); padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
+  .sk-script h3 { margin: 0; }
+  .sk-script .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .sk-script .sk-warn { margin: 0; padding-left: 20px; }
+  .sk-script .sk-warn li { margin: 2px 0; }
+  .sk-script .sk-script-sql { max-height: 360px; overflow: auto; margin: 0; }
+  .sk-script .s2-files { border: 1px solid var(--s2-border); border-radius: var(--s2-radius-sm, 6px); padding: 8px 10px; }
   .sk-cols { display: flex; flex-wrap: wrap; gap: 4px 12px; max-height: 110px; overflow: auto; font-size: var(--s2-fs-xs); font-family: var(--s2-mono); }
   .sk-scanwarn { color: var(--s2-warn); }
 
@@ -1062,7 +1069,7 @@ async function runReshard(db, table) {
   const r = reshardState(db, table);
   if (!r.cols.length || r.status === "loading") return;
   const sample = Number(String(r.sample).replace(/[\s,_]/g, ""));
-  r.status = "loading"; r.error = null;
+  r.status = "loading"; r.error = null; r.script = null;
   renderRight();
   try {
     r.data = await call("schema_explorer_reshard", { database: db, table, columns: [...r.cols], ...(sample > 0 ? { sample_rows: Math.round(sample) } : {}) });
@@ -1125,8 +1132,60 @@ function reshardResult(db, x) {
     });
   return h("div", { class: "sk" }, stats,
     h("div", { class: `sk-notes ${x.level}` }, x.notes.map((n) => h("p", {}, n)),
-      h("div", { class: "row" }, h("button", { class: "s2-btn", title: x.sql, onclick: () => checkInEditor(db, x.sql) }, "Query in SQL Editor"))),
-    table);
+      h("div", { class: "row" }, h("button", { class: "s2-btn", title: x.sql, onclick: () => checkInEditor(db, x.sql) }, "Query in SQL Editor"),
+        h("button", { class: "s2-btn", title: "Write a SQL script that copies the table into a new table with this shard key and swaps the names, for a DBA to review and run (nothing runs here)",
+          onclick: () => loadReshardScript(db, x.table) }, "Copy to a new table with this shard key…"))),
+    table,
+    reshardScriptBox(db, x.table));
+}
+
+// "Copy to a new table with this shard key…": a SQL script (CREATE TABLE <t>__reshard from SHOW CREATE TABLE with only
+// the SHARD KEY changed, INSERT … SELECT, checks, rename swap, commented-out DROP), never run here. The same Copy SQL /
+// Open in SQL Editor / Save as .sql… as the Security view's script basket (shared.js).
+async function loadReshardScript(db, table) {
+  const r = reshardState(db, table);
+  const x = r.data;
+  if (!x || r.script?.status === "loading") return;
+  r.script = { status: "loading", data: null, error: null, save: null };
+  renderRight();
+  try {
+    r.script.data = await call("schema_explorer_reshard_script", { database: db, table, columns: [...x.columns],
+      simulation: { rsd_pct: x.rows?.rsd_pct, current_rsd_pct: x.current?.rows?.rsd_pct, elapsed_ms: x.elapsed_ms, fraction: x.fraction, partition_count: x.partition_count } });
+    r.script.status = "ok";
+  } catch (e) { r.script.status = "error"; r.script.error = e; }
+  if (state.sel?.db === db && state.sel?.table === table && state.tab === "skew") renderRight();
+}
+async function reshardScriptAction(db, table, what) {
+  const sc = reshardState(db, table).script;
+  const d = sc?.data;
+  if (!d) return;
+  sc.error = null;
+  if (what === "copy") S2.copy(d.script, "Reshard script copied (nothing ran)");
+  else if (what === "open") { try { await S2.openScriptInEditor(d.script); } catch (e) { sc.error = e; renderRight(); } }
+  else if (what === "save") {
+    sc.save = S2.scriptSaveBox({ name: d.file_name, sql: d.script, onClose: () => { sc.save = null; renderRight(); } });
+    renderRight();
+  }
+}
+function reshardScriptBox(db, table) {
+  const sc = reshardState(db, table).script;
+  if (!sc) return null;
+  const head = h("div", { class: "row" }, h("h3", {}, "Copy to a new table with this shard key"), h("span", { class: "s2-spacer" }),
+    h("button", { class: "s2-btn ghost", title: "Close the script", "aria-label": "Close the reshard script",
+      onclick: () => { reshardState(db, table).script = null; renderRight(); } }, "✕"));
+  if (sc.status === "loading") return h("div", { class: "sk-script" }, head, h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Reading SHOW CREATE TABLE, pipelines, views and grants…"));
+  if (sc.status === "error") return h("div", { class: "sk-script" }, head, S2.errorBox(sc.error));
+  const d = sc.data;
+  return h("div", { class: "sk-script", role: "region", "aria-label": "Reshard script" }, head,
+    h("p", { class: "s2-small" }, `A SQL script for a DBA: nothing runs here. It creates ${d.database}.${d.new_table} with the shard key (${d.columns.join(", ")}) `
+      + `from the table's SHOW CREATE TABLE, copies the rows, checks the count and the skew, swaps the names (the old table becomes ${d.old_table}) `
+      + "and leaves DROP TABLE of the old table commented out. A shard key can't be changed with ALTER TABLE (",
+      docLink(d.docs.shard_keys, "Shard keys"), ", ", docLink(d.docs.alter_table, "ALTER TABLE"), ")."),
+    h("ul", { class: "sk-warn s2-small", "aria-label": "Before you run it" }, d.warnings.map((w) => h("li", {}, w))),
+    h("div", { class: "row" }, S2.scriptButtons((what) => reshardScriptAction(db, table, what))),
+    sc.save,
+    sc.error ? S2.errorBox(sc.error) : null,
+    h("pre", { class: "s2-pre sk-script-sql", "aria-label": "Script" }, d.script));
 }
 function dbSkewBox(db) {
   const s = state.dbSkew.get(db);
