@@ -1,0 +1,72 @@
+# STUDIO_NOTEBOOKS=gateway, STUDIO_PIP_MODE=mirror: the kernel gateway pod's NetworkPolicy. Apply ONE of the three
+# 83-gateway-networkpolicy-*.yaml files - the one for your STUDIO_PIP_MODE (they share the name: the last one applied wins).
+# In: only the hub pod (its kernel broker) on 8888. Out: DNS, SingleStore, SAS Viya, the hub's token relay and the
+# internal PyPI mirror (STUDIO_PIP_INDEX_URL, e.g. Artifactory / Nexus) - nothing else.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: studio-gateway
+  namespace: speedystore-studio
+  labels:
+    app.kubernetes.io/name: speedystore-studio
+    app.kubernetes.io/component: kernel-gateway
+    studio.sas.com/pip-mode: "mirror"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: speedystore-studio
+      app.kubernetes.io/component: kernel-gateway
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: speedystore-studio
+              app.kubernetes.io/component: hub
+      ports:
+        - protocol: TCP
+          port: 8888
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # The hub's token relay (kernels ask it for their own user's SingleStore / SAS Viya token).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: speedystore-studio
+              app.kubernetes.io/component: hub
+      ports:
+        - protocol: TCP
+          port: 8801
+    # SingleStore (as in 70-networkpolicy.yaml).
+    - to:
+        - ipBlock:
+            cidr: "<singlestore-aggregator-ip>/32"
+      ports:
+        - protocol: TCP
+          port: 3306
+    # SAS Viya (SAS cells with saspy, swat / CAS REST, sasctl), as in 70-networkpolicy.yaml.
+    - to:
+        - ipBlock:
+            cidr: "<viya-ingress-ip>/32"
+      ports:
+        - protocol: TCP
+          port: 443
+    # The PyPI mirror (STUDIO_PIP_INDEX_URL).
+    - to:
+        - ipBlock:
+            cidr: "<pypi-mirror-ip>/32"
+      ports:
+        - protocol: TCP
+          port: 443

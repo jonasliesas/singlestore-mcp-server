@@ -1,0 +1,38 @@
+# STUDIO_NOTEBOOKS=gateway (step 2a): the kernel gateway for the hub (STUDIO_GATEWAY_URL=http://studio-gateway:8888)
+# and the hub's token relay for the kernels (STUDIO_RELAY_URL=http://studio-hub-relay:8801). Both ClusterIP only;
+# neither goes through the Ingress. The NetworkPolicies allow hub -> gateway:8888 and gateway -> hub:8801 only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: studio-gateway
+  namespace: speedystore-studio
+  labels:
+    app.kubernetes.io/name: speedystore-studio
+    app.kubernetes.io/component: kernel-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: speedystore-studio
+    app.kubernetes.io/component: kernel-gateway
+  ports:
+    - name: gateway
+      port: 8888
+      targetPort: gateway
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: studio-hub-relay
+  namespace: speedystore-studio
+  labels:
+    app.kubernetes.io/name: speedystore-studio
+    app.kubernetes.io/component: hub
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: speedystore-studio
+    app.kubernetes.io/component: hub
+  ports:
+    - name: relay
+      port: 8801
+      targetPort: relay

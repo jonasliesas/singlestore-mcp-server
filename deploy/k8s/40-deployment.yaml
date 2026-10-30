@@ -41,6 +41,8 @@ spec:
           ports:
             - name: http
               containerPort: 8800
+            - name: relay          # token relay for gateway kernels (STUDIO_NOTEBOOKS=gateway)
+              containerPort: 8801
           envFrom:
             - configMapRef:
                 name: studio-config
@@ -53,6 +55,13 @@ spec:
               value: "0.0.0.0"
             - name: STUDIO_HUB_PORT
               value: "8800"
+            # STUDIO_NOTEBOOKS=gateway: the kernel gateway's auth token (the hub's only; never in a Studio or kernel).
+            - name: STUDIO_GATEWAY_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: studio-gateway
+                  key: STUDIO_GATEWAY_AUTH_TOKEN
+                  optional: true
             # If SAS Logon's certificate is signed by an internal CA, mount the CA bundle and point Python at it:
             # - name: SSL_CERT_FILE
             #   value: /etc/studio-ca/ca.pem
@@ -63,7 +72,8 @@ spec:
               drop: ["ALL"]
           resources:
             # Measured (deploy/README.md, Sizing): hub ~40 MB + ~145 MB per running Studio right after opening;
-            # plan ~200-300 MB per Studio in use, + ~210 MB per open notebook kernel (STUDIO_NOTEBOOKS=local).
+            # plan ~200-300 MB per Studio in use, + ~210 MB per open notebook kernel (STUDIO_NOTEBOOKS=local; with
+            # STUDIO_NOTEBOOKS=gateway the kernels are in the gateway pod instead).
             # 20 users (STUDIO_MAX_USERS): request 3Gi, limit 8Gi.
             requests:
               cpu: "1"

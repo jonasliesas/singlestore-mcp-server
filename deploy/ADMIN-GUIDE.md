@@ -17,6 +17,7 @@ What it needs, in short:
 | 6 | Secrets (master key, client secret) | K8s admin | yes |
 | 7 | SingleStore users for the colleagues | SingleStore admin | yes (they may exist) |
 | 8 | Two SAS groups: who may use Studio, who may use notebooks | Viya admin | recommended (else everyone who can sign in) |
+| 9 | Kernel gateway for notebooks (step 2a): second Deployment, PVC 50 Gi, Secret, NetworkPolicy, package egress | K8s admin | when notebooks go beyond the test users |
 
 ## 1. Namespace, registry, image
 
@@ -149,7 +150,7 @@ Who may use Studio is decided by two **SAS groups** that the Viya admin creates 
 | Group (id) | Members may | Setting |
 |---|---|---|
 | `SpeedyStoreStudioUsers` | use Studio | `STUDIO_USERS_GROUP` |
-| `SpeedyStoreStudioNotebooks` | use notebooks (and so Studio), with `STUDIO_NOTEBOOKS=local` | `STUDIO_NOTEBOOK_GROUP` |
+| `SpeedyStoreStudioNotebooks` | use notebooks (and so Studio), with `STUDIO_NOTEBOOKS=local` or `gateway` | `STUDIO_NOTEBOOK_GROUP` |
 
 Add the colleagues to the groups **directly** (as members, not through another group): whether the identities
 service's membership list includes nested groups isn't documented publicly and hasn't been checked on Zeus yet.
@@ -191,9 +192,49 @@ folders and running kernels' environments. Keep the notebook group to a few trus
 kernel (README, Sizing). Kernels reach the network like Studio does (the NetworkPolicy's egress applies). Set
 `STUDIO_NOTEBOOKS: "off"` to switch them off for everyone (no image change).
 
+## 9. Notebooks on the kernel gateway (`STUDIO_NOTEBOOKS=gateway`, step 2a)
+
+Moves the notebook kernels out of the hub pod into their own pod (Jupyter Enterprise Gateway, same image), with
+limits per kernel and their own egress rules. How it works and what it does and doesn't isolate:
+[README](README.md#notebooks-on-the-kernel-gateway-studio_notebooksgateway-step-2a).
+
+1. **Image:** built with `INSTALL_GATEWAY=1` and `INSTALL_NOTEBOOKS=1` (the defaults). Same tag for both Deployments.
+2. **Secret** for the gateway's token (the hub and the gateway pod; never the users):
+   ```bash
+   kubectl -n speedystore-studio create secret generic studio-gateway      --from-literal=STUDIO_GATEWAY_AUTH_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+   ```
+3. **Package installs** - decide with Jonas, then set `STUDIO_PIP_MODE` in the ConfigMap:
+   - `mirror` (preferred): is there an internal PyPI proxy (Artifactory / Nexus) the cluster can reach? Set
+     `STUDIO_PIP_INDEX_URL` to its `/simple` index (and `SSL_CERT_FILE` in `81-gateway-deployment.yaml` if it uses an
+     internal CA); egress only to it.
+   - `pypi`: straight to pypi.org + files.pythonhosted.org - needs HTTPS egress to public addresses (or an egress proxy
+     / your CNI's FQDN rule; see the comments in `83-gateway-networkpolicy-pypi.yaml`).
+   - `off`: only the packages in the image.
+4. **Fill in** `<storage-class>` (80), image/registry (81), and in the chosen `83-gateway-networkpolicy-<mode>.yaml`
+   the SingleStore and Viya addresses (as in `70-networkpolicy.yaml`) and for `mirror` the mirror's address.
+5. **Apply** (the hub's own policy `70-networkpolicy.yaml` now selects only the hub pod and allows hub -> gateway:8888
+   and gateway -> hub:8801 - re-apply it too):
+   ```bash
+   kubectl apply -f deploy/k8s/10-configmap.yaml -f deploy/k8s/70-networkpolicy.yaml      -f deploy/k8s/80-gateway-pvc.yaml -f deploy/k8s/81-gateway-deployment.yaml -f deploy/k8s/82-gateway-service.yaml      -f deploy/k8s/83-gateway-networkpolicy-<mode>.yaml
+   kubectl -n speedystore-studio rollout status deploy/studio-gateway
+   ```
+6. **Switch** `STUDIO_NOTEBOOKS: "gateway"` in the ConfigMap and restart the hub
+   (`kubectl -n speedystore-studio rollout restart deploy/studio-hub`; everyone signs in again).
+7. **Check:** the admin page shows "notebooks: gateway", "Kernel gateway ... answers", the package mode and the
+   warning; a notebook user runs `import os; os.getcwd()` (-> `/kernels/users/<id>/files`) and a SAS cell. The gateway
+   pod's log has one start line with the limits. `kubectl -n speedystore-studio logs deploy/studio-hub | grep kernel_`
+   shows `kernel_start` / `kernel_stop` audit lines.
+
+Sizing: ~130 MB per kernel after start, plan ~300-500 MB in use; the gateway pod requests 4 GiB, limit 12 GiB for 20
+kernels (`STUDIO_KERNELS_TOTAL`); each kernel is capped at `STUDIO_KERNEL_MEMORY_MB` (3 GiB address space). Kernel
+volume 50 Gi, 5 Gi per user (checked at installs from the app, not a filesystem quota).
+**No isolation between users' kernels in 2a** (one pod, one OS user): keep the notebook group to colleagues. Step 2b
+(one pod per kernel; the gateway then needs a ServiceAccount and a Role for pods) is described in the README.
+Back to local notebooks or off: set `STUDIO_NOTEBOOKS` and restart the hub; the gateway Deployment can stay or go.
+
 ## Not in step 1
 
-- Isolated notebooks: the kernel gateway (step 2a: one pod / OS user per kernel, egress limits, a PyPI mirror).
+- Isolated notebooks: one pod per kernel (step 2b; step 2a above runs kernels in one shared gateway pod).
 - Ask Claude (needs Claude Code in the image, `STUDIO_ASSISTANT=1` and an Anthropic or Microsoft Foundry API key
   from a Secret; who pays and per-user limits are open).
 - Entra ID / SSO and per-user SingleStore JWT logins.

@@ -1,0 +1,11 @@
+# The kernel gateway's own environment (/opt/gateway-env in the image, build arg INSTALL_GATEWAY=1):
+# Jupyter Enterprise Gateway and the versions the local gateway tests ran with (tests/test_kernel_gateway.py).
+# Python 3.11: Enterprise Gateway 3.3 needs pyzmq < 25, which has no Python 3.12 wheels.
+# The kernels themselves use the notebook environment (/opt/notebook-env, Python 3.12) - not this one.
+jupyter-enterprise-gateway==3.3.0
+jupyter-client==6.1.12
+jupyter-server==1.24.0
+jupyter-core==5.9.1
+pyzmq==24.0.1
+tornado==6.6
+traitlets==5.16.1

@@ -1,0 +1,120 @@
+# STUDIO_NOTEBOOKS=gateway (step 2a): Jupyter Enterprise Gateway, one shared kernel pod. Same image as the hub
+# (INSTALL_GATEWAY=1, INSTALL_NOTEBOOKS=1), started as `python -m singlestore_mcp.kernel_gateway`: it writes the only
+# kernelspec (studio-python: the notebook environment through kernel_launcher.py with the limits below) and runs the
+# gateway on :8888 with token auth. Only the hub reaches it (NetworkPolicy 83-*.yaml); kernels start as processes in
+# this pod. No isolation between users' kernels in 2a (one OS user, one pod) - one pod per kernel is step 2b
+# (deploy/README.md, "Step 2b").
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: studio-gateway
+  namespace: speedystore-studio
+  labels:
+    app.kubernetes.io/name: speedystore-studio
+    app.kubernetes.io/component: kernel-gateway
+spec:
+  replicas: 1                # kernels live in this pod's memory; the hub knows them by id
+  strategy:
+    type: Recreate           # RWO kernel volume
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: speedystore-studio
+      app.kubernetes.io/component: kernel-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: speedystore-studio
+        app.kubernetes.io/component: kernel-gateway
+    spec:
+      automountServiceAccountToken: false   # 2a: the gateway never talks to the Kubernetes API (2b would: own Role)
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # imagePullSecrets:
+      #   - name: <registry-pull-secret>
+      containers:
+        - name: gateway
+          image: "<registry>/speedystore-studio:<version>"
+          imagePullPolicy: IfNotPresent
+          # Not tini: kernel_gateway is PID 1 (non-dumpable - kernels can't read the token from /proc/1/environ - and
+          # it reaps orphaned processes and forwards SIGTERM like tini).
+          command: ["python", "-m", "singlestore_mcp.kernel_gateway"]
+          ports:
+            - name: gateway
+              containerPort: 8888
+          envFrom:
+            - configMapRef:
+                name: studio-config          # STUDIO_KERNEL_*, STUDIO_KERNELS_*, STUDIO_PIP_* (no secrets in it)
+          env:
+            - name: STUDIO_GATEWAY_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: studio-gateway       # this one value only - not studio-secrets
+                  key: STUDIO_GATEWAY_AUTH_TOKEN
+            - name: STUDIO_GATEWAY_BIND
+              value: "0.0.0.0"
+            - name: STUDIO_GATEWAY_PORT
+              value: "8888"
+            - name: STUDIO_KERNEL_DATA_DIR
+              value: /kernels
+            - name: STUDIO_GATEWAY_RUNTIME
+              value: /tmp/studio-gateway
+            - name: MPLBACKEND
+              value: Agg
+            # Kernels reach SAS Viya / pypi through these if your network needs a proxy (the launcher passes them on):
+            # - name: HTTPS_PROXY
+            #   value: http://<proxy>:<port>
+            # - name: NO_PROXY
+            #   value: ".svc,.cluster.local,<singlestore-host>"
+            # Internal CA for SAS Logon / the mirror:
+            # - name: SSL_CERT_FILE
+            #   value: /etc/studio-ca/ca.pem
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true     # the notebook environment and the gateway's are read-only
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            # Measured (deploy/README.md, Sizing): ~130 MB per kernel right after start (pandas, singlestoredb,
+            # matplotlib), plus what each notebook loads. Each kernel is capped at STUDIO_KERNEL_MEMORY_MB of address
+            # space; STUDIO_KERNELS_TOTAL=20 kernels at ~300-500 MB in use: request 4Gi, limit 12Gi. The limit is the
+            # pod's: one runaway kernel inside its own cap can't take it down, many large ones together can.
+            requests:
+              cpu: "1"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 12Gi
+          readinessProbe:
+            tcpSocket:
+              port: gateway
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: gateway
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          volumeMounts:
+            - name: kernels
+              mountPath: /kernels
+            - name: tmp
+              mountPath: /tmp
+            # - name: studio-ca
+            #   mountPath: /etc/studio-ca
+            #   readOnly: true
+      volumes:
+        - name: kernels
+          persistentVolumeClaim:
+            claimName: studio-kernels
+        - name: tmp                          # gateway runtime (kernelspec, connection files) and kernels' temp files
+          emptyDir:
+            sizeLimit: 4Gi
+        # - name: studio-ca
+        #   configMap:
+        #     name: <ca-bundle-configmap>

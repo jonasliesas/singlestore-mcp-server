@@ -1,0 +1,20 @@
+# STUDIO_NOTEBOOKS=gateway (step 2a): the kernel volume, mounted at /kernels in the kernel gateway pod only.
+# /kernels/users/<sas id>/files - the kernel's working folder and HOME (notebook scratch files)
+# /kernels/users/<sas id>/pip   - the user's own packages (pip install --target), first on the kernel's sys.path
+# 50 GiB in all, 5 GiB per user (STUDIO_KERNEL_QUOTA_GB: checked before and reported after each install from the app;
+# not a filesystem quota - a kernel writing files directly isn't stopped before the volume is full). Data belongs in
+# SingleStore / Viya. Not backed up necessarily: packages can be installed again.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: studio-kernels
+  namespace: speedystore-studio
+  labels:
+    app.kubernetes.io/name: speedystore-studio
+    app.kubernetes.io/component: kernel-gateway
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: "<storage-class>"
+  resources:
+    requests:
+      storage: 50Gi

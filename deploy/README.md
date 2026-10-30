@@ -1,4 +1,4 @@
-# SAS SpeedyStore Studio on a server (pilot, step 1)
+# SAS SpeedyStore Studio on a server (pilot: step 1 + notebooks step 2a)
 
 Studio (the Workspace of the SingleStore MCP server) as a web app for colleagues: sign in with your SAS user on
 SAS Logon, get your own Studio, connect to SingleStore with your own database user. No Claude, no install on the
@@ -31,7 +31,8 @@ browser ──TLS──> Ingress ──> hub (:8800) ── /studio/* ──> St
   folder). An optional default connection (host/port/database, user name = SAS user id, no password) is pre-filled.
 - **Secrets:** no OS keyring on the server. Each user's `secrets.enc` (Fernet) is encrypted with a key derived from
   `STUDIO_MASTER_KEY` and that user's id; the key is handed to the process over stdin and never written to the volume.
-- **Notebooks** (`STUDIO_NOTEBOOKS`): `off` (default) or `local` - the user's own Studio process runs the notebook
+- **Notebooks** (`STUDIO_NOTEBOOKS`): `off` (default), `gateway` (kernels on the kernel gateway, step 2a - see
+  "Notebooks on the kernel gateway" below) or `local` - the user's own Studio process runs the notebook
   kernels itself, as on the desktop (no kernel gateway yet), only for users with notebook access (member of
   `SpeedyStoreStudioNotebooks`, or listed in `STUDIO_ALLOWED_USERS` when no group is set; never "everyone"). The
   kernels use the shared, read-only notebook environment `STUDIO_NOTEBOOK_PYTHON` (in the image: `/opt/notebook-env`;
@@ -81,7 +82,8 @@ browser ──TLS──> Ingress ──> hub (:8800) ── /studio/* ──> St
   (routing, own folders, own encryption keys), not the OS's. That is acceptable in step 1 because no user code runs
   on the server - **except with `STUDIO_NOTEBOOKS=local`**: then the notebook users' Python code runs in the pod as that
   same OS user and can read other users' folders, kernels' environments (their tokens) and the hub's files. **Local notebooks: no isolation between users' kernels - test use with a few trusted users only; the kernel gateway (step 2a) replaces this.**
-  Step 2a (kernel gateway: one pod / OS user per kernel) removes this.
+  With `STUDIO_NOTEBOOKS=gateway` users' code runs in the kernel gateway pod instead (no access to the hub pod, its
+  volume or the Studios), but kernels still share that pod and OS user; one pod per kernel (step 2b) removes that.
 
 ### When a Studio crashes or hangs
 
@@ -92,6 +94,96 @@ have finished); a page load shows "Your Studio is restarting", which reloads its
 on disk, so nothing is lost but unsaved work in that process. A Studio that crashes 3 times in 5 minutes isn't
 restarted for a while (the page says so; its `studio.log` says why). The idle stop never stops a Studio with a call
 in flight. Stopping the hub (`SIGTERM`, Ctrl+C) stops all Studios at once within ~10 s.
+
+## Notebooks on the kernel gateway (`STUDIO_NOTEBOOKS=gateway`, step 2a)
+
+Kernels run in their own pod behind **Jupyter Enterprise Gateway** instead of inside the users' Studio processes.
+Studio stays in the hub pod (it runs only our code); only the kernels move.
+
+```
+hub pod                                                          kernel gateway pod (same image)
+ hub ── kernel broker (127.0.0.1) ─────── REST + WebSocket ───────> Enterprise Gateway :8888 (token only the hub has)
+  │      one key per Studio, one per kernel                            │ kernelspec studio-python:
+  │                                                                    │   kernel_launcher.py -> ipykernel, per kernel:
+  ├─ Studio (alice) ── its kernels only, through the broker            │   clean env, RLIMIT_AS, nice, own folder + pip dir
+  ├─ Studio (bob)                                                      │
+  └─ token relay :8801 <──── a kernel asks for ITS user's token ───────┘   /kernels/users/<id>/{files,pip,tmp}
+        (per-kernel secret) -> that user's Studio's token service
+```
+
+- **Starting a kernel:** the notebook asks its Studio; the Studio asks the hub's kernel broker (`hub/gateway.py`,
+  127.0.0.1 inside the hub pod, URL + a key for this Studio over its stdin); the broker checks the user's notebook
+  access and the limits, starts a kernel on the gateway with the gateway's token (`KERNEL_USERNAME` = the user's
+  folder id is all it sends), and gives the Studio the kernel's id and its own random **kernel key**. Cells, output,
+  interrupt and restart then go Studio -> broker -> gateway: REST for interrupt / restart / shutdown, the kernel's
+  WebSocket channels relayed byte for byte (`notebook_gateway.py` speaks the Jupyter protocol with a small stdlib
+  WebSocket client and reuses the bridge's start-up code and output handling, so notebooks behave as on the desktop).
+- **Isolation between Studios:** a Studio has no gateway token. Every broker request carries the Studio's key (which
+  user) and, for a kernel, the kernel key; a kernel answers only to its own key from its own user's Studio - anything
+  else gets the same 404 as an unknown kernel. A restarted Studio gets a new key (the old one stops working); a
+  stopped Studio's kernels are shut down. The gateway is reachable only from the hub pod (NetworkPolicy) and needs
+  its token; it doesn't list kernels.
+- **Tokens:** the kernel gets no password or token in its environment. Its prelude (sent over its own channel) sets
+  the active connections' non-secret settings and token commands that ask the hub's **token relay**
+  (`http://studio-hub-relay:8801/k/<kernel secret>/sas|s2/<connection>`) with a random per-kernel secret; the relay
+  finds the kernel's user and asks that user's Studio's token service, which holds the secrets. A kernel can only
+  ever get its own user's tokens; a wrong secret gets 404. Never in a kernel: the gateway token, the hub's keys, the
+  users' secrets keys, `STUDIO_*` / `EG_*` settings or another user's anything.
+- **Limits** (gateway pod settings, baked into the kernelspec; neither the hub nor a user can change them):
+  `STUDIO_KERNEL_MEMORY_MB` address-space cap per kernel (`RLIMIT_AS`; a cell that needs more gets `MemoryError`,
+  the kernel lives on), `STUDIO_KERNEL_NICE` lower CPU priority, BLAS / OpenMP threads limited to 2,
+  `STUDIO_KERNELS_PER_USER` (the Studio closes its oldest idle kernel first) and `STUDIO_KERNELS_TOTAL` (the broker
+  refuses with a readable message; the gateway's own max as a backstop), idle kernels stopped by the gateway after
+  `STUDIO_KERNEL_IDLE_MINUTES` (busy ones stay) and by the Studio after 30 idle minutes; a Studio notices a kernel the
+  gateway dropped within 10 s and starts a new one on the next cell.
+- **Folders and packages:** each user has `/kernels/users/<id>/files` (the kernel's working folder and HOME),
+  `.../pip` and `.../tmp` on the kernel volume (`studio-kernels`, 50 GiB). The image's notebook environment
+  (`/opt/notebook-env`) is read-only; **Install packages** in the Notebook app (and `pip install` in a cell) installs
+  with `pip install --target` into the user's own `pip` folder, which comes first on `sys.path` (restart the kernel to
+  use new packages). `STUDIO_PIP_MODE`: `mirror` (`STUDIO_PIP_INDEX_URL`, an internal PyPI proxy; default when it's set),
+  `pypi` (pypi.org + files.pythonhosted.org) or `off` (installs refused by the app; `pip` in a cell finds no index). The
+  quota `STUDIO_KERNEL_QUOTA_GB` (5) is checked before each install from the app and reported after it ("x GB of 5 GB
+  used"); it isn't a filesystem quota - a kernel writing files directly is only stopped by the volume's size. Each
+  mode has its own NetworkPolicy (`k8s/83-gateway-networkpolicy-<mode>.yaml`). My files (the user's Studio folder in
+  the hub pod) are not visible to gateway kernels - read and write data through SingleStore / SAS Viya.
+- **No isolation between users' kernels in 2a.** All kernels run as one OS user in one pod: one user's code can read
+  another kernel's files, environment and connection file (and so run code in it as that user), and a kernel that
+  uses all the CPU or fills the volume slows down or stops the others. The memory cap keeps one kernel from taking the
+  pod down by itself; many large ones together still can (the pod's limit). Notebooks are for a named group of
+  colleagues (`SpeedyStoreStudioNotebooks`). The admin page says so, shows the gateway's state, every kernel (user,
+  started, last activity) and the package mode. Step 2b (below) isolates them.
+- **The gateway's token in its own pod:** it comes from its own Secret (`studio-gateway`), is taken out of the
+  gateway process's environment before any kernel starts and is never passed to kernels; `kernel_gateway` is PID 1
+  instead of tini and both it and the gateway process are non-dumpable, so a kernel (same OS user) can't read it from
+  `/proc/<pid>/environ` or memory.
+- **Image:** Enterprise Gateway is in the **same image** (build arg `INSTALL_GATEWAY=1`, own environment
+  `/opt/gateway-env` with Python 3.11 - Enterprise Gateway 3.3 needs pyzmq < 25, which has no 3.12 wheels; pins in
+  `deploy/gateway-constraints.txt`). Why one image: the kernels need the notebook environment and `kernel_launcher.py`
+  that are already in it, and the hub's broker and the launcher change together; one image to build, scan, push and
+  version (the Zeus admin keeps one registry entry); the gateway Deployment only changes the command. Cost: ~60 MB
+  more image for the hub.
+
+### Step 2b (not built): one pod per kernel
+
+When customers / partners use it, or an audit must show who did what: switch the gateway to its **Kubernetes process
+proxy** - a deploy change; Studio, the broker and the relay stay as they are.
+
+- Kernelspec `studio-python` gets `"metadata": {"process_proxy": {"class_name":
+  "enterprise_gateway.services.processproxies.k8s.KubernetesProcessProxy", "config": {"image_name":
+  "<registry>/speedystore-studio-kernel:<version>"}}}` and Enterprise Gateway's `launch_kubernetes.py` + kernel pod
+  template; the kernel image = the notebook environment + Enterprise Gateway's kernel launcher (`launch_ipykernel.py`)
+  + the steps of `kernel_launcher.py` (clean environment, pip target, user folder) - limits become pod `resources`
+  (`KERNEL_CPUS` / `KERNEL_MEMORY` caps set by the gateway, not the user) instead of `RLIMIT_AS` / `nice`.
+- RBAC: the gateway gets a ServiceAccount and a Role in a kernels namespace (pods, services, configmaps: create, get,
+  list, watch, delete; `EG_NAMESPACE`, `EG_SHARED_NAMESPACE=True` or a namespace per kernel), and
+  `automountServiceAccountToken: true` on the gateway only. Kernel pods: no service account token.
+- Kernel pods: non-root, read-only root filesystem, all capabilities dropped, `seccompProfile: RuntimeDefault`, their
+  own NetworkPolicy (in: only the gateway pod on the kernel's ZMQ ports; the gateway's response port
+  `EG_RESPONSE_PORT` 8877 for the launcher's call back; out: DNS, SingleStore, Viya, the relay, the package mode's
+  egress), the user's folder as a volume `subPath` `users/<id>` (only that user's), `/tmp` as emptyDir.
+- Then each kernel has its own OS-level box: no reading other kernels' files or connection files, a runaway kernel
+  only hits its own pod limit, and pod events + the audit log show which user's kernel did what. Cost: a pod start per
+  kernel (~5-15 s with the image cached) and ~130 MB + pod overhead each.
 
 ## Sizing (measured)
 
@@ -108,6 +200,12 @@ Working set (RSS):
 **Notebook kernels** (`STUDIO_NOTEBOOKS=local`): one idle kernel (bridge + ipykernel with pandas, matplotlib,
 singlestoredb loaded) adds **~210 MB** to its user's Studio (measured: Studio 146 MB, with one kernel 355 MB); data in
 the kernel comes on top. Up to 8 kernels per Studio; idle ones stop after 30 min. The admin page's memory includes them.
+
+**Gateway kernels** (`STUDIO_NOTEBOOKS=gateway`, measured 2026-10-30 on Windows with the local gateway test): one
+kernel after its start-up code (pandas, matplotlib, singlestoredb loaded) uses **~130 MB** in the gateway pod - no bridge
+process and nothing in the user's Studio (on Linux the launcher becomes the kernel; on Windows it stays as a small
+parent). Plan ~300-500 MB per kernel in use; `STUDIO_KERNEL_MEMORY_MB` (3 GiB) caps one. The gateway itself ~60-80 MB.
+`k8s/81-gateway-deployment.yaml`: request 4 GiB, limit 12 GiB for `STUDIO_KERNELS_TOTAL=20`. Re-measure on Linux.
 
 The hub stays flat; memory grows ~145 MB per running Studio (on Linux without the Windows venv launcher ~9 MB less).
 These are idle-after-open numbers: query results, the Cluster Monitor sampler (`STUDIO_METRICS`) and long sessions add
@@ -151,7 +249,8 @@ docker run --rm -p 8800:8800 -v studio-data:/data --read-only --tmpfs /tmp \
 ```
 
 Python 3.12 slim, the app installed with `uv sync --locked --no-dev`, the notebook environment in `/opt/notebook-env`
-(build arg `INSTALL_NOTEBOOKS=0` leaves it out), `tini` as PID 1 (forwards SIGTERM, reaps orphaned kernels), uid 10001, read-only
+(build arg `INSTALL_NOTEBOOKS=0` leaves it out), Jupyter Enterprise Gateway in `/opt/gateway-env` for the kernel gateway
+pod (`INSTALL_GATEWAY=0` leaves it out), `tini` as PID 1 (forwards SIGTERM, reaps orphaned kernels), uid 10001, read-only
 root filesystem (writes only `/data` and `/tmp`), health check on `/healthz`. `--build-arg INSTALL_CLAUDE=1` adds
 Claude Code for a later "Ask Claude" switch. Kubernetes manifests: [k8s/](k8s/).
 
@@ -178,8 +277,18 @@ Claude Code for a later "Ask Claude" switch. Kubernetes manifests: [k8s/](k8s/).
 | `STUDIO_IDLE_MINUTES` | `30` | Idle stop |
 | `STUDIO_SESSION_HOURS` | `10` | Sign-in lifetime |
 | `STUDIO_DEFAULT_S2_NAME/HOST/PORT/DATABASE` | none | Pre-filled SingleStore connection (no password) |
-| `STUDIO_NOTEBOOKS` | `off` | `off` or `local`: kernels in each notebook user's own Studio process (no isolation between users - a few trusted users only) |
-| `STUDIO_NOTEBOOK_PYTHON` | `/opt/notebook-env/bin/python` in the image | The shared notebook environment's Python (local: your desktop one, `-Notebooks` in the script) |
+| `STUDIO_NOTEBOOKS` | `off` | `off`, `local` (kernels in each notebook user's own Studio process) or `gateway` (kernels on the kernel gateway, step 2a). Neither isolates users' kernels from each other - a named group of colleagues only |
+| `STUDIO_GATEWAY_URL` | none | gateway: the kernel gateway (`http://studio-gateway:8888`) |
+| `STUDIO_GATEWAY_AUTH_TOKEN` | none | **Secret** (`studio-gateway`), 32+ characters: hub and gateway pod; never a Studio or kernel |
+| `STUDIO_GATEWAY_VERIFY` | `1` | Check the gateway's TLS certificate (if `STUDIO_GATEWAY_URL` is `https://`) |
+| `STUDIO_KERNELS_PER_USER` / `STUDIO_KERNELS_TOTAL` | `3` / `20` | gateway: notebook kernels per user / in all (+ one package-install kernel per user) |
+| `STUDIO_KERNEL_IDLE_MINUTES` | `30` | gateway pod: stop kernels idle this long (busy ones stay) |
+| `STUDIO_KERNEL_MEMORY_MB` / `STUDIO_KERNEL_NICE` | `3072` / `10` | gateway pod: address-space cap and CPU priority per kernel |
+| `STUDIO_KERNEL_DATA_DIR` / `STUDIO_KERNEL_QUOTA_GB` | `/kernels` / `5` | gateway pod: the kernel volume; per-user quota (checked at installs) |
+| `STUDIO_PIP_MODE` / `STUDIO_PIP_INDEX_URL` | `mirror` if an index URL is set, else `off` | gateway: package installs `mirror` / `pypi` / `off` (hub and gateway pod; apply the matching NetworkPolicy) |
+| `STUDIO_RELAY_BIND` / `_PORT` / `_URL` | `127.0.0.1` / `8801` / `http://<bind>:<port>` | gateway: the hub's token relay and the address kernels use for it (`0.0.0.0`, `http://studio-hub-relay:8801` in K8s) |
+| `STUDIO_GATEWAY_BIND` / `_PORT` / `_EG` / `_RUNTIME` | `0.0.0.0` / `8888` / `/opt/gateway-env/bin/jupyter-enterprisegateway` / `/tmp/studio-gateway` | gateway pod: where it listens, the Enterprise Gateway program, its runtime folder |
+| `STUDIO_NOTEBOOK_PYTHON` | `/opt/notebook-env/bin/python` in the image | The shared notebook environment's Python (local: your desktop one, `-Notebooks` in the script; gateway: the kernels' Python in the gateway pod) |
 | `STUDIO_ASSISTANT` | `0` | Ask Claude also needs Claude Code in the image and `ANTHROPIC_API_KEY` (or `CLAUDE_CODE_USE_FOUNDRY=1` + `ANTHROPIC_FOUNDRY_*`) - passed to Studios only when on |
 | `STUDIO_METRICS` | `1` | Cluster Monitor history sampler in each Studio (N users = N samplers; turn off if that's too much) |
 | `STUDIO_TRUST_FORWARDED` | `0` (`1` in the image) | Take the client address for the audit log from `X-Forwarded-For` |
@@ -197,3 +306,19 @@ Offline, with a fake SAS Logon (`tests/fake_saslogon.py`): sign-in (both flows),
 isolation, idle stop, limits, admin, audit without secrets (`test_hub.py`); server-mode switches, encrypted secrets
 with the hub's key, seed (`test_server_mode.py`); two real Studio processes with separate state, Viya token renewal
 with the client secret, sign-out (`test_hub_e2e.py`). They are part of the offline subset (`-m "not cluster and not ui"`).
+
+Kernel gateway (`tests/test_kernel_gateway.py`): unit tests always (launcher environment, settings, kernelspec,
+installs refused with `STUDIO_PIP_MODE=off`, the WebSocket client); end to end (marker `gateway`) with a local
+Enterprise Gateway process, the hub, real Studios and the fake SAS Logon for two users: kernels in their own folders
+with their own Viya token through the relay, no secrets in a kernel's environment, a Studio can't reach another
+user's kernel (broker 404s, gateway 401 without the token), interrupt and restart, memory cap / CPU priority /
+kernels-per-user, idle-culled and signed-out kernels dropped, a package installed from a local mirror lands in that
+user's own folder only, admin page. They skip unless a gateway venv is given:
+
+```powershell
+uv venv $env:TEMP\eg-venv --python 3.11; uv pip install --python $env:TEMP\eg-venv -r deploy\gateway-constraints.txt
+$env:S2_TEST_EG_VENV = "$env:TEMP\eg-venv"     # + a notebook environment (S2_TEST_KERNEL_PYTHON, default the desktop one)
+.venv\Scripts\python.exe -m pytest tests/test_kernel_gateway.py
+```
+
+Try it by hand: `.\scripts\studio-hub-local.ps1 -Gateway -GatewayVenv $env:TEMP\eg-venv -NotebookUsers <you>`.

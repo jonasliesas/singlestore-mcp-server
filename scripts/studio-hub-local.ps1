@@ -5,10 +5,14 @@
 #   .\scripts\studio-hub-local.ps1 -Check                # only check prerequisites and print the checklist
 #   .\scripts\studio-hub-local.ps1 -Notebooks -NotebookUsers "norjni,<colleague>"   # with local notebooks
 #   .\scripts\studio-hub-local.ps1 -UsersGroup SpeedyStoreStudioUsers -NotebookGroup SpeedyStoreStudioNotebooks
+#   .\scripts\studio-hub-local.ps1 -Gateway -GatewayVenv C:\path\to\eg-venv -NotebookUsers "norjni"   # kernel gateway (2a)
 #
 # -Notebooks: STUDIO_NOTEBOOKS=local with your desktop notebook environment (~\.singlestore-mcp\notebook-env). Without
 # groups only -NotebookUsers (default: -Admins) may then use Studio and notebooks. Local notebooks have no isolation
 # between users' kernels: test use with a few trusted users only (the kernel gateway, step 2a, replaces this).
+# -Gateway: STUDIO_NOTEBOOKS=gateway - a local Jupyter Enterprise Gateway (python -m singlestore_mcp.kernel_gateway) from
+# -GatewayVenv (a separate venv: uv venv eg --python 3.11; uv pip install --python eg -r deploy\gateway-constraints.txt)
+# on -GatewayPort, kernels in <DataDir>\kernels, a random gateway token for this run, package installs -PipMode.
 #
 # Then open http://127.0.0.1:<port>/ and sign in. Without an own OAuth client in SAS Logon this uses the "paste the
 # code" sign-in with Viya's built-in vscode client. Your password is only typed into SAS Logon.
@@ -24,6 +28,10 @@ param(
     [string]$NotebookUsers = "",
     [string]$UsersGroup = "",
     [string]$NotebookGroup = "",
+    [switch]$Gateway,
+    [string]$GatewayVenv = $env:STUDIO_GATEWAY_VENV,
+    [int]$GatewayPort = 8888,
+    [ValidateSet("off", "pypi", "mirror")][string]$PipMode = "off",
     [switch]$Check
 )
 $ErrorActionPreference = "Stop"
@@ -83,6 +91,16 @@ else {
 }
 
 $nbPython = $null
+if ($Gateway) { $Notebooks = $true }
+$egExe = $null
+if ($Gateway) {
+    $egExe = if ($GatewayVenv) { Join-Path $GatewayVenv "Scripts\jupyter-enterprisegateway.exe" } else { "" }
+    if (-not $GatewayVenv -or -not (Test-Path $egExe)) {
+        Fail "-Gateway: no Enterprise Gateway venv (-GatewayVenv '$GatewayVenv')." "uv venv <folder> --python 3.11; uv pip install --python <folder> -r deploy\gateway-constraints.txt; then -GatewayVenv <folder>."
+    }
+    if ($GatewayPort -eq $Port -or (8851..8853) -contains $GatewayPort) { Fail "-GatewayPort $GatewayPort clashes." "Use another port, e.g. -GatewayPort 8888." }
+    if ($PipMode -eq "mirror" -and -not $env:STUDIO_PIP_INDEX_URL) { Fail "-PipMode mirror needs STUDIO_PIP_INDEX_URL." "Set it to the mirror's /simple index." }
+}
 if ($Notebooks) {
     $nbPython = if ($env:STUDIO_NOTEBOOK_PYTHON) { $env:STUDIO_NOTEBOOK_PYTHON } else { Join-Path $home2 "notebook-env\Scripts\python.exe" }
     if (-not (Test-Path $nbPython)) {
@@ -127,13 +145,20 @@ if ($UsersGroup) { $env:STUDIO_USERS_GROUP = $UsersGroup }
 if ($NotebookGroup) { $env:STUDIO_NOTEBOOK_GROUP = $NotebookGroup }
 $nbText = "off"
 if ($Notebooks) {
-    $env:STUDIO_NOTEBOOKS = "local"
+    $env:STUDIO_NOTEBOOKS = if ($Gateway) { "gateway" } else { "local" }
     $env:STUDIO_NOTEBOOK_PYTHON = $nbPython
     if (-not $NotebookGroup) {
         if (-not $NotebookUsers) { $NotebookUsers = $Admins }
         $env:STUDIO_ALLOWED_USERS = $NotebookUsers
-        $nbText = "local, for $NotebookUsers"
-    } else { $nbText = "local, for members of $NotebookGroup" }
+        $nbText = "$($env:STUDIO_NOTEBOOKS), for $NotebookUsers"
+    } else { $nbText = "$($env:STUDIO_NOTEBOOKS), for members of $NotebookGroup" }
+}
+if ($Gateway) {
+    $env:STUDIO_GATEWAY_URL = "http://127.0.0.1:$GatewayPort"
+    $env:STUDIO_GATEWAY_AUTH_TOKEN = [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(36))
+    $env:STUDIO_PIP_MODE = $PipMode
+    if (-not $env:STUDIO_RELAY_PORT) { $env:STUDIO_RELAY_PORT = "8801" }
+    $nbText += " - gateway on 127.0.0.1:$GatewayPort, kernels in $DataDir\kernels, package installs: $PipMode"
 }
 $access = if ($UsersGroup -or $NotebookGroup) { "SAS groups: $(@($UsersGroup, $NotebookGroup) -ne '' -join ', ')" + $(if ($env:STUDIO_ALLOWED_USERS) { " + $($env:STUDIO_ALLOWED_USERS)" } else { "" }) }
           elseif ($env:STUDIO_ALLOWED_USERS) { "only $($env:STUDIO_ALLOWED_USERS)" } else { "everyone who can sign in to SAS Logon" }
@@ -152,7 +177,7 @@ Write-Host "  SAS Logon  $ViyaUrl   (your password is typed there only, never in
 Write-Host "  Admins     $Admins"
 Write-Host "  Access     $access"
 Write-Host "  Notebooks  $nbText"
-if ($Notebooks) { Write-Host "             local notebooks: no isolation between users' kernels - test use with a few trusted users only" -ForegroundColor Yellow }
+if ($Notebooks) { Write-Host "             no isolation between users' kernels - test use with a few trusted users only" -ForegroundColor Yellow }
 Write-Host "  SingleStore default  $s2"
 Write-Host "  Idle stop  $IdleMinutes min    Secrets key: $key"
 Write-Host "  Logs       hub + audit: this window and $DataDir\hub\audit.jsonl"
@@ -162,4 +187,20 @@ Write-Host "  Stop       Ctrl+C (stops the hub and every Studio)"
 Write-Host ""
 if ($Check) { Write-Host "Prerequisites OK (-Check: not starting)." -ForegroundColor Green; exit 0 }
 
-& $python -m singlestore_mcp.hub
+$gw = $null
+if ($Gateway) {
+    # The gateway gets its token, limits and folders from these (its own process; the token is for this run only).
+    $env:STUDIO_GATEWAY_EG = $egExe
+    $env:STUDIO_GATEWAY_BIND = "127.0.0.1"
+    $env:STUDIO_GATEWAY_PORT = "$GatewayPort"
+    $env:STUDIO_KERNEL_DATA_DIR = Join-Path $DataDir "kernels"
+    $env:STUDIO_GATEWAY_RUNTIME = Join-Path $DataDir "gateway-runtime"
+    $gw = Start-Process -FilePath $python -ArgumentList "-m", "singlestore_mcp.kernel_gateway" -PassThru -NoNewWindow `
+        -RedirectStandardError (Join-Path $DataDir "hub\gateway.log") -RedirectStandardOutput (Join-Path $DataDir "hub\gateway.out")
+    Write-Host "Kernel gateway started (PID $($gw.Id), log $DataDir\hub\gateway.log)."
+}
+try {
+    & $python -m singlestore_mcp.hub
+} finally {
+    if ($gw) { & taskkill /T /F /PID $gw.Id 2>$null | Out-Null }
+}

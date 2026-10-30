@@ -1,5 +1,6 @@
-# In: only the ingress controller, on the hub's port. Out: DNS, the SingleStore cluster and SAS Viya - nothing else
-# (no internet, no other namespaces, no cloud metadata endpoint). Needs a CNI that enforces NetworkPolicy.
+# The hub pod. In: only the ingress controller, on the hub's port (+ the kernel gateway pod on the token relay port).
+# Out: DNS, the SingleStore cluster, SAS Viya and the kernel gateway - nothing else (no internet, no other namespaces,
+# no cloud metadata endpoint). Needs a CNI that enforces NetworkPolicy. The gateway pod has its own policy (83-*.yaml).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -9,6 +10,7 @@ spec:
   podSelector:
     matchLabels:
       app.kubernetes.io/name: speedystore-studio
+      app.kubernetes.io/component: hub
   policyTypes: ["Ingress", "Egress"]
   ingress:
     - from:
@@ -18,7 +20,25 @@ spec:
       ports:
         - protocol: TCP
           port: 8800
+    # STUDIO_NOTEBOOKS=gateway: kernels ask the hub's token relay for their own user's tokens.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: speedystore-studio
+              app.kubernetes.io/component: kernel-gateway
+      ports:
+        - protocol: TCP
+          port: 8801
   egress:
+    # STUDIO_NOTEBOOKS=gateway: the kernel gateway (REST + kernel channels).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: speedystore-studio
+              app.kubernetes.io/component: kernel-gateway
+      ports:
+        - protocol: TCP
+          port: 8888
     # DNS
     - to:
         - namespaceSelector:

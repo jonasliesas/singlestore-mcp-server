@@ -36,10 +36,30 @@ data:
   STUDIO_DEFAULT_S2_HOST: "<singlestore-host-or-service>"
   STUDIO_DEFAULT_S2_PORT: "3306"
   STUDIO_DEFAULT_S2_DATABASE: ""
-  # Notebooks: off | local. local = kernels in each notebook user's own Studio process, for members of
-  # SpeedyStoreStudioNotebooks only. Local notebooks: no isolation between users' kernels - test use with a few
-  # trusted users only; the kernel gateway (step 2a) replaces this. On for the first test deploy (Jonas + one colleague).
+  # Notebooks: off | local | gateway, for members of SpeedyStoreStudioNotebooks only.
+  #   local   = kernels in each notebook user's own Studio process (test version: Jonas + one colleague). No isolation
+  #             between users' kernels - test use with a few trusted users only.
+  #   gateway = kernels in the kernel gateway pod (step 2a, 80-83-*.yaml + the Secret studio-gateway): limits per kernel,
+  #             own egress rules, package installs per STUDIO_PIP_MODE. Still no isolation between users' kernels
+  #             (one shared kernel pod, one OS user) - one pod per kernel is step 2b.
   STUDIO_NOTEBOOKS: "local"
+  # --- Kernel gateway (STUDIO_NOTEBOOKS=gateway). Read by the hub and by the gateway pod.
+  STUDIO_GATEWAY_URL: "http://studio-gateway:8888"
+  STUDIO_KERNELS_PER_USER: "3"          # notebook kernels per user at once (the Studio closes its oldest idle one first)
+  STUDIO_KERNELS_TOTAL: "20"            # notebook kernels on the gateway at once
+  STUDIO_KERNEL_IDLE_MINUTES: "30"      # the gateway stops a kernel idle this long (busy ones stay)
+  STUDIO_KERNEL_MEMORY_MB: "3072"       # per kernel: address-space cap (RLIMIT_AS); a cell that needs more gets MemoryError
+  STUDIO_KERNEL_NICE: "10"              # lower CPU priority for kernels
+  STUDIO_KERNEL_QUOTA_GB: "5"           # per user on the kernel volume (checked before / reported after each install)
+  # Package installs from notebooks: mirror (an internal PyPI proxy, STUDIO_PIP_INDEX_URL; egress only to it) |
+  # pypi (pypi.org + files.pythonhosted.org; needs that egress, 83-gateway-networkpolicy-pypi.yaml) | off (image only).
+  # Apply the matching 83-gateway-networkpolicy-<mode>.yaml.
+  STUDIO_PIP_MODE: "pypi"
+  STUDIO_PIP_INDEX_URL: ""
+  # The hub's token relay that kernels ask for the user's fresh tokens (port 8801; only the gateway pod may reach it).
+  STUDIO_RELAY_BIND: "0.0.0.0"
+  STUDIO_RELAY_PORT: "8801"
+  STUDIO_RELAY_URL: "http://studio-hub-relay:8801"
   # Ask Claude: off.
   STUDIO_ASSISTANT: "0"
   STUDIO_METRICS: "1"

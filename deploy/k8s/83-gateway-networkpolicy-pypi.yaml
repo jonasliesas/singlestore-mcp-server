@@ -1,0 +1,88 @@
+# STUDIO_NOTEBOOKS=gateway, STUDIO_PIP_MODE=pypi: the kernel gateway pod's NetworkPolicy. Apply ONE of the three
+# 83-gateway-networkpolicy-*.yaml files - the one for your STUDIO_PIP_MODE (they share the name: the last one applied wins).
+# In: only the hub pod (its kernel broker) on 8888. Out: DNS, SingleStore, SAS Viya, the hub's token relay and HTTPS to
+# pypi.org + files.pythonhosted.org. Plain NetworkPolicy can't name hosts: those are CDN addresses (Fastly) that change,
+# so the rule below allows HTTPS (443) to public addresses (not the private ranges, not the metadata endpoint). Tighter:
+# an egress proxy that allows only those two hosts (allow the proxy here instead and set HTTPS_PROXY in
+# 81-gateway-deployment.yaml), or your CNI's FQDN policy (e.g. Cilium toFQDNs) - see the commented example at the end.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: studio-gateway
+  namespace: speedystore-studio
+  labels:
+    app.kubernetes.io/name: speedystore-studio
+    app.kubernetes.io/component: kernel-gateway
+    studio.sas.com/pip-mode: "pypi"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: speedystore-studio
+      app.kubernetes.io/component: kernel-gateway
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: speedystore-studio
+              app.kubernetes.io/component: hub
+      ports:
+        - protocol: TCP
+          port: 8888
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # The hub's token relay (kernels ask it for their own user's SingleStore / SAS Viya token).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: speedystore-studio
+              app.kubernetes.io/component: hub
+      ports:
+        - protocol: TCP
+          port: 8801
+    # SingleStore (as in 70-networkpolicy.yaml).
+    - to:
+        - ipBlock:
+            cidr: "<singlestore-aggregator-ip>/32"
+      ports:
+        - protocol: TCP
+          port: 3306
+    # SAS Viya (SAS cells with saspy, swat / CAS REST, sasctl), as in 70-networkpolicy.yaml.
+    - to:
+        - ipBlock:
+            cidr: "<viya-ingress-ip>/32"
+      ports:
+        - protocol: TCP
+          port: 443
+    # pypi.org + files.pythonhosted.org: HTTPS to public addresses only.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+              - 169.254.0.0/16      # cloud metadata endpoint
+              - 127.0.0.0/8
+      ports:
+        - protocol: TCP
+          port: 443
+# Tighter with Cilium (instead of the 0.0.0.0/0 rule; a CiliumNetworkPolicy next to this one):
+#   egress:
+#     - toFQDNs: [{matchName: pypi.org}, {matchName: files.pythonhosted.org}]
+#       toPorts: [{ports: [{port: "443", protocol: TCP}]}]
+#     - toEndpoints: [{matchLabels: {k8s:io.kubernetes.pod.namespace: kube-system, k8s-app: kube-dns}}]
+#       toPorts: [{ports: [{port: "53", protocol: ANY}], rules: {dns: [{matchPattern: "*"}]}}]
