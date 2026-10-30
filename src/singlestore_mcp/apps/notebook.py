@@ -1,8 +1,10 @@
 """Notebook app: SQL and Python cells on a Jupyter kernel, saved as .ipynb.
 
-"Python in SAS" cells don't use the kernel: they run as PROC PYTHON in the Workspace's SAS Compute session of the
-active SAS Viya connection (``singlestore_mcp.sas_python``; the SQL Editor's SAS runs' session, queue and Stop), so
-they also work where local kernels are off (server mode). They're saved as ``%%sas_python`` cells.
+SAS cells and "Python in SAS" cells don't use the kernel: they run in the Workspace's SAS Compute session of the
+active SAS Viya connection (``singlestore_mcp.sas_cell`` / ``singlestore_mcp.sas_python``: PROC PYTHON; the SQL
+Editor's SAS runs' session, queue, pre-warm and Stop), so WORK tables and macro variables are shared between them
+and the SQL Editor, and they also work where local kernels are off (server mode). They're saved as ``%%sas`` /
+``%%sas_python`` cells.
 
 SQL cells run in the notebook's kernel (``_s2_sql`` in notebook_bridge's
 startup code), so each result becomes a pandas DataFrame (``df`` or a named
@@ -24,7 +26,7 @@ from typing import Any
 
 from mcp.types import CallToolResult, ToolAnnotations
 
-from .. import assistant, fileio, notebook_kernel, sas_python, sas_rest, sas_runs, sas_viya, server_mode, viya_files
+from .. import assistant, fileio, notebook_kernel, sas_cell, sas_python, sas_rest, sas_runs, sas_viya, server_mode, viya_files
 from ..notebook_bridge import split_statements
 from ._core import APP_ONLY, apps, register_app, tool_result, with_browser_link
 from .query_grid import ReadOnlyViolation, check_read_only
@@ -61,7 +63,7 @@ def notebook(name: str | None = None, database: str | None = None) -> CallToolRe
     data: dict[str, Any] = {"name": name, "database": database, "environment": env, "features": server_mode.features()}
     summary = f"Notebook opened{f' ({name})' if name else ''}{f' on database {database}' if database else ''}."
     if not kernels:
-        summary += " Local kernels are off here: only Python in SAS and text cells run."
+        summary += " Local kernels are off here: only SAS, Python in SAS and text cells run."
     elif data["environment"]["state"] != "ready":
         summary += " The notebook Python environment isn't installed yet; the app offers to install it."
     summary = with_browser_link(summary, data, "notebook", {"name": name, "database": database})
@@ -149,7 +151,8 @@ def notebook_run(
     (``df``, and ``name`` if given). Statements that change data or schema
     come back with ``needs_confirmation`` unless ``confirmed``.
     cell_type "python": Python code, run as-is.
-    cell_type "sas": SAS code (DATA steps, PROCs) in the SAS Viya session; libref S2 = the notebook database.
+    cell_type "sas": SAS code through saspy in the kernel's own SAS session (kept for older callers; the app runs
+    SAS cells with notebook_sas_cell in the Workspace's SAS session).
     """
     if cell_type == "sql":
         sql = source.strip()
@@ -193,11 +196,14 @@ def notebook_poll(run_id: str, after: int = 0, cleared: int = 0) -> CallToolResu
 
 def _pysas_answer(run: sas_runs.Run, wait_ms: int | None) -> CallToolResult:
     """The cell's outputs once the run is done within ``wait_ms``, else its status (queued / running, what it waits
-    for, whether Python still has to start in the session, stopping / cancel_failed after Stop)."""
+    for, whether Python still has to start in the session, stopping / cancel_failed after Stop). For a Python in
+    SAS cell or a SAS cell (``run.source["kind"]``)."""
+    sas_kind = run.source.get("kind") == "sas"
     run.done.wait(None if wait_ms is None else max(0, int(wait_ms)) / 1000)
     seconds = round(((run.ended or time.time()) - run.created), 1)
     if not run.done.is_set():
-        info = {**run.info(), "seconds": seconds, "python_started": bool(run.source.get("python_started"))}
+        info = {**run.info(), "seconds": seconds, "python_started": True if sas_kind else bool(run.source.get("python_started")),
+                "kind": "sas" if sas_kind else "sas_python"}
         w = info.get("waiting_for") or {}
         text = ("Waiting for the SAS session to start" if w.get("warming") else
                 f"Waiting for the SAS run in {w['tab']}" if w.get("tab") else
@@ -210,6 +216,15 @@ def _pysas_answer(run: sas_runs.Run, wait_ms: int | None) -> CallToolResult:
                  "evalue": msg, "traceback": []}]
         return tool_result(f"Error: {msg}", {**base, "status": "error", "outputs": outs})
     res = run.result or {}
+    if sas_kind:
+        if res.get("stopped") and "library" not in res:  # stopped before it reached SAS (sas_runs' own result)
+            outs = [{"output_type": "stream", "name": "stderr", "text": f"{res.get('note') or 'Stopped.'}\n"}]
+            return tool_result("Stopped", {**base, "status": "aborted", "outputs": outs})
+        status = "aborted" if res.get("stopped") else "ok" if res.get("ok") else "error"
+        text = {"ok": "Ran in SAS Compute", "aborted": "Stopped", "error": "Error"}[status]
+        if res.get("first_error"):
+            text += f": {res['first_error']}"[:300]
+        return tool_result(text, {**base, "status": status, "outputs": sas_cell.outputs(res), "kind": "sas"})
     if res.get("stopped") and "stdout" not in res:  # stopped before it reached SAS (sas_runs' own result)
         outs = [{"output_type": "stream", "name": "stderr", "text": f"{res.get('note') or 'Stopped.'}\n"}]
         return tool_result("Stopped", {**base, "status": "aborted", "outputs": outs})
@@ -251,10 +266,35 @@ def notebook_sas_python(source: str, notebook_id: str | None = None, run_id: str
     return _pysas_answer(run, wait_ms)
 
 
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=RUNS_CODE)
+def notebook_sas_cell(source: str, notebook_id: str | None = None, run_id: str | None = None,
+                      connection: str | None = None, wait_ms: int | None = None, database: str | None = None) -> CallToolResult:
+    """Run a SAS cell (DATA steps, PROCs, macro code) in the Workspace's SAS Compute session of the SAS Viya
+    connection (default: the active one) - the session, queue, pre-warm and Stop (sas_stop) of the SQL Editor's SAS
+    runs and the Python in SAS cells, so WORK tables and macro variables are shared with them; Restart SAS session
+    (sas_session_reset) clears them. Doesn't need a local kernel. The automatic SingleStore library (S2) is the
+    session's (the active SingleStore connection's database); ``database``: the notebook's, only named in the note.
+
+    ``run_id`` / ``wait_ms`` / ``running`` as notebook_sas_python (ask again with notebook_sas_python_status). Done:
+    ``outputs`` (the notebook's SAS output: error / warning counts, ODS output, the log) and ``status`` ok / error /
+    aborted."""
+    sas_cell.prepare(source)  # refuse an empty cell before anything starts
+    if connection:
+        sas_viya.settings(connection)  # LookupError for an unknown connection
+    source_info = {"tab": "Notebook (SAS)", "tab_id": notebook_id, "kind": "sas"}
+
+    def work(run: sas_runs.Run) -> dict[str, Any]:
+        c, _ = sas_rest.sessions(run.conn)
+        return sas_cell.run(c, source, ctl=run, database=database)
+
+    run = sas_runs.start(run_id, connection, "compute", source_info, source, work)
+    return _pysas_answer(run, wait_ms)
+
+
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
 def notebook_sas_python_status(run_id: str, wait_ms: int = 0) -> CallToolResult:
-    """A running Python in SAS cell (notebook_sas_python): its outputs once done (waits up to ``wait_ms``, at most
-    25 s), else its status."""
+    """A running Python in SAS cell (notebook_sas_python) or SAS cell (notebook_sas_cell): its outputs once done
+    (waits up to ``wait_ms``, at most 25 s), else its status."""
     return _pysas_answer(sas_runs.get(run_id), min(max(0, int(wait_ms)), 25_000))
 
 

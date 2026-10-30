@@ -239,4 +239,4 @@ def test_server_mode_opens_the_notebook_without_kernels(monkeypatch: pytest.Monk
     monkeypatch.setattr(nb, "with_browser_link", lambda summary, data, *a, **k: summary)
     d = nb.notebook().structured_content
     assert d["features"]["notebooks"] is False and d["environment"]["state"] == "off"
-    assert "only Python in SAS and text cells run" in d["summary"]
+    assert "only SAS, Python in SAS and text cells run" in d["summary"]

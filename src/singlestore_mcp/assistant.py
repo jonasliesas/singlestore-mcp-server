@@ -155,10 +155,12 @@ large. You can't run Python yourself; write it carefully.
 - You cannot change data or schema yourself; give such statements as SQL \
 cells for the user to review and run.
 - There are also SAS cells: SAS code (DATA steps, PROCs, PROC SQL) that runs \
-in the user's SAS Viya session; put it in ```sas blocks (no %%sas line), which \
-get an "Insert SAS cell" button. In SAS cells the libref S2 points at the \
-notebook's SingleStore database (SAS/ACCESS to SingleStore), so `set s2.mytable;` \
-reads a table and `data s2.newtable; ... run;` writes one.
+in the Workspace's SAS Compute session (the same session as the SQL Editor's \
+SAS runs and the Python in SAS cells: WORK tables and macro variables are \
+shared with them); put it in ```sas blocks (no %%sas line), which get an \
+"Insert SAS cell" button. The libref S2 is the automatic SingleStore library \
+(SAS/ACCESS to SingleStore, the active SingleStore connection's database), so \
+`set s2.mytable;` reads a table and `data s2.newtable; ... run;` writes one.
 - With SAS Viya, let Viya read SingleStore directly: in SAS cells through the \
 S2 library (DATA steps, PROC SQL, or other PROCs on s2.tables; SAS/ACCESS pushes \
 work such as WHERE clauses and PROC SQL down to SingleStore), and in CAS through \

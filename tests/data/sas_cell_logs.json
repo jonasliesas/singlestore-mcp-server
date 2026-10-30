@@ -1,0 +1,410 @@
+{
+ "data_step": {
+  "code": "data work.zz_sascell; set sashelp.class; where age > 14; run;\n%let s2cell_n = 5;",
+  "log": [
+   {
+    "line": "6    options nosource nonotes;",
+    "type": "source"
+   },
+   {
+    "line": "S2SAS_HTML=/opt/sas/viya/config/var/tmp/compsrv/default/514c6d7f-1113-433f-b4d8-9d42e6bc723f/SAS_work657D00000158_sas-compute-server",
+    "type": "normal"
+   },
+   {
+    "line": "-9e103d26-5705-4af9-8e4e-0437acaf4441-2z74rma/_s2sas.html",
+    "type": "normal"
+   },
+   {
+    "line": "S2SAS_BEGIN",
+    "type": "normal"
+   },
+   {
+    "line": "12   data work.zz_sascell; set sashelp.class; where age > 14; run;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: There were 5 observations read from the data set SASHELP.CLASS.",
+    "type": "note"
+   },
+   {
+    "line": "      WHERE age>14;",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: The data set WORK.ZZ_SASCELL has 5 observations and 5 variables.",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: DATA statement used (Total process time):",
+    "type": "note"
+   },
+   {
+    "line": "      real time           0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      cpu time            0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      ",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "13   %let s2cell_n = 5;",
+    "type": "source"
+   },
+   {
+    "line": "14   ;*';*\";*/;quit;run;options nosource nonotes;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   }
+  ],
+  "state": "completed"
+ },
+ "print": {
+  "code": "title 'Older pupils';\nproc print data=work.zz_sascell; run;\n%put NOTE: n=&s2cell_n;",
+  "log": [
+   {
+    "line": "2                                                          The SAS System                       Friday, October 30, 2026 10:46:00 PM",
+    "type": "title"
+   },
+   {
+    "line": "",
+    "type": "title"
+   },
+   {
+    "line": "17   options nosource nonotes;",
+    "type": "source"
+   },
+   {
+    "line": "S2SAS_HTML=/opt/sas/viya/config/var/tmp/compsrv/default/514c6d7f-1113-433f-b4d8-9d42e6bc723f/SAS_work657D00000158_sas-compute-server",
+    "type": "normal"
+   },
+   {
+    "line": "-9e103d26-5705-4af9-8e4e-0437acaf4441-2z74rma/_s2sas.html",
+    "type": "normal"
+   },
+   {
+    "line": "S2SAS_BEGIN",
+    "type": "normal"
+   },
+   {
+    "line": "23   title 'Older pupils';",
+    "type": "source"
+   },
+   {
+    "line": "24   proc print data=work.zz_sascell; run;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: There were 5 observations read from the data set WORK.ZZ_SASCELL.",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: The PROCEDURE PRINT printed page 1.",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: PROCEDURE PRINT used (Total process time):",
+    "type": "note"
+   },
+   {
+    "line": "      real time           0.02 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      cpu time            0.02 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      ",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "25   %put NOTE: n=&s2cell_n;",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: n=5",
+    "type": "note"
+   },
+   {
+    "line": "26   ;*';*\";*/;quit;run;options nosource nonotes;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   }
+  ],
+  "state": "completed"
+ },
+ "error": {
+  "code": "data _null_; set work.does_not_exist_zz; run;",
+  "log": [
+   {
+    "line": "29   options nosource nonotes;",
+    "type": "source"
+   },
+   {
+    "line": "S2SAS_HTML=/opt/sas/viya/config/var/tmp/compsrv/default/514c6d7f-1113-433f-b4d8-9d42e6bc723f/SAS_work657D00000158_sas-compute-server",
+    "type": "normal"
+   },
+   {
+    "line": "-9e103d26-5705-4af9-8e4e-0437acaf4441-2z74rma/_s2sas.html",
+    "type": "normal"
+   },
+   {
+    "line": "S2SAS_BEGIN",
+    "type": "normal"
+   },
+   {
+    "line": "35   data _null_; set work.does_not_exist_zz; run;",
+    "type": "source"
+   },
+   {
+    "line": "ERROR: File WORK.DOES_NOT_EXIST_ZZ.DATA does not exist.",
+    "type": "error"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: The SAS System stopped processing this step because of errors.",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: DATA statement used (Total process time):",
+    "type": "note"
+   },
+   {
+    "line": "      real time           0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      cpu time            0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      ",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "36   ;*';*\";*/;quit;run;options nosource nonotes;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   }
+  ],
+  "state": "error"
+ },
+ "after_error": {
+  "code": "proc means data=sashelp.class n mean; var age; run;",
+  "log": [
+   {
+    "line": "39   options nosource nonotes;",
+    "type": "source"
+   },
+   {
+    "line": "S2SAS_HTML=/opt/sas/viya/config/var/tmp/compsrv/default/514c6d7f-1113-433f-b4d8-9d42e6bc723f/SAS_work657D00000158_sas-compute-server",
+    "type": "normal"
+   },
+   {
+    "line": "-9e103d26-5705-4af9-8e4e-0437acaf4441-2z74rma/_s2sas.html",
+    "type": "normal"
+   },
+   {
+    "line": "S2SAS_BEGIN",
+    "type": "normal"
+   },
+   {
+    "line": "45   proc means data=sashelp.class n mean; var age; run;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: There were 19 observations read from the data set SASHELP.CLASS.",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: The PROCEDURE MEANS printed page 2.",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: PROCEDURE MEANS used (Total process time):",
+    "type": "note"
+   },
+   {
+    "line": "      real time           0.01 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      cpu time            0.02 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      ",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "46   ;*';*\";*/;quit;run;options nosource nonotes;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   }
+  ],
+  "state": "completed"
+ },
+ "quote": {
+  "code": "%put 'hello;",
+  "log": [
+   {
+    "line": "49   options nosource nonotes;",
+    "type": "source"
+   },
+   {
+    "line": "S2SAS_HTML=/opt/sas/viya/config/var/tmp/compsrv/default/514c6d7f-1113-433f-b4d8-9d42e6bc723f/SAS_work657D00000158_sas-compute-server",
+    "type": "normal"
+   },
+   {
+    "line": "-9e103d26-5705-4af9-8e4e-0437acaf4441-2z74rma/_s2sas.html",
+    "type": "normal"
+   },
+   {
+    "line": "S2SAS_BEGIN",
+    "type": "normal"
+   },
+   {
+    "line": "55   %put 'hello;",
+    "type": "source"
+   },
+   {
+    "line": "56   ;*';*\";*/;quit;run;options nosource nonotes;",
+    "type": "source"
+   },
+   {
+    "line": "'hello;;*'",
+    "type": "normal"
+   },
+   {
+    "line": "",
+    "type": "note"
+   }
+  ],
+  "state": "completed"
+ },
+ "s2lib": {
+  "code": "proc sql outobs=3; select make, model from S2.CARS; quit;",
+  "log": [
+   {
+    "line": "59   options nosource nonotes;",
+    "type": "source"
+   },
+   {
+    "line": "S2SAS_HTML=/opt/sas/viya/config/var/tmp/compsrv/default/514c6d7f-1113-433f-b4d8-9d42e6bc723f/SAS_work657D00000158_sas-compute-server",
+    "type": "normal"
+   },
+   {
+    "line": "3                                                          The SAS System                       Friday, October 30, 2026 10:46:00 PM",
+    "type": "title"
+   },
+   {
+    "line": "",
+    "type": "title"
+   },
+   {
+    "line": "-9e103d26-5705-4af9-8e4e-0437acaf4441-2z74rma/_s2sas.html",
+    "type": "normal"
+   },
+   {
+    "line": "S2SAS_BEGIN",
+    "type": "normal"
+   },
+   {
+    "line": "65   proc sql outobs=3;",
+    "type": "source"
+   },
+   {
+    "line": "65 !                    select make, model from S2.CARS;",
+    "type": "source"
+   },
+   {
+    "line": "WARNING: Statement terminated early due to OUTOBS=3 option.",
+    "type": "warning"
+   },
+   {
+    "line": "65 !                                                     quit;",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: The PROCEDURE SQL printed page 3.",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: PROCEDURE SQL used (Total process time):",
+    "type": "note"
+   },
+   {
+    "line": "      real time           0.02 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      cpu time            0.01 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      ",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "66   ;*';*\";*/;quit;run;options nosource nonotes;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   }
+  ],
+  "state": "warning"
+ }
+}
