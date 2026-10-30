@@ -39,6 +39,7 @@ markers = [
     "sas: needs SAS Viya (skipped when it can't be reached)",
     "assistants: asks the in-app Claude assistants (uses Claude; run with --assistants)",
     "ui: drives the apps in a browser with Playwright",
+    "gateway: starts a local Jupyter Enterprise Gateway (skipped unless S2_TEST_EG_VENV names its venv)",
 ]
 
 [tool.ruff]

@@ -849,12 +849,15 @@ def test_admin_page_warns_about_local_notebooks(tmp_path: Path, logon: FakeSasLo
         hub.close()
 
 
-def test_studio_notebooks_is_off_or_local(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_studio_notebooks_is_off_local_or_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
     from singlestore_mcp.hub import config
 
-    for raw, on in (("", False), ("off", False), ("0", False), ("local", True), ("LOCAL", True), ("1", True)):
+    for raw, mode in (("", "off"), ("off", "off"), ("0", "off"), ("local", "local"), ("LOCAL", "local"), ("1", "local"),
+                      ("gateway", "gateway")):
         monkeypatch.setenv("STUDIO_NOTEBOOKS", raw)
-        assert config._notebooks_mode() is on, raw
-    monkeypatch.setenv("STUDIO_NOTEBOOKS", "gateway")  # step 2a, not built yet: a clear stop, not a silent off
+        assert config._notebooks_mode() == mode, raw
+    monkeypatch.setenv("STUDIO_NOTEBOOKS", "kubernetes")  # step 2b isn't a mode of its own: a clear stop, not a silent off
     with pytest.raises(SystemExit):
         config._notebooks_mode()
+    assert config.HubConfig(viya_url="https://v", notebooks=True).notebooks_mode == "local"  # as before step 2a
+    assert config.HubConfig(viya_url="https://v", notebooks_mode="gateway").notebooks
