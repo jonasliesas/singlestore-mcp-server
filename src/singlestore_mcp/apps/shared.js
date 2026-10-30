@@ -728,7 +728,49 @@ S2.isNumericColumn = function (rows, col) {
 
 S2.cellText = (v) => (v == null ? "NULL" : typeof v === "object" ? JSON.stringify(v) : String(v));
 
+// A query result's number as shown in a grid (V-5): the raw text with the locale's thousands separator (and decimal
+// mark) put in, every digit kept (a BIGINT or DECIMAL beyond a double's precision stays exact). Copy and Export CSV use
+// the raw value; the cell's title shows it too. ``group`` false leaves out the separators (years, ids).
+let numParts = null;
+S2.cellNumber = function (v, group = true) {
+  const s = typeof v === "number" ? String(v) : String(v ?? "").trim();
+  const m = /^(-?)(\d+)(\.\d+)?$/.exec(s);
+  if (!m) return S2.cellText(v);
+  if (!numParts) {
+    const parts = new Intl.NumberFormat(undefined).formatToParts(12345.6);
+    numParts = { group: parts.find((p) => p.type === "group")?.value ?? ",", decimal: parts.find((p) => p.type === "decimal")?.value ?? "." };
+  }
+  const int = group ? m[2].replace(/\B(?=(\d{3})+(?!\d))/g, numParts.group) : m[2];
+  return `${m[1]}${int}${m[3] ? numParts.decimal + m[3].slice(1) : ""}`;
+};
+// Ctrl+C on a selection in a result grid copies the raw values (a cell's title holds its raw text when the cell shows
+// a formatted number), tab-separated, without the "#" column; a selection inside one text cell copies as usual.
+S2.rawCopy = function (container) {
+  container.addEventListener("copy", (e) => {
+    const sel = document.getSelection();
+    if (!sel || sel.isCollapsed) return;
+    const lines = [];
+    let cells = 0, onlyText = true;
+    for (const tr of container.querySelectorAll("tr")) {
+      if (!sel.containsNode(tr, true)) continue;
+      const tds = [...tr.children].filter((c) => !c.classList.contains("s2-rn") && !c.classList.contains("qg-rn") && sel.containsNode(c, true));
+      if (!tds.length) continue;
+      cells += tds.length;
+      if (tds.some((c) => c.classList.contains("num"))) onlyText = false;
+      lines.push(tds.map((c) => (c.tagName === "TH" ? c.firstChild?.textContent ?? c.textContent : c.getAttribute("title") ?? c.textContent)).join("\t"));
+    }
+    if (!lines.length || (cells === 1 && onlyText)) return;
+    e.clipboardData.setData("text/plain", lines.join("\n"));
+    e.preventDefault();
+  });
+  return container;
+};
+// Columns whose numbers read better without separators: years, ids, codes, keys, zip codes.
+S2.plainNumberColumn = (name) => /(^|[_\s.])(id|year|yr|code|zip|key|port|pid|lsn)$|^(id|year|yr)|year$|Id$|ID$/.test(String(name));
+
 // Basic sortable table. opts.onRowClick(row) optional; opts.render[col](value,row) optional.
+// Query results: opts.rowNumbers adds a "#" column (the row's place as shown); opts.formatNumbers shows numeric
+// columns with thousands separators (S2.cellNumber; the title keeps the raw value).
 // For a result that arrives in pages: the returned element has appendRows(rows) (adds rows at the end, or
 // re-sorts when sorted), and opts.beforeSort() (async, optional) runs before a sort, e.g. to load every row.
 S2.dataTable = function (columns, rows, opts = {}) {
@@ -737,6 +779,8 @@ S2.dataTable = function (columns, rows, opts = {}) {
   let sortCol = null;
   let sortDir = 1;
   const tbody = S2.h("tbody");
+  const grouped = Object.fromEntries(columns.map((c) => [c, !S2.plainNumberColumn(c)]));
+  const show = (col, v) => (opts.formatNumbers && numeric[col] && v != null && v !== "" ? S2.cellNumber(v, grouped[col]) : S2.cellText(v));
   const headCells = columns.map((col) =>
     S2.h("th", {
       class: `sortable${numeric[col] ? " num" : ""}`, title: col,
@@ -753,14 +797,14 @@ S2.dataTable = function (columns, rows, opts = {}) {
     if (numeric[sortCol]) return (Number(x) - Number(y)) * sortDir;
     return String(x).localeCompare(String(y), undefined, { numeric: true }) * sortDir;
   };
-  const tr = (row) => S2.h("tr", {
+  const tr = (row, i) => S2.h("tr", {
     style: opts.onRowClick ? { cursor: "pointer" } : null,
     onclick: opts.onRowClick ? () => opts.onRowClick(row) : null,
-  }, columns.map((col) => {
+  }, opts.rowNumbers ? S2.h("td", { class: "num s2-rn", "aria-hidden": "true" }, String(i + 1)) : null, columns.map((col) => {
     const v = row[col];
     const custom = opts.render?.[col];
     return S2.h("td", { class: `${numeric[col] ? "num" : ""}${v == null ? " null" : ""}`, title: S2.cellText(v) },
-      custom ? custom(v, row) : S2.cellText(v));
+      custom ? custom(v, row) : show(col, v));
   }));
   function draw() {
     const sorted = sortCol ? [...rows].sort(compare) : rows;
@@ -770,16 +814,19 @@ S2.dataTable = function (columns, rows, opts = {}) {
     tbody.replaceChildren(...sorted.map(tr));
   }
   draw();
+  const rnHead = opts.rowNumbers ? S2.h("th", { class: "num s2-rn", title: "Row number" }, "#") : null;
   // opts.data: the rows are query results (presenter mode replaces only cells that are exactly a known value).
   const wrap = S2.h("div", { class: "s2-table-wrap", style: { maxHeight: opts.maxHeight ?? "420px" }, "data-s2-data": opts.data ? "" : null },
-    S2.h("table", { class: "s2-table" }, S2.h("thead", {}, S2.h("tr", {}, headCells)), tbody));
+    S2.h("table", { class: "s2-table" }, S2.h("thead", {}, S2.h("tr", {}, rnHead, headCells)), tbody));
   wrap.appendRows = (more) => {
     if (!more?.length) return;
+    const start = rows.length;
     rows.push(...more);
     if (sortCol) draw();
-    else tbody.append(...more.map(tr));
+    else tbody.append(...more.map((row, i) => tr(row, start + i)));
   };
   wrap.rowCount = () => rows.length;
+  if (opts.formatNumbers) S2.rawCopy(wrap);
   return wrap;
 };
 

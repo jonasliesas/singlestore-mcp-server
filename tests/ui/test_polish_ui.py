@@ -67,3 +67,55 @@ def test_workload_empty_state(ui, app_url, cluster: McpSession) -> None:
     # Nothing was saved.
     assert not cluster.ok("workload_list").get("workloads")
     assert not banners(page), banners(page)
+
+
+# ----------------------------------------------------------------------------- V-5 numbers in result grids
+
+_COPY_ROW = """(sel) => {
+  const row = document.querySelector(sel);
+  const r = document.createRange(); r.selectNodeContents(row);
+  const s = document.getSelection(); s.removeAllRanges(); s.addRange(r);
+  const dt = new DataTransfer();
+  row.dispatchEvent(new ClipboardEvent('copy', { clipboardData: dt, bubbles: true, cancelable: true }));
+  s.removeAllRanges();
+  return dt.getData('text/plain');
+}"""
+
+
+def test_sql_result_numbers_and_row_numbers(ui, app_url) -> None:
+    """Numeric columns show thousands separators (not for year / id columns, every digit kept), right-aligned, with
+    a # column; the title and a copied selection keep the raw values."""
+    page, errors = ui
+    sql = _sql_tab(page, app_url)
+    _set_sql(sql, "SELECT 1234567 AS n, 2024 AS sale_year, CAST('12345678901234567890.25' AS DECIMAL(30,2)) AS big, 'abc' AS t"
+                  " UNION ALL SELECT 5, 1999, 1, 'd'")
+    assert wait_js(sql, "document.querySelectorAll('.sq-out tbody tr').length === 2", 40), text(sql)[-600:]
+    grp = sql.evaluate("new Intl.NumberFormat().formatToParts(12345.6).find((p) => p.type === 'group').value")
+    dec = sql.evaluate("new Intl.NumberFormat().formatToParts(12345.6).find((p) => p.type === 'decimal').value")
+    head = sql.evaluate("[...document.querySelectorAll('.sq-out thead th')].map((t) => t.firstChild.textContent)")
+    assert head == ["#", "n", "sale_year", "big", "t"], head
+    cells = sql.evaluate("[...document.querySelectorAll('.sq-out tbody tr:first-child td')].map((t) => [t.textContent, t.title, t.className])")
+    assert cells[0][0] == "1" and "s2-rn" in cells[0][2]
+    assert cells[1][0] == f"1{grp}234{grp}567" and cells[1][1] == "1234567" and "num" in cells[1][2]
+    assert cells[2][0] == "2024"
+    assert cells[3][0] == f"12{grp}345{grp}678{grp}901{grp}234{grp}567{grp}890{dec}25", cells[3]
+    assert sql.evaluate("getComputedStyle(document.querySelector('.sq-out tbody td.num')).textAlign") == "right"
+    copied = sql.evaluate(_COPY_ROW, ".sq-out tbody tr:first-child")
+    assert copied == "1234567\t2024\t12345678901234567890.25\tabc", copied
+    # Sorting renumbers the rows as shown.
+    sql.locator(".sq-out thead th", has_text="n").first.click()
+    assert wait_js(sql, "document.querySelector('.sq-out tbody tr:first-child td:nth-child(2)')?.textContent === '5'", 10)
+    assert sql.evaluate("document.querySelector('.sq-out tbody tr:first-child td').textContent") == "1"
+    assert not banners(page), banners(page)
+
+
+def test_query_grid_numbers(ui, app_url) -> None:
+    """The Query Grid formats numbers the same way and copies raw values."""
+    page, errors = ui
+    page.goto(app_url("query_grid", {"sql": "SELECT 1234567 AS n, 2024 AS model_year", "database": DB}), wait_until="domcontentloaded")
+    qg = app_frame(page, 30)
+    assert wait_js(qg, "document.querySelector('.qg-grid tbody td.num')", 30), text(qg)[:400]
+    grp = qg.evaluate("new Intl.NumberFormat().formatToParts(12345.6).find((p) => p.type === 'group').value")
+    cells = qg.evaluate("[...document.querySelectorAll('.qg-grid tbody tr:first-child td')].map((t) => t.textContent)")
+    assert cells == ["1", f"1{grp}234{grp}567", "2024"], cells
+    assert qg.evaluate(_COPY_ROW, ".qg-grid tbody tr:first-child") == "1234567\t2024"

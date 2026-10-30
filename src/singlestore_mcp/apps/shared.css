@@ -118,6 +118,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .s2-table tbody tr:last-child td { border-bottom: none; }
 .s2-table td.num, .s2-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .s2-table td.null { color: var(--s2-text-3); font-style: italic; }
+/* The "#" row-number column of a query result (S2.dataTable rowNumbers): faint, not copied with a selection. */
+.s2-table th.s2-rn, .s2-table td.s2-rn { color: var(--s2-text-3); width: 1%; padding-right: 8px; user-select: none; }
 
 .s2-muted { color: var(--s2-text-2); }
 .s2-faint { color: var(--s2-text-3); }

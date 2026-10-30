@@ -1853,7 +1853,7 @@ function renderResults() {
   // Settings stay per column set, so re-running the same query keeps the chart as it was.
   else if (chartable && state.resultAs === "chart") body = S2Charts.view(r.columns, r.rows, { settings: state.chartSettings, onChange: (cs) => { state.chartSettings = cs; } });
   else {
-    const el = S2.dataTable(r.columns, r.rows, { maxHeight: "none", data: true,
+    const el = S2.dataTable(r.columns, r.rows, { maxHeight: "none", data: true, rowNumbers: true, formatNumbers: true,
       beforeSort: isStream(r) ? async () => { try { await loadAllRows(r); } catch (e) { S2.toast(`Sorting only the loaded rows: ${cleanError(e).message}`, "err"); } } : null });
     grid = { r, el };
     body = el;
@@ -1964,7 +1964,7 @@ function renderSasResult(r) {
   if (r.error) { outEl.replaceChildren(S2.errorBox(new Error(r.error)), h("div", { class: "sq-placeholder" }, "The Log tab has the SAS log and the code that ran.")); return; }
   if (r.has_result_set) {
     if (!r.rows.length) { outEl.replaceChildren(h("div", { class: "sq-placeholder" }, "The query returned no rows.")); return; }
-    const el = S2.dataTable(r.columns, r.rows, { maxHeight: "none", data: true,
+    const el = S2.dataTable(r.columns, r.rows, { maxHeight: "none", data: true, rowNumbers: true, formatNumbers: true,
       beforeSort: sasMore(r) ? async () => { try { await loadAllRows(r); } catch (e) { S2.toast(`Sorting only the loaded rows: ${cleanError(e).message}`, "err"); } } : null });
     grid = { r, el };
     outEl.replaceChildren(el);

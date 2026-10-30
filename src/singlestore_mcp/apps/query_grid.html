@@ -287,10 +287,10 @@ function renderGrid() {
     onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleSort(col); } },
   }, col, h("span", { class: "s2-sort" })));
   tbody = h("tbody");
-  return h("div", { class: "s2-table-wrap qg-grid", "data-s2-data": "" },
+  return S2.rawCopy(h("div", { class: "s2-table-wrap qg-grid", "data-s2-data": "" },
     h("table", { class: "s2-table" },
       h("thead", {}, h("tr", {}, h("th", { class: "qg-rn" }, "#"), headCells)),
-      tbody));
+      tbody)));
 }
 
 function toggleSort(col) {
@@ -330,10 +330,12 @@ function drawBody() {
       const v = row[c];
       const td = document.createElement("td");
       const text = S2.cellText(v);
-      td.textContent = text;
+      // Numbers with thousands separators (V-5); the title, copy and Export CSV keep the raw value.
+      const shown = numeric[c] && v != null && v !== "" ? S2.cellNumber(v, !S2.plainNumberColumn(c)) : text;
+      td.textContent = shown;
       if (v == null) td.className = numeric[c] ? "num null" : "null";
       else if (numeric[c]) td.className = "num";
-      if (text.length > 24 || text.includes("\n")) td.title = text;
+      if (text.length > 24 || text.includes("\n") || shown !== text) td.title = text;
       tr.append(td);
     }
     frag.append(tr);
