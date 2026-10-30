@@ -228,9 +228,26 @@ in step 1, "Ask Claude" off by default (switchable later with an Anthropic / Fou
   tests with a fake SAS Logon (`test_hub.py`, `test_hub_e2e.py`, `test_server_mode.py`).
 - **Next in step 1:** Jonas signs in against Zeus locally (`scripts/studio-hub-local.ps1`) and with a colleague; the
   Viya admin registers the client (ADMIN-GUIDE §2); image build + deploy by the K8s admin; measure memory per user.
-- **Step 2:** notebooks (one pod / OS user per Studio, egress limits, PyPI mirror), Ask Claude via an org key with
-  per-user limits, shared metrics sampler instead of one per Studio, more than one hub replica (sessions out of memory),
-  SingleStore per-user JWT logins.
+- **Step 2 – notebooks** (decided by Jonas 2026-10-30: show the full version from the start, harden later). No pod
+  per user: Studio stays in the shared pod (it only runs our code); the **kernels** run behind a **Jupyter Enterprise
+  Gateway**, and `notebook_kernel.py` gets a "remote" mode (HTTP/WebSocket, one access key per kernel, so a Studio only
+  reaches its own kernels).
+  - **2a – one shared kernel pod:** the gateway starts kernels as processes in its own pod. Tokens come from a hub
+    relay that knows each kernel's user (never in the kernel's environment); per-kernel memory cap (`RLIMIT_AS`), low
+    CPU priority, max kernels per user and in total; one image environment + a per-user `pip install --target` folder
+    via a PyPI mirror; egress only to SingleStore, Viya / SAS Logon, the relay and the mirror. Notebooks only for a
+    named group of colleagues. **No isolation between users' kernels** (same OS user and pod: one kernel can read
+    another's files / key and act as that user; one runaway kernel can take the pod down) – say so in the docs and on
+    the admin page.
+  - **2b – one pod per kernel when needed** (customers / partners, audit that must prove who did what): switch the
+    gateway to its Kubernetes process proxy (a deployment change, Studio unchanged) + NetworkPolicy, read-only root and
+    limits on the kernel pods; the hub then needs a Role to manage pods in its namespace.
+  - Option to check: "Python in SAS" cells via `PROC PYTHON` in the user's own Compute session, if Zeus has Python
+    configured (isolated by Viya, nothing from the K8s admins).
+  - Questions for Jonas: which colleagues get notebooks, is there a PyPI mirror at SAS (Artifactory?), size of the
+    shared volume.
+- **Step 2 – the rest:** Ask Claude via an org key held by the hub (relay, per-user limits), shared metrics sampler
+  instead of one per Studio, more than one hub replica (sessions out of memory), SingleStore per-user JWT logins.
 
 ## Known small issues
 - Network breaks: a query whose connection goes silent *without* a route change or sleep (e.g. a firewall that drops
