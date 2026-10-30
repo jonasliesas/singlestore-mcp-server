@@ -181,3 +181,26 @@ def test_sas_client_secret_only_for_its_client() -> None:
         assert server_mode.sas_client_secret("vscode") is None
     finally:
         server_mode.set_sas_client(None, None)
+
+
+def test_tls_files_must_be_the_users_own(server: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """On the server every Studio runs as the same OS user: a connection's CA / client certificate path may only
+    point into the user's own folders (not another user's, nor the hub's key file)."""
+    from singlestore_mcp import connections
+
+    other = tmp_path / "other-user" / "state"
+    other.mkdir(parents=True)
+    (other / "ca.pem").write_text("not a cert", encoding="utf-8")
+    mine = server["files"] / "ca.pem"
+    mine.write_text("not a cert", encoding="utf-8")
+    bundle = server["state"] / "singlestore_bundle.pem"  # where the Helios CA download goes
+    bundle.write_text("not a cert", encoding="utf-8")
+    assert connections._tls_fields({"ssl_ca": str(mine)})["ssl_ca"] == str(mine)
+    assert connections._tls_fields({"ssl_ca": str(bundle)})["ssl_ca"] == str(bundle)
+    with pytest.raises(ValueError, match="own Studio folder"):
+        connections._tls_fields({"ssl_ca": str(other / "ca.pem")})
+    with pytest.raises(ValueError, match="own Studio folder"):
+        connections._tls_fields({"ssl_ca": str(server["files"] / ".." / "other-user" / "state" / "ca.pem")})
+    # Normal (laptop) mode is unchanged: any existing file.
+    monkeypatch.delenv("SINGLESTORE_MCP_SERVER_MODE")
+    assert connections._tls_fields({"ssl_ca": str(other / "ca.pem")})["ssl_ca"] == str(other / "ca.pem")

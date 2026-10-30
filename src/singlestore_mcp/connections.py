@@ -357,6 +357,12 @@ def _entra_fields(profile: dict[str, Any]) -> dict[str, Any]:
     return {"entra_tenant": tenant, "entra_client_id": client, "entra_scope": scope}
 
 
+def _own_file(path: Path) -> bool:
+    """Server mode: inside the user's own folders (HOME = My files, the state folder with the Helios CA bundle)."""
+    real = path.resolve()
+    return any(real.is_relative_to(root.resolve()) for root in (Path.home(), data_dir()))
+
+
 def _tls_fields(profile: dict[str, Any]) -> dict[str, Any]:
     """ssl_ca / ssl_cert / ssl_key paths (must exist) and ssl_verify from a form."""
     out: dict[str, Any] = {"ssl_verify": profile.get("ssl_verify") is not False}
@@ -364,6 +370,9 @@ def _tls_fields(profile: dict[str, Any]) -> dict[str, Any]:
         value = str(profile.get(key) or "").strip().strip('"') or None
         if value and not Path(value).expanduser().is_file():
             raise ValueError(f"{label} file not found: {value}")
+        if value and server_mode.enabled() and not _own_file(Path(value).expanduser()):
+            # On the shared server the process can read every user's folder: only the user's own files count.
+            raise ValueError(f"{label}: use a file in your own Studio folder (My files), not {value}.")
         out[key] = str(Path(value).expanduser()) if value else None
     if bool(out["ssl_cert"]) != bool(out["ssl_key"]):
         raise ValueError("A client certificate needs its key file too (and the other way round).")
