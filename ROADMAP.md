@@ -274,8 +274,28 @@ in step 1, "Ask Claude" off by default (switchable later with an Anthropic / Fou
   fallback –, one Studio process per user with the user's Viya token pre-loaded, proxy behind `/studio/`, cookies +
   CSRF, idle stop, max users, admin page, audit log, `/healthz`); `deploy/Dockerfile`; `deploy/k8s/` manifests;
   tests with a fake SAS Logon (`test_hub.py`, `test_hub_e2e.py`, `test_server_mode.py`).
-- **Next in step 1:** Jonas signs in against Zeus locally (`scripts/studio-hub-local.ps1`, from 2026-11-02) and with a
-  colleague; measure memory per user. **Deploy on Zeus the week of 2026-11-09** with Zeus's admin (away the week of
+- **Hardening (built 2026-10-30, branch `claude/hub-hardening`):** security review of hub + server mode, fixed with a
+  test each: request smuggling (Transfer-Encoding / double Content-Length refused, GET bodies read), cross-site links
+  can't pick the tool/args a Studio page runs on opening (Fetch Metadata), hub-only Studio routes (`hub/seed`) not
+  proxied, sign-in rate limit per address (`STUDIO_LOGIN_RATE`), last `X-Forwarded-For` hop, `__Host-` sign-in
+  cookie, 120 s client read timeout, TLS file paths of a connection only from the user's own folder. Robustness: a
+  crashed or hung Studio (health ping every 30 s, call timeout `STUDIO_PROXY_TIMEOUT` + failed ping) is restarted at
+  once and the page says "Your Studio is restarting" / reconnects; crash loop guard (3 in 5 min); idle stop waits for
+  calls in flight; a crashed Studio doesn't hold a `max_users` place, admins may start one more; shutdown stops all
+  Studios at once (≤10 s). Memory measured (hub ~36 MB flat, ~145 MB per Studio, ~210 MB per notebook kernel; K8s
+  request 3Gi); admin page memory includes the process tree. `studio-hub-local.ps1` checks prerequisites (venv, also
+  from a worktree; port free; Viya URL) and prints a checklist (URL, sign-in flow, logs, access, notebooks).
+- **Access by SAS groups (built):** `STUDIO_USERS_GROUP=SpeedyStoreStudioUsers`, `STUDIO_NOTEBOOK_GROUP=
+  SpeedyStoreStudioNotebooks` (Jonas creates them on Zeus on 2026-11-02). Checked at sign-in with the user's own token (`/identities/users/@currentUser/memberships`),
+  re-checked by each Studio at every Viya token renewal (removal signs out within the token lifetime); identities
+  down = new sign-ins refused, running sessions kept. Admin page shows access and which group gave it.
+- **Notebooks `STUDIO_NOTEBOOKS=local` (built, test version):** kernels in the notebook user's own Studio process
+  (shared read-only notebook environment, own folder, own tokens via the Studio's kernel token service), for the
+  notebook group only. **No isolation between users' kernels: a few trusted users only** (Jonas + one colleague).
+- **Next in step 1:** Jonas signs in against Zeus locally (`scripts/studio-hub-local.ps1 -Notebooks`, from 2026-11-02)
+  and with a colleague; check on Zeus whether `/memberships` includes nested groups (until then members are added
+  directly); first image build (no Docker here yet: check the notebook environment and `tini`); re-measure memory on
+  Linux. **Deploy on Zeus the week of 2026-11-09** with Zeus's admin (away the week of
   11-02; he controls everything there: OAuth client, groups, Kubernetes, registry) – ADMIN-GUIDE as his checklist.
 - **Step 2 – notebooks** (decided by Jonas 2026-10-30: show the full version from the start, harden later). No pod
   per user: Studio stays in the shared pod (it only runs our code); the **kernels** run behind a **Jupyter Enterprise
@@ -309,7 +329,10 @@ in step 1, "Ask Claude" off by default (switchable later with an Anthropic / Fou
   - Question for Zeus's admin (deploy week): is there a PyPI mirror at SAS (Artifactory?) – until then `pypi`.
 - **Step 2 – the rest:** Ask Claude stays **off** in the server version (decided 2026-10-30; later via an org key held by
   the hub – Foundry on SAS Azure or the Anthropic API – with a relay and per-user limits), shared metrics sampler
-  instead of one per Studio, more than one hub replica (sessions out of memory), SingleStore per-user JWT logins.
+  instead of one per Studio, more than one hub replica (sessions out of memory), SingleStore per-user JWT logins, a separate origin for
+  Studio pages (today they share the hub's origin: an XSS in a Studio app could act as that user on the hub), streaming
+  large Studio responses instead of buffering them in the hub. 2a plugs in behind `notebook_kernel`'s server seam
+  (`_shared_environment`, `_server_kernel_env`, `_kernel_cwd`, `kernel_tokens`).
 
 ## Known small issues
 - Network breaks: a query whose connection goes silent *without* a route change or sleep (e.g. a firewall that drops
