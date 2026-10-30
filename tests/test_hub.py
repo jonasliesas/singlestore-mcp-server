@@ -666,3 +666,24 @@ def test_rate_limiter_window() -> None:
     assert rl.retry_after("a", now=2) >= 8
     assert rl.allow("b", now=2)  # per address
     assert rl.allow("a", now=10.5)  # the first hit left the window
+
+
+def test_memory_of_a_studio_counts_its_child_processes() -> None:
+    """On Windows a venv's python.exe is a launcher; the Studio's memory is in its child (admin page, sizing)."""
+    import subprocess
+    import sys
+
+    from singlestore_mcp.hub import spawner as sp
+
+    assert sp.rss_bytes(None) is None and sp.rss_bytes(os.getpid()) > 1_000_000
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"])
+    try:
+        deadline = time.time() + 10
+        while sp.rss_bytes(child.pid) is None and time.time() < deadline:
+            time.sleep(0.1)
+        assert sp.rss_bytes(os.getpid()) >= sp._rss_one(os.getpid())
+        if sys.platform == "win32":
+            assert child.pid in sp._win_children(os.getpid())
+    finally:
+        child.kill()
+        child.wait()

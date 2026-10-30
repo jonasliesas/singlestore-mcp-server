@@ -92,10 +92,8 @@ class Studio:
         return f"/{self.token}/{rest}"
 
 
-def rss_bytes(pid: int | None) -> int | None:
-    """Resident memory of a process (Linux /proc, Windows psapi), or None."""
-    if not pid:
-        return None
+def _rss_one(pid: int) -> int | None:
+    """Resident memory of one process (Linux /proc, Windows psapi working set), or None."""
     try:
         if sys.platform.startswith("linux"):
             for line in Path(f"/proc/{pid}/status").read_text().splitlines():
@@ -115,6 +113,7 @@ def rss_bytes(pid: int | None) -> int | None:
 
             kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
             psapi = ctypes.WinDLL("psapi", use_last_error=True)
+            kernel32.OpenProcess.restype = wintypes.HANDLE
             handle = kernel32.OpenProcess(0x1000 | 0x0010, False, pid)  # QUERY_LIMITED_INFORMATION | VM_READ
             if not handle:
                 return None
@@ -128,6 +127,51 @@ def rss_bytes(pid: int | None) -> int | None:
     except (OSError, ValueError, AttributeError):
         return None
     return None
+
+
+def _win_children(pid: int) -> list[int]:
+    """Direct child processes (Windows Toolhelp snapshot): a venv's python.exe is a launcher that runs the real
+    interpreter as its child, so a Studio's memory is mostly in the child."""
+    import ctypes
+    from ctypes import wintypes
+
+    class PE(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_void_p), ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", ctypes.c_wchar * 260)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    snap = kernel32.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+    if not snap or snap == wintypes.HANDLE(-1).value:
+        return []
+    out: list[int] = []
+    try:
+        entry = PE()
+        entry.dwSize = ctypes.sizeof(PE)
+        ok = kernel32.Process32FirstW(snap, ctypes.byref(entry))
+        while ok:
+            if entry.th32ParentProcessID == pid and entry.th32ProcessID != pid:
+                out.append(int(entry.th32ProcessID))
+            ok = kernel32.Process32NextW(snap, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snap)
+    return out
+
+
+def rss_bytes(pid: int | None) -> int | None:
+    """Resident memory of a process and (Windows) its direct children, or None."""
+    if not pid:
+        return None
+    total = _rss_one(pid)
+    if total is None or sys.platform != "win32":
+        return total
+    try:
+        kids = _win_children(pid)
+    except (OSError, ValueError, AttributeError):
+        kids = []
+    return total + sum(_rss_one(k) or 0 for k in kids)
 
 
 class Spawner:
@@ -381,8 +425,7 @@ class Spawner:
             self._studios.pop(st.user, None)
             st.stopping = True
             self._crashes.setdefault(st.user, deque()).append(time.time())
-        if st.alive():
-            self._kill(st, grace=1.0)  # hung: it won't react to its stdin closing in time anyway
+        self._kill(st, grace=1.0)  # closes its stdin even when it's gone; a hung one is killed after 1 s
         self.audit.record("studio_stop", user=st.user, reason=reason, exit=st.proc.returncode if st.proc else None,
                           minutes=round((time.time() - st.started) / 60, 1))
         return True
