@@ -11,13 +11,15 @@ result tables are paged. Like the SingleStore runs, statements that write anywhe
 
 from __future__ import annotations
 
+import contextlib
 import re
 import time
+from collections.abc import Iterator
 from typing import Any
 
 from mcp.types import CallToolResult, ToolAnnotations
 
-from .. import result_stream, sas_rest, sas_runs, sas_sql, sas_viya
+from .. import cas_loads, result_stream, sas_rest, sas_runs, sas_sql, sas_viya
 from .. import sas_prewarm as prewarm_mod
 from .. import sql_editor_state as editor_state
 from ..sas_sql import SasError
@@ -181,11 +183,13 @@ def sas_columns(library: str, table: str, connection: str | None = None) -> Call
 def cas_caslibs(connection: str | None = None) -> CallToolResult:
     """Caslibs on the CAS server: type, description, path and, for SingleStore caslibs, the database."""
     started = time.perf_counter()
-    res = _sessions(connection)[1].action("table.caslibInfo", {"verbose": True})
+    cas = _sessions(connection)[1]
+    res = cas.action("table.caslibInfo", {"verbose": True})
     _, rows = sas_rest.cas_table(sas_rest.first_table(res["results"], "CASLibInfo"))
     libs = caslib_rows(rows)
     s = sas_viya.settings(connection)
     return tool_result(f"{len(libs)} caslib(s)", {"caslibs": libs, "server": s["cas_server"], "connection": s["name"],
+                                                 "session_loads": cas_loads.state(s["name"] or "", cas.sid),
                                                  "ms": round((time.perf_counter() - started) * 1000)})
 
 
@@ -274,7 +278,212 @@ def cas_tables(caslib: str, database: str | None = None, connection: str | None 
     problem = None
     if str(files_res["severity"]).lower() == "error" and str(loaded_res["severity"]).lower() == "error":
         problem = files_res["status"] or loaded_res["status"] or "CAS couldn't list this caslib"
-    return tool_result(f"{len(out)} table(s) in {lib}", {"caslib": lib, "tables": out, "problem": problem})
+    loads = cas_loads.state(_conn_name(connection) or "", cas.sid)
+    mine = {x["table"].upper(): x for x in loads["loaded"] if x["caslib"].upper() == lib.upper()}
+    for t in out:
+        if t["loaded"] and not t["global"]:
+            t["session"] = True              # a session table: this session's (Unload drops it)
+            hit = mine.get(t["name"].upper())
+            if hit:
+                t.update(by_workspace=True, live=hit["live"], memory=hit["memory"])
+    return tool_result(f"{len(out)} table(s) in {lib}", {"caslib": lib, "tables": out, "problem": problem,
+                                                        "session_loads": loads})
+
+
+# ------------------------------------------------------------------ CAS: "Load into this session" (cas_loads)
+
+
+def _cas_errors(res: dict[str, Any]) -> str:
+    errs = [x for x in str(res.get("log") or "").splitlines() if x.startswith("ERROR")]
+    return sas_sql.mask_secrets(" ".join(errs[:3]) or str(res.get("status") or "CAS reported an error"))[:600]
+
+
+def _cas_kind(cas: sas_rest.Cas, lib: str) -> dict[str, Any]:
+    res = cas.action("table.caslibInfo", {"caslib": lib, "verbose": True}, check=False)
+    if str(res["severity"]).lower() == "error":
+        raise LookupError(f"No caslib {lib}: {_cas_errors(res)}")
+    _, rows = sas_rest.cas_table(sas_rest.first_table(res["results"], "CASLibInfo"))
+    meta = next((x for x in caslib_rows(rows) if x["name"].upper() == lib.upper()), None)
+    if meta is None:
+        raise LookupError(f"No caslib {lib} on the CAS server.")
+    return meta
+
+
+def _session_table(cas: sas_rest.Cas, lib: str, name: str) -> dict[str, Any] | None:
+    """The table ``name`` as this CAS session sees it (tableInfo): {global, rows, columns}, or None."""
+    res = cas.action("table.tableInfo", {"caslib": lib, "name": name}, check=False)
+    if str(res["severity"]).lower() == "error":
+        return None
+    _, rows = sas_rest.cas_table(sas_rest.first_table(res["results"], "TableInfo"))
+    r = next((x for x in rows if str(x.get("Name") or "").upper() == name.upper()), None)
+    if r is None:
+        return None
+    return {"global": _flag(r.get("Global")), "rows": r.get("Rows"), "columns": r.get("Columns"),
+            "source": r.get("SourceName") or None}
+
+
+@contextlib.contextmanager
+def _cas_locked(cas: sas_rest.Cas) -> Iterator[None]:
+    """The CAS session to ourselves (a FedSQL run in a tab holds it): waits up to 20 s."""
+    if not cas.lock.acquire(timeout=20):
+        cur = getattr(cas, "current_run", None)
+        who = f" with the run in {cur.label}" if isinstance(cur, sas_runs.Run) else ""
+        raise SasError(f"The CAS session is busy{who}; try again when it has finished.")
+    try:
+        yield
+    finally:
+        cas.lock.release()
+
+
+def load_info(cas: sas_rest.Cas, lib: str, table: str) -> dict[str, Any]:
+    """What loading ``lib.table`` would do: the caslib's kind, live / copy, the source's size, whether it needs a
+    second confirmation, and whether the session already sees a table of that name (``loaded``)."""
+    meta = _cas_kind(cas, lib)
+    kind = meta.get("singlestore_kind")
+    mode = cas_loads.expected(kind)
+    res = cas.action("table.fileInfo", {"caslib": lib, "path": table}, check=False)
+    _, rows = sas_rest.cas_table(sas_rest.first_table(res["results"], "FileInfo"))
+    src = cas_loads.file_info(rows, table, meta.get("database"))
+    if src is None and str(res["severity"]).lower() != "error":
+        # some caslibs don't filter by path: list them all
+        res = cas.action("table.fileInfo", {"caslib": lib}, check=False)
+        _, rows = sas_rest.cas_table(sas_rest.first_table(res["results"], "FileInfo"))
+        src = cas_loads.file_info(rows, table, meta.get("database"))
+    name = cas_loads.table_name(src["name"] if src else table)
+    size = src.get("bytes") if src else None
+    return {"caslib": meta["name"], "table": name, "path": (src or {}).get("name") or table, "type": meta.get("type"),
+            "singlestore_kind": kind, "badge": meta.get("badge"), "mode": mode, "source": src, "bytes": size,
+            "size_text": cas_loads.fmt_bytes(size) if size is not None else None,
+            "confirm": cas_loads.needs_confirmation(mode, size), "confirm_limit": cas_loads.confirm_bytes(),
+            "where_applies": mode == "copy", "loaded": _session_table(cas, meta["name"], name),
+            "expect": ("Live: the table stays in SingleStore and CAS queries read it there (no copy in CAS memory); "
+                       "a WHERE on the load is ignored by SpeedyStore caslibs – put it in the query")
+            if mode == "live" else "Copied into CAS memory for this session (the caslib's data source isn't changed)"}
+
+
+def load_table(cas: sas_rest.Cas, lib: str, table: str, *, where: str | None = None, columns: Any = None,
+               confirmed: bool = False, conn: str | None = None) -> dict[str, Any]:
+    """``table.loadTable`` into this CAS session (session scope). Returns ``needs_confirmation`` for a big (or
+    unknown-size) copy unless ``confirmed``; afterwards where the table is (live / in CAS memory)."""
+    cols = cas_loads.parse_columns(columns)
+    with _cas_locked(cas):
+        info = load_info(cas, lib, table)
+        if info["confirm"] and not confirmed:
+            return {**info, "needs_confirmation": True, "reason": info["confirm"]}
+        cur = info["loaded"]
+        if cur and cur["global"]:
+            raise SasError(f"{info['caslib']}.{info['table']} is already loaded globally (promoted) on the CAS server: "
+                           "queries see it as it is; it isn't loaded again or replaced from here.")
+        w = where if info["mode"] == "copy" else None
+        params = cas_loads.load_params(info["caslib"], info["path"], name=info["table"], where=w, columns=cols,
+                                       replace=bool(cur))
+        started = time.perf_counter()
+        res = cas.action("table.loadTable", params, check=False)
+        if str(res["severity"]).lower() == "error":
+            raise SasError(f"CAS couldn't load {info['caslib']}.{info['table']}: {_cas_errors(res)}")
+        det = cas.action("table.tableDetails", {"caslib": info["caslib"], "name": info["table"]}, check=False)
+        _, drows = sas_rest.cas_table(sas_rest.first_table(det["results"], "TableDetails"))
+        d = cas_loads.details(drows)
+        now = _session_table(cas, info["caslib"], info["table"]) or {}
+        sid = cas.sid
+    entry = {"caslib": info["caslib"], "table": info["table"], "path": info["path"], "where": w or None,
+             "columns": cols, "sid": sid, "mode": info["mode"], "location": d["location"], "memory": d["memory"],
+             "live": d["live"], "rows": now.get("rows") if now.get("rows") is not None else d["rows"],
+             "column_count": now.get("columns"), "singlestore_kind": info["singlestore_kind"]}
+    cas_loads.remember(_conn_name(conn) or "", entry)
+    ignored = bool(where and where.strip() and not w)
+    return {**entry, "loaded": True, "replaced": bool(cur), "ms": round((time.perf_counter() - started) * 1000),
+            "message": cas_loads.describe(d), "where_ignored": ignored,
+            "log": sas_sql.mask_secrets(str(res.get("log") or ""))[:4000]}
+
+
+def unload_table(cas: sas_rest.Cas, lib: str, table: str, conn: str | None = None) -> dict[str, Any]:
+    """``table.dropTable`` of this session's table ``lib.table``; a global (promoted) table is never dropped."""
+    with _cas_locked(cas):
+        cur = _session_table(cas, lib, table)
+        if cur is None:
+            cas_loads.forget(_conn_name(conn) or "", lib, table)
+            return {"caslib": lib, "table": table, "dropped": False, "note": "It isn't loaded in this CAS session."}
+        if cur["global"]:
+            raise SasError(f"{lib}.{table} is a global (promoted) CAS table: it isn't this session's to unload. "
+                           "Nothing was dropped.")
+        res = cas.action("table.dropTable", cas_loads.drop_params(lib, table), check=False)
+        if str(res["severity"]).lower() == "error":
+            raise SasError(f"CAS couldn't unload {lib}.{table}: {_cas_errors(res)}")
+    cas_loads.forget(_conn_name(conn) or "", lib, table)
+    return {"caslib": lib, "table": table, "dropped": True,
+            "note": "Unloaded from this CAS session (the source table is unchanged)."}
+
+
+@apps.tool(resource_uri=SCHEMA_URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def cas_load_info(caslib: str, table: str, connection: str | None = None) -> CallToolResult:
+    """Before "Load into this session": the caslib's kind (SpeedyStore: stays live in SingleStore; others: copied
+    into CAS memory), the source table's size from table.fileInfo where CAS can tell, whether the load needs a
+    second confirmation (a copy above SINGLESTORE_MCP_CAS_LOAD_CONFIRM_MB, default 100 MB, or of unknown size) and
+    whether this session already has it. Nothing is loaded."""
+    lib, tbl = _check_name(caslib, "caslib"), _check_name(table, "table name")
+    cas = _sessions(connection)[1]
+    with _cas_locked(cas):
+        data = load_info(cas, lib, tbl)
+    size = f", {data['size_text']}" if data.get("size_text") else ", size unknown"
+    return tool_result(f"{data['caslib']}.{data['table']}: {data['mode']}{size}", data)
+
+
+@apps.tool(resource_uri=SCHEMA_URI, visibility=APP_ONLY, annotations=STATE)
+def cas_load_table(caslib: str, table: str, where: str | None = None, columns: list[str] | str | None = None,
+                   confirmed: bool = False, connection: str | None = None) -> CallToolResult:
+    """"Load into this session": table.loadTable of a caslib's source table into the Workspace's CAS session of the
+    SAS Viya connection - session scope only (never promoted, the caslib unchanged), so FedSQL in CAS can query
+    it. ``where`` / ``columns`` (optional) narrow a copy (SpeedyStore caslibs ignore ``where``). A big or
+    unknown-size copy answers ``needs_confirmation`` unless ``confirmed``. Answers where the table is now:
+    ``live`` (SpeedyStore: queries run in SingleStore) or copied into CAS memory (``memory`` bytes)."""
+    lib, tbl = _check_name(caslib, "caslib"), _check_name(table, "table name")
+    cas = _sessions(connection)[1]
+    data = load_table(cas, lib, tbl, where=where, columns=columns, confirmed=confirmed, conn=connection)
+    if data.get("needs_confirmation"):
+        return tool_result(f"{data['reason']}: confirm to load it.", data)
+    return tool_result(f"Loaded {data['caslib']}.{data['table']}: {data['message']}", data)
+
+
+@apps.tool(resource_uri=SCHEMA_URI, visibility=APP_ONLY, annotations=STATE)
+def cas_unload_table(caslib: str, table: str, connection: str | None = None) -> CallToolResult:
+    """Unload a table this CAS session loaded (table.dropTable of the session table; the source is unchanged). A
+    global (promoted) table is refused, never dropped."""
+    lib, tbl = _check_name(caslib, "caslib"), _check_name(table, "table name")
+    data = unload_table(_sessions(connection)[1], lib, tbl, conn=connection)
+    return tool_result(data["note"], data)
+
+
+@apps.tool(resource_uri=SCHEMA_URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def cas_session_loads(connection: str | None = None) -> CallToolResult:
+    """Tables "Load into this session" loaded: ``loaded`` (in the current CAS session) and ``lost`` (loaded before
+    the CAS session restarted - offer cas_reload_tables). Nothing is sent to CAS."""
+    cas = _sessions(connection)[1]
+    data = cas_loads.state(_conn_name(connection) or "", cas.sid)
+    return tool_result(f"{len(data['loaded'])} loaded, {len(data['lost'])} to reload", data)
+
+
+@apps.tool(resource_uri=SCHEMA_URI, visibility=APP_ONLY, annotations=STATE)
+def cas_reload_tables(connection: str | None = None, forget: bool = False) -> CallToolResult:
+    """Load the tables again that were loaded into the CAS session before it restarted (same where / columns;
+    they were confirmed then). ``forget``: don't reload, just stop offering it."""
+    cas = _sessions(connection)[1]
+    name = _conn_name(connection) or ""
+    lost = cas_loads.state(name, cas.sid)["lost"]
+    if forget:
+        cas_loads.clear(name, lost)
+        return tool_result(f"Forgot {len(lost)} table(s)", {"reloaded": [], "failed": [], "forgotten": len(lost)})
+    done, failed = [], []
+    for e in lost:
+        try:
+            r = load_table(cas, e["caslib"], e["path"] or e["table"], where=e.get("where"), columns=e.get("columns"),
+                           confirmed=True, conn=connection)
+            done.append({"caslib": r["caslib"], "table": r["table"], "message": r["message"]})
+        except (SasError, LookupError, ValueError) as exc:
+            failed.append({"caslib": e["caslib"], "table": e["table"], "error": str(exc)[:300]})
+            cas_loads.forget(name, e["caslib"], e["table"])
+    return tool_result(f"Reloaded {len(done)} table(s){f', {len(failed)} failed' if failed else ''}",
+                       {"reloaded": done, "failed": failed})
 
 
 @apps.tool(resource_uri=SCHEMA_URI, visibility=APP_ONLY, annotations=READ_ONLY)
@@ -435,7 +644,32 @@ def run_sas(language: str, sql: str, library: str | None, options: dict[str, Any
     data.update(language=language, plain_sas=plain, sql=sql, library=library, code=wrapped["code"], max_rows=max_rows,
                 table_rows=cap, connection=_conn_name(connection),
                 elapsed_ms=round((time.perf_counter() - started) * 1000, 1))
+    if wrapped.get("derived"):
+        data["derived"] = DERIVED_NOTE
+        if data.get("pushdown"):
+            data["pushdown"]["notes"] = [DERIVED_NOTE, *data["pushdown"].get("notes", [])]
     return data
+
+
+DERIVED_NOTE = ("The SELECT has a subquery: it ran as SELECT * FROM (…) AS _s2q, so FedSQL sends it to SingleStore as one "
+                "statement and writes the rows into WORK itself (pushed down whole with the CREATE TABLE, SingleStore "
+                "would answer \"Unknown database 'WORK'\").")
+
+
+@apps.tool(resource_uri=EDITOR_URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def sas_fedsql_check(sql: str) -> CallToolResult:
+    """Before a FedSQL run (nothing runs): does the SELECT have a subquery FedSQL would push down with the CREATE
+    TABLE (fails on SingleStore libraries), and can the editor run it as a derived table instead? ``warn``: it
+    can't (an ORDER BY on expressions) - ``message`` says why and how to rewrite it."""
+    sub = sas_sql.fedsql_subquery(sql)
+    if not sub:
+        return tool_result("no subquery", {"subquery": False, "rewrite": False, "warn": False})
+    if sub.get("limit") or sub["rewrite"]:
+        text = "runs as it is" if sub.get("limit") else "runs as a derived table"
+        return tool_result(f"subquery: {text}", {"subquery": True, "rewrite": bool(sub["rewrite"]), "warn": False,
+                                                  "derived": sub["rewrite"]})
+    msg = f"{sub['reason']}. {sas_sql.SUBQUERY_HINT}"
+    return tool_result(msg, {"subquery": True, "rewrite": False, "warn": True, "message": msg})
 
 
 def _stopped(run: sas_runs.Run | None) -> bool:
@@ -644,34 +878,9 @@ def _run_tool(language: str, sql: str, library: str | None, options: dict[str, A
                        tab_id=source.get("tab_id"), table_rows=table_rows)
         data["kind"] = kind
         return data
-    if wrapped.get("derived"):
-        data["derived"] = DERIVED_NOTE
-        if data.get("pushdown"):
-            data["pushdown"]["notes"] = [DERIVED_NOTE, *data["pushdown"].get("notes", [])]
 
     def finish(run: sas_runs.Run) -> None:
         if record:
-DERIVED_NOTE = ("The SELECT has a subquery: it ran as SELECT * FROM (…) AS _s2q, so FedSQL sends it to SingleStore as one "
-                "statement and writes the rows into WORK itself (pushed down whole with the CREATE TABLE, SingleStore "
-                "would answer \"Unknown database 'WORK'\").")
-
-
-@apps.tool(resource_uri=EDITOR_URI, visibility=APP_ONLY, annotations=READ_ONLY)
-def sas_fedsql_check(sql: str) -> CallToolResult:
-    """Before a FedSQL run (nothing runs): does the SELECT have a subquery FedSQL would push down with the CREATE
-    TABLE (fails on SingleStore libraries), and can the editor run it as a derived table instead? ``warn``: it
-    can't (an ORDER BY on expressions) - ``message`` says why and how to rewrite it."""
-    sub = sas_sql.fedsql_subquery(sql)
-    if not sub:
-        return tool_result("no subquery", {"subquery": False, "rewrite": False, "warn": False})
-    if sub.get("limit") or sub["rewrite"]:
-        text = "runs as it is" if sub.get("limit") else "runs as a derived table"
-        return tool_result(f"subquery: {text}", {"subquery": True, "rewrite": bool(sub["rewrite"]), "warn": False,
-                                                  "derived": sub["rewrite"]})
-    msg = f"{sub['reason']}. {sas_sql.SUBQUERY_HINT}"
-    return tool_result(msg, {"subquery": True, "rewrite": False, "warn": True, "message": msg})
-
-
             _record(sql, library, language, run.result, source, kind, ((run.ended or time.time()) - run.created) * 1000,
                     run.error, connection=getattr(run, "conn", None))
 

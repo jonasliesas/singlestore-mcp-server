@@ -11,6 +11,7 @@
 <!--S2:VENDOR:sas-complete.js-->
 <!--S2:VENDOR:sas-funcs.js-->
 <!--S2:VENDOR:s2-load-file.js-->
+<!--S2:VENDOR:s2-cas-load.js-->
 <style>
   body { padding: 10px 12px; }
   /* Full height: header and panels take what they need, the editor body the rest (a header that wraps never
@@ -367,7 +368,11 @@ async function loadSasLibraries(force = false, lang = state.language) {
   if (!cas) sasSession.busy(true); else sasSession.refresh();
   renderTree(); renderHeader();
   try {
-    if (cas) sas.caslibs = (await S2.callTool("cas_caslibs", withConn())).caslibs;
+    if (cas) {
+      const d = await S2.callTool("cas_caslibs", withConn());
+      sas.caslibs = d.caslibs;
+      sas.casLost = d.session_loads?.lost ?? [];
+    }
     else {
       const res = await S2.callTool("sas_libraries", withConn({ refresh: force }));
       sas.libs = res.libraries;
@@ -396,8 +401,16 @@ async function loadSasTables(lib, force = false, lang = state.language) {
     const data = lang === "cas" ? await S2.callTool("cas_tables", withConn({ caslib: lib, database: meta?.singlestore ? meta.database : null }))
       : await S2.callTool("sas_tables", withConn({ library: lib }));
     sas.tables.set(key, { status: "ok", data });
+    if (lang === "cas" && data.session_loads) sas.casLost = data.session_loads.lost ?? [];
   } catch (e) { sas.tables.set(key, { status: "error", error: cleanError(e) }); }
   renderTree(); refreshCompletion();
+}
+// "Load into this session" / "Unload" on a caslib table (vendor/s2-cas-load.js): table.loadTable into the tab's CAS
+// session (session scope only); then the caslib's tables are read again, so FedSQL in CAS sees it.
+function casLoaded(lib, table) {
+  const key = `cas|${lib}`;
+  loadSasTables(lib, true, "cas");
+  if (table) { sas.columns.delete(`${key}\u0000${table}`); sas.colCache.clear(); }
 }
 async function loadSasColumns(lib, table, lang = state.language) {
   const key = `${srcOf(lang)}|${lib}\u0000${table}`;
@@ -1105,6 +1118,11 @@ function renderSasTree() {
     h("button", { class: "s2-btn ghost act on", title: cas ? "Reload the caslibs" : "Reload the libraries (the SAS session keeps running)",
       onclick: (e) => { e.stopPropagation(); sas.tables.clear(); sas.columns.clear(); sas.colCache.clear(); loadSasLibraries(true, lang); } }, "↻"))];
   if (err) rows.push(h("div", { class: "sq-row" }, h("span", { class: "s2-error", style: { padding: "2px 6px", whiteSpace: "normal" } }, err.message)));
+  if (cas && sas.casLost?.length) rows.push(S2CasLoad.reloadBar(sas.casLost, () => {
+    sas.casLost = [];
+    for (const k of [...state.expanded]) if (k.startsWith("cas|") && !k.includes("\u0000")) loadSasTables(k.slice(4), true, "cas");
+    renderTree();
+  }, tabConn()));
   if (!list) {
     rows.push(h("div", { class: "sq-placeholder" }, loading ? [h("span", { class: "s2-spinner" }), cas ? " Starting CAS…" : " Starting the SAS session (the first time takes a while)…"] : ""));
     fillTree(rows);
@@ -1145,7 +1163,12 @@ function renderSasTree() {
         ondblclick: () => viaTree(lang, `insert ${l.name}.${tb.name}`, () => insert(`${libQual(l.name, lang)}.${sasIdent(tb.name, lang)}`)) },
         h("span", { class: `sq-caret${topen ? " open" : ""}` }, "▶"),
         h("span", { class: "name" }, tb.name),
-        cas ? h("span", { class: "meta", title: tb.loaded ? "Loaded in CAS memory" : "Source table, not loaded" }, tb.loaded ? "in-mem" : "") : null,
+        cas ? h("span", { class: "meta", title: tb.live ? "Loaded into this session: live, queries run in SingleStore" : tb.loaded ? "Loaded in CAS memory" : "Source table, not loaded" },
+          tb.live ? "live" : tb.loaded ? "in-mem" : "") : null,
+        cas && !tb.loaded ? h("button", { class: "s2-btn ghost act", title: "Load into this session: table.loadTable into the tab's CAS session (session scope only), so FedSQL in CAS can query it",
+          onclick: (e) => { e.stopPropagation(); S2CasLoad.open({ caslib: l.name, table: tb.source ?? tb.name, connection: tabConn(), onDone: () => casLoaded(l.name, tb.name) }); } }, "Load…") : null,
+        cas && tb.session ? h("button", { class: "s2-btn ghost act", title: "Unload: drop this session's CAS table (the source table is unchanged)",
+          onclick: (e) => { e.stopPropagation(); S2CasLoad.unload({ caslib: l.name, table: tb.name, connection: tabConn(), onDone: () => casLoaded(l.name, null) }); } }, "Unload") : null,
         h("button", { class: `s2-btn ghost act${picked.size ? " on" : ""}`, title: "Insert a SELECT listing the columns (ticked ones, if any), at the cursor",
           onclick: (e) => {
             e.stopPropagation();
@@ -1267,7 +1290,9 @@ function useStatement(sql) {
 // database (history's Run passes its own).
 async function run(sql = statementAtCursor(), database = state.database, lang = state.language) {
   if (!sql || state.running) return;
+  const hintOk = state.hintOk === sql;
   if (!checkHint(sql, lang, database)) return;
+  if (!hintOk && (await subqueryHint(sql, lang, database))) return;
   if (isSas(lang)) return runSas(sql, lang);
   state.running = true; state.error = null; state.confirm = null; state.batch = null;
   renderResults(); renderHeader();
@@ -1290,9 +1315,7 @@ async function run(sql = statementAtCursor(), database = state.database, lang = 
 
 // Stop: cancels the statement on the cluster (KILL QUERY on its own connection) or stops loading more rows.
 async function stopStream(id) {
-  const hintOk = state.hintOk === sql;
   if (!id) return;
-  if (!hintOk && (await subqueryHint(sql, lang, database))) return;
   try { await S2.callTool("sql_editor_stop", { stream_id: id }); }
   catch (e) { S2.toast(`Couldn't stop: ${cleanError(e).message}`, "err"); }
 }
@@ -1419,6 +1442,21 @@ function functionHint(sql, lang) {
   const message = SasFuncs.message(found, lang);
   return message ? { message, suggest: null, kind: "functions" } : null;
 }
+// FedSQL on a SingleStore library: a SELECT with a subquery is pushed down whole, CREATE TABLE included, and fails
+// ("Unknown database 'WORK'"). The server runs it as a derived table instead (sas_sql.fedsql_subquery); only when it
+// can't (an ORDER BY on expressions) the bar warns before the run, with the derived-table join rewrite.
+async function subqueryHint(sql, lang, database) {
+  if (lang !== "fedsql" || isPlainSas(sql)) return false;
+  const text = sql.replace(/'(?:[^']|'')*'/g, "''").replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
+  if (!/\(\s*select\b/i.test(text) || !readsSingleStore(sql, lang)) return false;
+  let res;
+  try { res = await S2.callTool("sas_fedsql_check", { sql }); } catch { return false; }
+  if (!res?.warn) return false;
+  state.hint = { message: res.message, suggest: null, kind: "subquery", sql, lang, database };
+  state.error = null; state.confirm = null;
+  renderResults();
+  return true;
+}
 function checkHint(sql, lang, database) {
   if (state.hintOk === sql) { state.hintOk = null; return true; }
   const hint = languageHint(sql, lang);
@@ -1442,21 +1480,6 @@ async function callSas(tool, args) {
   state.sasRun = { id, info: null, started: Date.now(), engine: engineNow(args.language) };
   renderRunStatus();
   // While the SAS session starts in the background, answer early so the status line says what the run waits for.
-// FedSQL on a SingleStore library: a SELECT with a subquery is pushed down whole, CREATE TABLE included, and fails
-// ("Unknown database 'WORK'"). The server runs it as a derived table instead (sas_sql.fedsql_subquery); only when it
-// can't (an ORDER BY on expressions) the bar warns before the run, with the derived-table join rewrite.
-async function subqueryHint(sql, lang, database) {
-  if (lang !== "fedsql" || isPlainSas(sql)) return false;
-  const text = sql.replace(/'(?:[^']|'')*'/g, "''").replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
-  if (!/\(\s*select\b/i.test(text) || !readsSingleStore(sql, lang)) return false;
-  let res;
-  try { res = await S2.callTool("sas_fedsql_check", { sql }); } catch { return false; }
-  if (!res?.warn) return false;
-  state.hint = { message: res.message, suggest: null, kind: "subquery", sql, lang, database };
-  state.error = null; state.confirm = null;
-  renderResults();
-  return true;
-}
   const warming = sasSession.status?.state === "starting";
   let data = await S2.callTool(tool, { ...args, run_id: id, wait_ms: warming ? 1000 : SAS_WAIT_MS });
   while (data.running) {

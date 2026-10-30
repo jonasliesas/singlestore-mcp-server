@@ -6,6 +6,7 @@
 <title>Schema Explorer</title>
 <!--S2:HEAD-->
 <!--S2:VENDOR:s2-load-file.js-->
+<!--S2:VENDOR:s2-cas-load.js-->
 <style>
   .se { display: grid; grid-template-columns: minmax(220px, 280px) minmax(0, 1fr); gap: 12px; height: 580px; }
   .se-pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
@@ -620,7 +621,11 @@ async function loadSasLibs(src = state.source, force = false) {
       sx.libs.sas9 = d.libraries;
       sx.libs.sas = null;  // the SAS libraries list has them too now
       if (d.failed?.length) S2.toast(`SAS 9: couldn't assign ${d.failed.join(", ")}`, "err");
-    } else sx.libs[src] = src === "cas" ? (await call("cas_caslibs", {})).caslibs : (await call("sas_libraries", { refresh: force })).libraries;
+    } else if (src === "cas") {
+      const d = await call("cas_caslibs", {});
+      sx.libs.cas = d.caslibs;
+      sx.casLost = d.session_loads?.lost ?? [];
+    } else sx.libs[src] = (await call("sas_libraries", { refresh: force })).libraries;
   } catch (e) { sx.error[src] = e; }
   sx.loading[src] = false;
   if (src === "sas") sasSession.busy(false); else sasSession.refresh();
@@ -638,8 +643,28 @@ async function loadSasTablesSE(src, lib, force = false) {
     const data = src === "cas" ? await call("cas_tables", { caslib: lib, database: meta?.singlestore ? meta.database : null })
       : await call("sas_tables", { library: lib });
     sx.tables.set(k, { status: "ok", data });
+    if (src === "cas" && data.session_loads) sx.casLost = data.session_loads.lost ?? [];
   } catch (e) { sx.tables.set(k, { status: "error", error: e }); }
   renderTree(); renderRight();
+}
+// "Load into this session" / "Unload" (vendor/s2-cas-load.js): table.loadTable into the Workspace's CAS session,
+// session scope only; afterwards the caslib's tables and the table's columns are read again.
+const casTableMeta = (lib, table) => (sx.tables.get(skey("cas", lib))?.data?.tables ?? []).find((t) => t.name === table) ?? null;
+function afterCasLoad(lib, table) {
+  loadSasTablesSE("cas", lib, true);
+  if (table) { loadSasColumnsSE("cas", lib, table, true); sx.previews.delete(skey("cas", lib, table)); }
+}
+function casLoadButtons(lib, table) {
+  const tb = casTableMeta(lib, table);
+  if (!tb) return [];
+  if (!tb.loaded) return [h("button", { class: "s2-btn", title: "table.loadTable into this Workspace's CAS session (session scope: not promoted, the caslib unchanged), so FedSQL in CAS can query it",
+    onclick: () => S2CasLoad.open({ caslib: lib, table: tb.source ?? tb.name, onDone: () => afterCasLoad(lib, table) }) }, "Load into this session…")];
+  const out = [h("span", { class: `s2-badge ${tb.live ? "ok" : "plain"}`, "data-cas-state": tb.global ? "global" : tb.live ? "live" : "memory",
+    title: tb.global ? "Loaded globally (promoted) on the CAS server" : tb.live ? "Live: queries run in SingleStore (no copy in CAS memory)" : "Loaded in CAS memory" },
+    tb.global ? "global" : tb.live ? "live in SingleStore" : tb.session ? "in CAS memory (this session)" : "in CAS memory")];
+  if (tb.session) out.push(h("button", { class: "s2-btn", title: "table.dropTable of this session's table (the source table is unchanged)",
+    onclick: () => S2CasLoad.unload({ caslib: lib, table: tb.name, onDone: () => afterCasLoad(lib, null) }) }, "Unload"));
+  return out;
 }
 async function loadSasColumnsSE(src, lib, table, force = false) {
   const k = skey(src, lib, table);
@@ -771,6 +796,7 @@ function renderSasTree() {
   const src = state.source;
   const q = state.filter.trim().toLowerCase();
   const items = [];
+  if (src === "cas" && sx.casLost?.length) items.push(S2CasLoad.reloadBar(sx.casLost, () => { sx.casLost = []; for (const k of [...sx.expanded]) if (k.startsWith("cas|")) loadSasTablesSE("cas", k.slice(4), true); renderTree(); }));
   if (sx.error[src]) items.push(h("div", { class: "se-sub" }, S2.errorBox(sx.error[src]), h("button", { class: "s2-btn", onclick: () => loadSasLibs(src, true) }, "Retry")));
   if (!sx.libs[src]) {
     if (sx.loading[src]) items.push(h("div", { class: "se-sub" }, h("span", { class: "s2-spinner" }), src === "cas" ? "Connecting to CAS…"
@@ -801,7 +827,7 @@ function renderSasTree() {
     else for (const tb of matching.slice(0, 3000)) {
       const isSelT = sx.sel[src]?.lib === l.name && sx.sel[src]?.table === tb.name;
       items.push(h("button", { class: `se-row tbl${isSelT ? " sel" : ""}`, onclick: () => selectSasTable(src, l.name, tb.name),
-        title: `${l.name}.${tb.name}${tb.label ? `\n${tb.label}` : ""}${src === "cas" ? (tb.loaded ? "\nLoaded in CAS memory" : "\nSource table (not loaded)") : ""}` },
+        title: `${l.name}.${tb.name}${tb.label ? `\n${tb.label}` : ""}${src === "cas" ? (tb.live ? "\nLoaded into this session: live, queries run in SingleStore" : tb.loaded ? "\nLoaded in CAS memory" : "\nSource table (not loaded): Load into this session… on the table") : ""}` },
         h("span", { class: `se-ico ${tb.type === "VIEW" ? "view" : src === "cas" && tb.loaded ? "col" : "row"}` }, tb.type === "VIEW" ? "V" : src === "cas" ? (tb.loaded ? "M" : "S") : "D"),
         h("span", { class: "se-name" }, highlight(tb.name, q)),
         h("span", { class: "se-count" }, tb.rows != null ? compact(tb.rows) : "")));
@@ -845,7 +871,7 @@ function renderSasRight() {
     if (t.status === "error") return [head, code, S2.errorBox(t.error)];
     if (t.data.problem) return [head, code, S2.errorBox(new Error(t.data.problem))];
     if (!t.data.tables.length) return [head, code, placeholder("No tables in this library")];
-    const rows = t.data.tables.map((x) => ({ Name: x.name, Kind: src === "cas" ? (x.loaded ? "in memory" : "source") : (x.type ?? "DATA").toLowerCase(),
+    const rows = t.data.tables.map((x) => ({ Name: x.name, Kind: src === "cas" ? (x.live ? "live (session)" : x.loaded ? (x.session ? "in memory (session)" : "in memory") : "source") : (x.type ?? "DATA").toLowerCase(),
       Rows: x.rows ?? null, Label: x.label ?? "" }));
     return [head, code, h("div", { class: "s2-small s2-faint", style: { marginBottom: "6px" } }, "Click a row to open the table."),
       S2.dataTable(["Name", "Kind", "Rows", "Label"], rows, { maxHeight: "440px", onRowClick: (r) => selectSasTable(src, sel.lib, r.Name),
@@ -858,6 +884,7 @@ function renderSasRight() {
     h("div", { class: "s2-toolbar" },
       h("button", { class: "s2-btn primary", title: "Open the first 100 rows in a SQL Editor tab running as SAS", onclick: () => queryInEditor(src, sel.lib, sel.table) },
         src === "cas" ? "Query in SQL Editor (CAS)" : "Query in SQL Editor (PROC SQL)"),
+      ...(src === "cas" ? casLoadButtons(sel.lib, sel.table) : []),
       s2link,
       h("button", { class: "s2-btn ghost", "aria-label": "Reload table", onclick: () => { loadSasColumnsSE(src, sel.lib, sel.table, true); if (state.sasTab === "preview") loadSasPreview(src, sel.lib, sel.table, true); } }, "↻")));
   const tabs = [["columns", `Columns${c?.status === "ok" ? ` (${c.data.columns.length})` : ""}`], ["preview", "Preview"]];
