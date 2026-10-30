@@ -2436,10 +2436,15 @@ environment in `~/.singlestore-mcp`.
 SAS SpeedyStore Studio can also run on a server for several colleagues, without Claude: a small hub signs users in
 with their SAS user on SAS Logon (Viya), starts one Studio per user with its own folder, and proxies it behind
 `https://<studio host>/studio/`. SAS work runs as the signed-in user (their Viya token is pre-loaded); each user adds
-their own SingleStore connection. Notebooks and Ask Claude are off in this first step.
+their own SingleStore connection. Ask Claude is off. Notebooks are for a SAS group of colleagues: either in the
+user's own Studio process (`STUDIO_NOTEBOOKS=local`, test version) or on a **kernel gateway** (`STUDIO_NOTEBOOKS=gateway`,
+step 2a: kernels in their own pod behind Jupyter Enterprise Gateway, reached only through the hub with a key per
+kernel, tokens from the hub's relay, memory / CPU / count limits, package installs into each user's own folder per
+`STUDIO_PIP_MODE`). Users' kernels aren't isolated from each other in either mode yet (one pod per kernel is step 2b).
 
 ```powershell
 .\scripts\studio-hub-local.ps1          # try it on this PC: http://127.0.0.1:8800/
+.\scripts\studio-hub-local.ps1 -Gateway -GatewayVenv <Enterprise Gateway venv>   # with gateway notebooks
 ```
 
 Container image, Kubernetes manifests and every setting: [deploy/README.md](deploy/README.md); what the Viya and

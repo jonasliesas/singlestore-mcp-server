@@ -331,7 +331,21 @@ in step 1, "Ask Claude" off by default (switchable later with an Anthropic / Fou
   per user: Studio stays in the shared pod (it only runs our code); the **kernels** run behind a **Jupyter Enterprise
   Gateway**, and `notebook_kernel.py` gets a "remote" mode (HTTP/WebSocket, one access key per kernel, so a Studio only
   reaches its own kernels).
-  - **2a – one shared kernel pod:** the gateway starts kernels as processes in its own pod. Tokens come from a hub
+  - **2a – built 2026-10-31 (branch `claude/kernel-gateway`), `STUDIO_NOTEBOOKS=gateway`:** `notebook_gateway.py`
+    (Studio side: `GatewayKernel` with the bridge's events over the Jupyter WebSocket protocol, stdlib WebSocket client,
+    prelude with non-secret settings + relay token commands, installs / package list in a short-lived kernel),
+    `hub/gateway.py` (kernel broker on 127.0.0.1 with a key per Studio and per kernel, WebSocket byte relay, limits,
+    reaper, token relay on :8801), `kernel_gateway.py` (gateway pod entry: kernelspec + EG config, token out of the
+    environment, non-dumpable PID 1), `kernel_launcher.py` (per kernel: clean env, `RLIMIT_AS`, nice, user folder,
+    `pip --target`), Dockerfile `INSTALL_GATEWAY=1` (EG 3.3 in `/opt/gateway-env`, Python 3.11 - pyzmq < 25),
+    `deploy/k8s/21`, `80-83` (Secret, PVC 50 Gi, Deployment, Services, NetworkPolicy per pip mode; hub policy scoped
+    to the hub pod), admin page (gateway health, kernels, pip mode, warning), `studio-hub-local.ps1 -Gateway`,
+    `tests/test_kernel_gateway.py` (local EG process, two users, isolation / relay / interrupt / restart / limits /
+    culling / installs; skipped without `S2_TEST_EG_VENV`). ~130 MB per kernel after start (Windows). Open: first image
+    build + Linux run (RLIMIT_AS value vs. real notebooks, interrupt via signals), Zeus admin's PyPI mirror answer,
+    "My files" aren't visible to gateway kernels (separate volume), TLS CA files of a SingleStore connection (paths in
+    the hub pod) aren't usable in gateway kernels, the quota isn't a filesystem quota.
+  - **2a design (as decided):** the gateway starts kernels as processes in its own pod. Tokens come from a hub
     relay that knows each kernel's user (never in the kernel's environment); per-kernel memory cap (`RLIMIT_AS`), low
     CPU priority, max kernels per user and in total; one image environment + a per-user `pip install --target` folder.
     Package installs are a setting (`STUDIO_PIP_MODE`, decided 2026-10-30): `mirror` (default when
@@ -347,7 +361,11 @@ in step 1, "Ask Claude" off by default (switchable later with an Anthropic / Fou
     colleague, no isolation between kernels; 2a replaces it before more users join. 2a is built in parallel.
   - **2b – one pod per kernel when needed** (customers / partners, audit that must prove who did what): switch the
     gateway to its Kubernetes process proxy (a deployment change, Studio unchanged) + NetworkPolicy, read-only root and
-    limits on the kernel pods; the hub then needs a Role to manage pods in its namespace.
+    limits on the kernel pods; the gateway (not the hub) then needs a ServiceAccount + Role to manage pods. Left to do
+    (notes in deploy/README.md "Step 2b"): kernel image (notebook env + EG's `launch_ipykernel.py` + the launcher's env /
+    pip / folder steps), kernelspec with `KubernetesProcessProxy` + pod template (resources instead of `RLIMIT_AS`,
+    user folder as `subPath`), RBAC, kernel-pod NetworkPolicy (in: gateway on ZMQ ports + response port 8877), tests on
+    a real cluster (kind / the Zeus namespace).
   - "Python in SAS" cells via `PROC PYTHON` in the user's own Compute session (isolated by Viya, nothing from the K8s
     admins) – **shipped 2026-10-30** ahead of 2a (see "Since 0.10.1"): the Notebook opens in server mode with Python in
     SAS and Text cells only. **Checked on Zeus 2026-10-30:** Python 3.12.12 (RHEL), pandas 2.3.3, numpy 2.5.4, swat 1.18.1,
@@ -363,7 +381,8 @@ in step 1, "Ask Claude" off by default (switchable later with an Anthropic / Fou
   instead of one per Studio, more than one hub replica (sessions out of memory), SingleStore per-user JWT logins, a separate origin for
   Studio pages (today they share the hub's origin: an XSS in a Studio app could act as that user on the hub), streaming
   large Studio responses instead of buffering them in the hub. 2a plugs in behind `notebook_kernel`'s server seam
-  (`_shared_environment`, `_server_kernel_env`, `_kernel_cwd`, `kernel_tokens`).
+  (`_shared_environment`, `_server_kernel_env`, `_kernel_cwd`, `kernel_tokens`) - done as `notebook_kernel._gateway()` /
+  `_new_kernel` / `_gateway_prelude` and `kernel_tokens.RELAY_CLIENT`.
 
 ## Known small issues
 - Network breaks: a query whose connection goes silent *without* a route change or sleep (e.g. a firewall that drops
