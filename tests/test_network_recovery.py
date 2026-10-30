@@ -368,9 +368,11 @@ def test_the_sas_probe_finds_viya_back_and_rechecks_the_session(viya) -> None:
         viya["on_worker"](lambda: _run(c))
     assert netguard.is_down("sas")
     viya["proxy"].restore()
-    assert netguard.probe("sas", force=True)
+    # The automatic probe that started when Viya went down may still be running (then probe() returns False and
+    # that run may have seen the old outage): keep forcing until one runs against the restored network.
     deadline = time.monotonic() + 5
     while netguard.is_down("sas") and time.monotonic() < deadline:
+        netguard.probe("sas", force=True)
         time.sleep(0.05)
     assert not netguard.is_down("sas")
 
