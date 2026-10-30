@@ -271,6 +271,9 @@ in step 1, "Ask Claude" off by default (switchable later with an Anthropic / Fou
     named group of colleagues. **No isolation between users' kernels** (same OS user and pod: one kernel can read
     another's files / key and act as that user; one runaway kernel can take the pod down) – say so in the docs and on
     the admin page.
+  - **Test version (decided 2026-10-30):** next week's local hub and the first Zeus deploy keep notebooks on
+    (`STUDIO_NOTEBOOKS=local`: kernels in the user's own Studio process, notebook group only) – used by Jonas and one
+    colleague, no isolation between kernels; 2a replaces it before more users join. 2a is built in parallel.
   - **2b – one pod per kernel when needed** (customers / partners, audit that must prove who did what): switch the
     gateway to its Kubernetes process proxy (a deployment change, Studio unchanged) + NetworkPolicy, read-only root and
     limits on the kernel pods; the hub then needs a Role to manage pods in its namespace.
