@@ -1,0 +1,1725 @@
+{
+ "first": {
+  "code": "import sys\nprint(\"python\", sys.version.split()[0])\ncounter = 1",
+  "state": "completed",
+  "log": [
+   {
+    "line": "6    options obs=max replace nosyntaxcheck; %let syscc=0;",
+    "type": "source"
+   },
+   {
+    "line": "7    %let _s2pyls=%sysfunc(getoption(ls)); %let _s2pyps=%sysfunc(getoption(ps));",
+    "type": "source"
+   },
+   {
+    "line": "8    options ls=max ps=max;",
+    "type": "source"
+   },
+   {
+    "line": "9    %put NOTE: S2PY_HTML=%sysfunc(pathname(work))/_s2py.html;",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: S2PY_HTML=/opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/_s2py.html",
+    "type": "note"
+   },
+   {
+    "line": "10   ods html5 (id=_s2py) file=\"%sysfunc(pathname(work))/_s2py.html\" options(svg_mode=\"inline\" bitmap_mode=\"inline\");",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: Writing HTML5(_S2PY) Body file: /opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/_s2py.html",
+    "type": "note"
+   },
+   {
+    "line": "11   proc python;",
+    "type": "source"
+   },
+   {
+    "line": "12   submit",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: Python initialized.",
+    "type": "note"
+   },
+   {
+    "line": "Python 3.12.12 (main, Feb 23 2026, 16:33:05) [GCC 11.5.0 20240719 (Red Hat 11.5.0-11)] on linux",
+    "type": "normal"
+   },
+   {
+    "line": "Type \"help\", \"copyright\", \"credits\" or \"license\" for more information.",
+    "type": "normal"
+   },
+   {
+    "line": ">>> ",
+    "type": "normal"
+   },
+   {
+    "line": "12 !       ;",
+    "type": "source"
+   },
+   {
+    "line": "13   import sys",
+    "type": "source"
+   },
+   {
+    "line": "14   print(\"python\", sys.version.split()[0])",
+    "type": "source"
+   },
+   {
+    "line": "15   counter = 1",
+    "type": "source"
+   },
+   {
+    "line": "16   endsubmit;",
+    "type": "source"
+   },
+   {
+    "line": "17   run;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": ">>>",
+    "type": "normal"
+   },
+   {
+    "line": ">>>",
+    "type": "normal"
+   },
+   {
+    "line": "python 3.12.12",
+    "type": "normal"
+   },
+   {
+    "line": ">>> ",
+    "type": "normal"
+   },
+   {
+    "line": "NOTE: PROCEDURE PYTHON used (Total process time):",
+    "type": "note"
+   },
+   {
+    "line": "      real time           3.50 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      cpu time            0.27 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      ",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "18   ods html5 (id=_s2py) close;",
+    "type": "source"
+   },
+   {
+    "line": "19   options ls=&_s2pyls ps=&_s2pyps;",
+    "type": "source"
+   },
+   {
+    "line": "2                                                          The SAS System                       Friday, October 30, 2026 09:48:00 PM",
+    "type": "title"
+   },
+   {
+    "line": "",
+    "type": "title"
+   },
+   {
+    "line": "",
+    "type": "note"
+   }
+  ],
+  "listing": "",
+  "html": false,
+  "secs": 21.15
+ },
+ "resume": {
+  "code": "counter += 1\nprint(\"counter =\", counter)",
+  "state": "completed",
+  "log": [
+   {
+    "line": "20   options obs=max replace nosyntaxcheck; %let syscc=0;",
+    "type": "source"
+   },
+   {
+    "line": "21   %let _s2pyls=%sysfunc(getoption(ls)); %let _s2pyps=%sysfunc(getoption(ps));",
+    "type": "source"
+   },
+   {
+    "line": "22   options ls=max ps=max;",
+    "type": "source"
+   },
+   {
+    "line": "23   %put NOTE: S2PY_HTML=%sysfunc(pathname(work))/_s2py.html;",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: S2PY_HTML=/opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/_s2py.html",
+    "type": "note"
+   },
+   {
+    "line": "24   ods html5 (id=_s2py) file=\"%sysfunc(pathname(work))/_s2py.html\" options(svg_mode=\"inline\" bitmap_mode=\"inline\");",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: Writing HTML5(_S2PY) Body file: /opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/_s2py.html",
+    "type": "note"
+   },
+   {
+    "line": "25   proc python;",
+    "type": "source"
+   },
+   {
+    "line": "26   submit",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: Resuming Python state from previous PROC PYTHON invocation.",
+    "type": "note"
+   },
+   {
+    "line": "26 !       ;",
+    "type": "source"
+   },
+   {
+    "line": "27   counter += 1",
+    "type": "source"
+   },
+   {
+    "line": "28   print(\"counter =\", counter)",
+    "type": "source"
+   },
+   {
+    "line": "29   endsubmit;",
+    "type": "source"
+   },
+   {
+    "line": "30   run;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": ">>>",
+    "type": "normal"
+   },
+   {
+    "line": "counter = 2",
+    "type": "normal"
+   },
+   {
+    "line": ">>> ",
+    "type": "normal"
+   },
+   {
+    "line": "NOTE: PROCEDURE PYTHON used (Total process time):",
+    "type": "note"
+   },
+   {
+    "line": "      real time           0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      cpu time            0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      ",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "31   ods html5 (id=_s2py) close;",
+    "type": "source"
+   },
+   {
+    "line": "32   options ls=&_s2pyls ps=&_s2pyps;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   }
+  ],
+  "listing": "",
+  "html": false,
+  "secs": 1.13
+ },
+ "error": {
+  "code": "def f(x):\n    return 1 / x\n\nprint(\"before\")\nf(0)",
+  "state": "error",
+  "log": [
+   {
+    "line": "33   options obs=max replace nosyntaxcheck; %let syscc=0;",
+    "type": "source"
+   },
+   {
+    "line": "34   %let _s2pyls=%sysfunc(getoption(ls)); %let _s2pyps=%sysfunc(getoption(ps));",
+    "type": "source"
+   },
+   {
+    "line": "35   options ls=max ps=max;",
+    "type": "source"
+   },
+   {
+    "line": "36   %put NOTE: S2PY_HTML=%sysfunc(pathname(work))/_s2py.html;",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: S2PY_HTML=/opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/_s2py.html",
+    "type": "note"
+   },
+   {
+    "line": "37   ods html5 (id=_s2py) file=\"%sysfunc(pathname(work))/_s2py.html\" options(svg_mode=\"inline\" bitmap_mode=\"inline\");",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: Writing HTML5(_S2PY) Body file: /opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/_s2py.html",
+    "type": "note"
+   },
+   {
+    "line": "38   proc python;",
+    "type": "source"
+   },
+   {
+    "line": "39   submit",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: Resuming Python state from previous PROC PYTHON invocation.",
+    "type": "note"
+   },
+   {
+    "line": "39 !       ;",
+    "type": "source"
+   },
+   {
+    "line": "40   def f(x):",
+    "type": "source"
+   },
+   {
+    "line": "41       return 1 / x",
+    "type": "source"
+   },
+   {
+    "line": "42   ",
+    "type": "source"
+   },
+   {
+    "line": "43   print(\"before\")",
+    "type": "source"
+   },
+   {
+    "line": "44   f(0)",
+    "type": "source"
+   },
+   {
+    "line": "45   endsubmit;",
+    "type": "source"
+   },
+   {
+    "line": "46   run;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "ERROR: Unhandled Python exception.",
+    "type": "error"
+   },
+   {
+    "line": ">>>",
+    "type": "normal"
+   },
+   {
+    "line": "before",
+    "type": "normal"
+   },
+   {
+    "line": "Traceback (most recent call last):",
+    "type": "normal"
+   },
+   {
+    "line": "  File \"<stdin>\", line 5, in <module>",
+    "type": "normal"
+   },
+   {
+    "line": "  File \"<stdin>\", line 2, in <module>",
+    "type": "normal"
+   },
+   {
+    "line": "  File \"<string>\", line 5, in <module>",
+    "type": "normal"
+   },
+   {
+    "line": "  File \"<string>\", line 2, in f",
+    "type": "normal"
+   },
+   {
+    "line": "ZeroDivisionError: division by zero",
+    "type": "normal"
+   },
+   {
+    "line": ">>> ",
+    "type": "normal"
+   },
+   {
+    "line": "NOTE: The SAS System stopped processing this step because of errors.",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: PROCEDURE PYTHON used (Total process time):",
+    "type": "note"
+   },
+   {
+    "line": "      real time           0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      cpu time            0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      ",
+    "type": "note"
+   },
+   {
+    "line": "47   ods html5 (id=_s2py) close;",
+    "type": "source"
+   },
+   {
+    "line": "48   options ls=&_s2pyls ps=&_s2pyps;",
+    "type": "source"
+   },
+   {
+    "line": "3                                                          The SAS System                       Friday, October 30, 2026 09:48:00 PM",
+    "type": "title"
+   },
+   {
+    "line": "",
+    "type": "title"
+   },
+   {
+    "line": "",
+    "type": "note"
+   }
+  ],
+  "listing": "",
+  "html": false,
+  "secs": 1.15
+ },
+ "syntax": {
+  "code": "print(\"x\"\nprint(2)",
+  "state": "error",
+  "log": [
+   {
+    "line": "49   options obs=max replace nosyntaxcheck; %let syscc=0;",
+    "type": "source"
+   },
+   {
+    "line": "50   %let _s2pyls=%sysfunc(getoption(ls)); %let _s2pyps=%sysfunc(getoption(ps));",
+    "type": "source"
+   },
+   {
+    "line": "51   options ls=max ps=max;",
+    "type": "source"
+   },
+   {
+    "line": "52   %put NOTE: S2PY_HTML=%sysfunc(pathname(work))/_s2py.html;",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: S2PY_HTML=/opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/_s2py.html",
+    "type": "note"
+   },
+   {
+    "line": "53   ods html5 (id=_s2py) file=\"%sysfunc(pathname(work))/_s2py.html\" options(svg_mode=\"inline\" bitmap_mode=\"inline\");",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: Writing HTML5(_S2PY) Body file: /opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/_s2py.html",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "54   proc python;",
+    "type": "source"
+   },
+   {
+    "line": "55   submit",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: Resuming Python state from previous PROC PYTHON invocation.",
+    "type": "note"
+   },
+   {
+    "line": "55 !       ;",
+    "type": "source"
+   },
+   {
+    "line": "56   print(\"x\"",
+    "type": "source"
+   },
+   {
+    "line": "57   print(2)",
+    "type": "source"
+   },
+   {
+    "line": "58   endsubmit;",
+    "type": "source"
+   },
+   {
+    "line": "59   run;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "ERROR: Unhandled Python exception.",
+    "type": "error"
+   },
+   {
+    "line": ">>>",
+    "type": "normal"
+   },
+   {
+    "line": "Traceback (most recent call last):",
+    "type": "normal"
+   },
+   {
+    "line": "  File \"<stdin>\", line 5, in <module>",
+    "type": "normal"
+   },
+   {
+    "line": "  File \"<stdin>\", line 2, in <module>",
+    "type": "normal"
+   },
+   {
+    "line": "  File \"<string>\", line 1",
+    "type": "normal"
+   },
+   {
+    "line": "    print(\"x\"",
+    "type": "normal"
+   },
+   {
+    "line": "         ^",
+    "type": "normal"
+   },
+   {
+    "line": "SyntaxError: '(' was never closed",
+    "type": "normal"
+   },
+   {
+    "line": ">>> ",
+    "type": "normal"
+   },
+   {
+    "line": "NOTE: The SAS System stopped processing this step because of errors.",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: PROCEDURE PYTHON used (Total process time):",
+    "type": "note"
+   },
+   {
+    "line": "      real time           0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      cpu time            0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      ",
+    "type": "note"
+   },
+   {
+    "line": "60   ods html5 (id=_s2py) close;",
+    "type": "source"
+   },
+   {
+    "line": "61   options ls=&_s2pyls ps=&_s2pyps;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   }
+  ],
+  "listing": "",
+  "html": false,
+  "secs": 1.41
+ },
+ "indented": {
+  "code": "    total = 0\n    for i in range(3):\n        total += i\n    print(\"total\", total)",
+  "state": "completed",
+  "log": [
+   {
+    "line": "62   options obs=max replace nosyntaxcheck; %let syscc=0;",
+    "type": "source"
+   },
+   {
+    "line": "63   %let _s2pyls=%sysfunc(getoption(ls)); %let _s2pyps=%sysfunc(getoption(ps));",
+    "type": "source"
+   },
+   {
+    "line": "64   options ls=max ps=max;",
+    "type": "source"
+   },
+   {
+    "line": "65   %put NOTE: S2PY_HTML=%sysfunc(pathname(work))/_s2py.html;",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: S2PY_HTML=/opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/_s2py.html",
+    "type": "note"
+   },
+   {
+    "line": "66   ods html5 (id=_s2py) file=\"%sysfunc(pathname(work))/_s2py.html\" options(svg_mode=\"inline\" bitmap_mode=\"inline\");",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: Writing HTML5(_S2PY) Body file: /opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/_s2py.html",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "67   proc python;",
+    "type": "source"
+   },
+   {
+    "line": "68   submit",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: Resuming Python state from previous PROC PYTHON invocation.",
+    "type": "note"
+   },
+   {
+    "line": "68 !       ;",
+    "type": "source"
+   },
+   {
+    "line": "69   total = 0",
+    "type": "source"
+   },
+   {
+    "line": "70   for i in range(3):",
+    "type": "source"
+   },
+   {
+    "line": "71       total += i",
+    "type": "source"
+   },
+   {
+    "line": "72   print(\"total\", total)",
+    "type": "source"
+   },
+   {
+    "line": "73   endsubmit;",
+    "type": "source"
+   },
+   {
+    "line": "74   run;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": ">>>",
+    "type": "normal"
+   },
+   {
+    "line": "total 3",
+    "type": "normal"
+   },
+   {
+    "line": "NOTE: PROCEDURE PYTHON used (Total process time):",
+    "type": "note"
+   },
+   {
+    "line": "      real time           0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      cpu time            0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      ",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "75   ods html5 (id=_s2py) close;",
+    "type": "source"
+   },
+   {
+    "line": "76   options ls=&_s2pyls ps=&_s2pyps;",
+    "type": "source"
+   },
+   {
+    "line": "4                                                          The SAS System                       Friday, October 30, 2026 09:48:00 PM",
+    "type": "title"
+   },
+   {
+    "line": "",
+    "type": "title"
+   },
+   {
+    "line": "",
+    "type": "note"
+   }
+  ],
+  "listing": "",
+  "html": false,
+  "secs": 1.24
+ },
+ "long": {
+  "code": "print(\"x\" * 300)",
+  "state": "completed",
+  "log": [
+   {
+    "line": "77   options obs=max replace nosyntaxcheck; %let syscc=0;",
+    "type": "source"
+   },
+   {
+    "line": "78   %let _s2pyls=%sysfunc(getoption(ls)); %let _s2pyps=%sysfunc(getoption(ps));",
+    "type": "source"
+   },
+   {
+    "line": "79   options ls=max ps=max;",
+    "type": "source"
+   },
+   {
+    "line": "80   %put NOTE: S2PY_HTML=%sysfunc(pathname(work))/_s2py.html;",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: S2PY_HTML=/opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/_s2py.html",
+    "type": "note"
+   },
+   {
+    "line": "81   ods html5 (id=_s2py) file=\"%sysfunc(pathname(work))/_s2py.html\" options(svg_mode=\"inline\" bitmap_mode=\"inline\");",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: Writing HTML5(_S2PY) Body file: /opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/_s2py.html",
+    "type": "note"
+   },
+   {
+    "line": "82   proc python;",
+    "type": "source"
+   },
+   {
+    "line": "83   submit",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: Resuming Python state from previous PROC PYTHON invocation.",
+    "type": "note"
+   },
+   {
+    "line": "83 !       ;",
+    "type": "source"
+   },
+   {
+    "line": "84   print(\"x\" * 300)",
+    "type": "source"
+   },
+   {
+    "line": "85   endsubmit;",
+    "type": "source"
+   },
+   {
+    "line": "86   run;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": ">>>",
+    "type": "normal"
+   },
+   {
+    "line": ">>>",
+    "type": "normal"
+   },
+   {
+    "line": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "type": "normal"
+   },
+   {
+    "line": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "type": "normal"
+   },
+   {
+    "line": ">>> ",
+    "type": "normal"
+   },
+   {
+    "line": "NOTE: PROCEDURE PYTHON used (Total process time):",
+    "type": "note"
+   },
+   {
+    "line": "      real time           0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      cpu time            0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      ",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "87   ods html5 (id=_s2py) close;",
+    "type": "source"
+   },
+   {
+    "line": "88   options ls=&_s2pyls ps=&_s2pyps;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   }
+  ],
+  "listing": "",
+  "html": false,
+  "secs": 1.23
+ },
+ "data": {
+  "code": "df = SAS.sd2df(\"sashelp.class\")\nprint(df.shape)\nSAS.df2sd(df.head(5), \"work.pyclass\")\nSAS.symput(\"pyrows\", len(df))\nprint(SAS.symget(\"pyrows\"))",
+  "state": "completed",
+  "log": [
+   {
+    "line": "89   options obs=max replace nosyntaxcheck; %let syscc=0;",
+    "type": "source"
+   },
+   {
+    "line": "90   %let _s2pyls=%sysfunc(getoption(ls)); %let _s2pyps=%sysfunc(getoption(ps));",
+    "type": "source"
+   },
+   {
+    "line": "91   options ls=max ps=max;",
+    "type": "source"
+   },
+   {
+    "line": "92   %put NOTE: S2PY_HTML=%sysfunc(pathname(work))/_s2py.html;",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: S2PY_HTML=/opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/_s2py.html",
+    "type": "note"
+   },
+   {
+    "line": "93   ods html5 (id=_s2py) file=\"%sysfunc(pathname(work))/_s2py.html\" options(svg_mode=\"inline\" bitmap_mode=\"inline\");",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: Writing HTML5(_S2PY) Body file: /opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/_s2py.html",
+    "type": "note"
+   },
+   {
+    "line": "94   proc python;",
+    "type": "source"
+   },
+   {
+    "line": "95   submit",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: Resuming Python state from previous PROC PYTHON invocation.",
+    "type": "note"
+   },
+   {
+    "line": "95 !       ;",
+    "type": "source"
+   },
+   {
+    "line": "96   df = SAS.sd2df(\"sashelp.class\")",
+    "type": "source"
+   },
+   {
+    "line": "97   print(df.shape)",
+    "type": "source"
+   },
+   {
+    "line": "98   SAS.df2sd(df.head(5), \"work.pyclass\")",
+    "type": "source"
+   },
+   {
+    "line": "99   SAS.symput(\"pyrows\", len(df))",
+    "type": "source"
+   },
+   {
+    "line": "100  print(SAS.symget(\"pyrows\"))",
+    "type": "source"
+   },
+   {
+    "line": "101  endsubmit;",
+    "type": "source"
+   },
+   {
+    "line": "102  run;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "103  proc printto log='/opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/sas2py.log';run;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: PROCEDURE PRINTTO used (Total process time):",
+    "type": "note"
+   },
+   {
+    "line": "      real time           0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      cpu time            0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      ",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "108  proc printto log='/opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/sas2py.log';run;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: PROCEDURE PRINTTO used (Total process time):",
+    "type": "note"
+   },
+   {
+    "line": "      real time           0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      cpu time            0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      ",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": ">>>",
+    "type": "normal"
+   },
+   {
+    "line": "(19, 5)",
+    "type": "normal"
+   },
+   {
+    "line": "19",
+    "type": "normal"
+   },
+   {
+    "line": ">>> ",
+    "type": "normal"
+   },
+   {
+    "line": "NOTE: PROCEDURE PYTHON used (Total process time):",
+    "type": "note"
+   },
+   {
+    "line": "      real time           0.05 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      cpu time            0.03 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      ",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "111  ods html5 (id=_s2py) close;",
+    "type": "source"
+   },
+   {
+    "line": "112  options ls=&_s2pyls ps=&_s2pyps;",
+    "type": "source"
+   },
+   {
+    "line": "5                                                          The SAS System                       Friday, October 30, 2026 09:48:00 PM",
+    "type": "title"
+   },
+   {
+    "line": "",
+    "type": "title"
+   },
+   {
+    "line": "",
+    "type": "note"
+   }
+  ],
+  "listing": "",
+  "html": false,
+  "secs": 1.21
+ },
+ "submit": {
+  "code": "SAS.submit(\"proc print data=work.pyclass; run;\")\nprint(\"printed\")",
+  "state": "completed",
+  "log": [
+   {
+    "line": "113  options obs=max replace nosyntaxcheck; %let syscc=0;",
+    "type": "source"
+   },
+   {
+    "line": "114  %let _s2pyls=%sysfunc(getoption(ls)); %let _s2pyps=%sysfunc(getoption(ps));",
+    "type": "source"
+   },
+   {
+    "line": "115  options ls=max ps=max;",
+    "type": "source"
+   },
+   {
+    "line": "116  %put NOTE: S2PY_HTML=%sysfunc(pathname(work))/_s2py.html;",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: S2PY_HTML=/opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/_s2py.html",
+    "type": "note"
+   },
+   {
+    "line": "117  ods html5 (id=_s2py) file=\"%sysfunc(pathname(work))/_s2py.html\" options(svg_mode=\"inline\" bitmap_mode=\"inline\");",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: Writing HTML5(_S2PY) Body file: /opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/_s2py.html",
+    "type": "note"
+   },
+   {
+    "line": "118  proc python;",
+    "type": "source"
+   },
+   {
+    "line": "119  submit",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: Resuming Python state from previous PROC PYTHON invocation.",
+    "type": "note"
+   },
+   {
+    "line": "119!       ;",
+    "type": "source"
+   },
+   {
+    "line": "120  SAS.submit(\"proc print data=work.pyclass; run;\")",
+    "type": "source"
+   },
+   {
+    "line": "121  print(\"printed\")",
+    "type": "source"
+   },
+   {
+    "line": "122  endsubmit;",
+    "type": "source"
+   },
+   {
+    "line": "123  run;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "124  proc print data=work.pyclass; run;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: There were 5 observations read from the data set WORK.PYCLASS.",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: The PROCEDURE PRINT printed page 1.",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: PROCEDURE PRINT used (Total process time):",
+    "type": "note"
+   },
+   {
+    "line": "      real time           0.03 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      cpu time            0.03 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      ",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": ">>>",
+    "type": "normal"
+   },
+   {
+    "line": "printed",
+    "type": "normal"
+   },
+   {
+    "line": ">>> ",
+    "type": "normal"
+   },
+   {
+    "line": "NOTE: The PROCEDURE PYTHON printed page 1.",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: PROCEDURE PYTHON used (Total process time):",
+    "type": "note"
+   },
+   {
+    "line": "      real time           0.03 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      cpu time            0.03 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      ",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "125  ods html5 (id=_s2py) close;",
+    "type": "source"
+   },
+   {
+    "line": "126  options ls=&_s2pyls ps=&_s2pyps;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   }
+  ],
+  "listing": "                                                                                                                         The SAS System                                                                                 Friday, October 30, 2026 09:48:00 PM   1\n\n                                                                                                        Obs     Name      Sex    Age    Height    Weight\n\n                                                                                                         1     Alfred      M      14     69.0      112.5\n                                                                                                         2     Alice       F      13     56.5       84.0\n                                                                                                         3     Barbara     F      13     65.3       98.0\n                                                                                                         4     Carol       F      14     62.8      102.5\n                                                                                                         5     Henry       M      14     63.5      102.5",
+  "html": true,
+  "secs": 1.1
+ },
+ "sas_error": {
+  "code": "SAS.submit(\"data _null_; set work.no_such_table; run;\")\nprint(\"after\")",
+  "state": "error",
+  "log": [
+   {
+    "line": "127  options obs=max replace nosyntaxcheck; %let syscc=0;",
+    "type": "source"
+   },
+   {
+    "line": "128  %let _s2pyls=%sysfunc(getoption(ls)); %let _s2pyps=%sysfunc(getoption(ps));",
+    "type": "source"
+   },
+   {
+    "line": "129  options ls=max ps=max;",
+    "type": "source"
+   },
+   {
+    "line": "130  %put NOTE: S2PY_HTML=%sysfunc(pathname(work))/_s2py.html;",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: S2PY_HTML=/opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/_s2py.html",
+    "type": "note"
+   },
+   {
+    "line": "131  ods html5 (id=_s2py) file=\"%sysfunc(pathname(work))/_s2py.html\" options(svg_mode=\"inline\" bitmap_mode=\"inline\");",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: Writing HTML5(_S2PY) Body file: /opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/_s2py.html",
+    "type": "note"
+   },
+   {
+    "line": "132  proc python;",
+    "type": "source"
+   },
+   {
+    "line": "133  submit",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: Resuming Python state from previous PROC PYTHON invocation.",
+    "type": "note"
+   },
+   {
+    "line": "133!       ;",
+    "type": "source"
+   },
+   {
+    "line": "134  SAS.submit(\"data _null_; set work.no_such_table; run;\")",
+    "type": "source"
+   },
+   {
+    "line": "135  print(\"after\")",
+    "type": "source"
+   },
+   {
+    "line": "136  endsubmit;",
+    "type": "source"
+   },
+   {
+    "line": "137  run;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "138  data _null_; set work.no_such_table; run;",
+    "type": "source"
+   },
+   {
+    "line": "ERROR: File WORK.NO_SUCH_TABLE.DATA does not exist.",
+    "type": "error"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: The SAS System stopped processing this step because of errors.",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: DATA statement used (Total process time):",
+    "type": "note"
+   },
+   {
+    "line": "      real time           0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      cpu time            0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      ",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": ">>>",
+    "type": "normal"
+   },
+   {
+    "line": "after",
+    "type": "normal"
+   },
+   {
+    "line": ">>> ",
+    "type": "normal"
+   },
+   {
+    "line": "NOTE: PROCEDURE PYTHON used (Total process time):",
+    "type": "note"
+   },
+   {
+    "line": "      real time           0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      cpu time            0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      ",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "139  ods html5 (id=_s2py) close;",
+    "type": "source"
+   },
+   {
+    "line": "140  options ls=&_s2pyls ps=&_s2pyps;",
+    "type": "source"
+   },
+   {
+    "line": "6                                                          The SAS System                       Friday, October 30, 2026 09:48:00 PM",
+    "type": "title"
+   },
+   {
+    "line": "",
+    "type": "title"
+   },
+   {
+    "line": "",
+    "type": "note"
+   }
+  ],
+  "listing": "",
+  "html": false,
+  "secs": 1.11
+ },
+ "show": {
+  "code": "import pandas as pd\nSAS.show(pd.DataFrame({\"a\": [1, 2], \"b\": [\"x\", \"y\"]}), title=\"frame\")",
+  "state": "completed",
+  "log": [
+   {
+    "line": "141  options obs=max replace nosyntaxcheck; %let syscc=0;",
+    "type": "source"
+   },
+   {
+    "line": "142  %let _s2pyls=%sysfunc(getoption(ls)); %let _s2pyps=%sysfunc(getoption(ps));",
+    "type": "source"
+   },
+   {
+    "line": "143  options ls=max ps=max;",
+    "type": "source"
+   },
+   {
+    "line": "144  %put NOTE: S2PY_HTML=%sysfunc(pathname(work))/_s2py.html;",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: S2PY_HTML=/opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/_s2py.html",
+    "type": "note"
+   },
+   {
+    "line": "145  ods html5 (id=_s2py) file=\"%sysfunc(pathname(work))/_s2py.html\" options(svg_mode=\"inline\" bitmap_mode=\"inline\");",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: Writing HTML5(_S2PY) Body file: /opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/_s2py.html",
+    "type": "note"
+   },
+   {
+    "line": "146  proc python;",
+    "type": "source"
+   },
+   {
+    "line": "147  submit",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: Resuming Python state from previous PROC PYTHON invocation.",
+    "type": "note"
+   },
+   {
+    "line": "147!       ;",
+    "type": "source"
+   },
+   {
+    "line": "148  import pandas as pd",
+    "type": "source"
+   },
+   {
+    "line": "149  SAS.show(pd.DataFrame({\"a\": [1, 2], \"b\": [\"x\", \"y\"]}), title=\"frame\")",
+    "type": "source"
+   },
+   {
+    "line": "150  endsubmit;",
+    "type": "source"
+   },
+   {
+    "line": "151  run;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "152  title2 'frame';",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "153  proc printto log='/opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/sas2py.log';run;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: PROCEDURE PRINTTO used (Total process time):",
+    "type": "note"
+   },
+   {
+    "line": "      real time           0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      cpu time            0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      ",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "156  proc print data=work._py_show;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: There were 2 observations read from the data set WORK._PY_SHOW.",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: The PROCEDURE PRINT printed page 2.",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: PROCEDURE PRINT used (Total process time):",
+    "type": "note"
+   },
+   {
+    "line": "      real time           0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      cpu time            0.01 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      ",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "156!                               proc delete data=work._py_show;run;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: Deleting WORK._PY_SHOW (memtype=DATA).",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: PROCEDURE DELETE used (Total process time):",
+    "type": "note"
+   },
+   {
+    "line": "      real time           0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      cpu time            0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      ",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "156!                                                                  title2;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": ">>>",
+    "type": "normal"
+   },
+   {
+    "line": ">>> ",
+    "type": "normal"
+   },
+   {
+    "line": "NOTE: The PROCEDURE PYTHON printed page 2.",
+    "type": "note"
+   },
+   {
+    "line": "NOTE: PROCEDURE PYTHON used (Total process time):",
+    "type": "note"
+   },
+   {
+    "line": "      real time           0.02 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      cpu time            0.02 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      ",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "157  ods html5 (id=_s2py) close;",
+    "type": "source"
+   },
+   {
+    "line": "158  options ls=&_s2pyls ps=&_s2pyps;",
+    "type": "source"
+   },
+   {
+    "line": "7                                                          The SAS System                       Friday, October 30, 2026 09:48:00 PM",
+    "type": "title"
+   },
+   {
+    "line": "",
+    "type": "title"
+   },
+   {
+    "line": "",
+    "type": "note"
+   }
+  ],
+  "listing": "                                                                                                                         The SAS System                                                                                 Friday, October 30, 2026 09:48:00 PM   2\n                                                                                                                             frame\n\n                                                                                                                         Obs    a    b\n\n                                                                                                                          1     1    x\n                                                                                                                          2     2    y",
+  "html": true,
+  "secs": 1.2
+ },
+ "warn": {
+  "code": "import warnings\nwarnings.warn(\"careful\")",
+  "state": "completed",
+  "log": [
+   {
+    "line": "159  options obs=max replace nosyntaxcheck; %let syscc=0;",
+    "type": "source"
+   },
+   {
+    "line": "160  %let _s2pyls=%sysfunc(getoption(ls)); %let _s2pyps=%sysfunc(getoption(ps));",
+    "type": "source"
+   },
+   {
+    "line": "161  options ls=max ps=max;",
+    "type": "source"
+   },
+   {
+    "line": "162  %put NOTE: S2PY_HTML=%sysfunc(pathname(work))/_s2py.html;",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: S2PY_HTML=/opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/_s2py.html",
+    "type": "note"
+   },
+   {
+    "line": "163  ods html5 (id=_s2py) file=\"%sysfunc(pathname(work))/_s2py.html\" options(svg_mode=\"inline\" bitmap_mode=\"inline\");",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: Writing HTML5(_S2PY) Body file: /opt/sas/viya/config/var/tmp/compsrv/default/c50d9dcd-f813-410b-82fa-831ebc2f4018/SAS_work57C500000158_sas-compute-server-12d958b4-6cdd-44fe-8cb3-60b8ba4c264a-2z6qm06/_s2py.html",
+    "type": "note"
+   },
+   {
+    "line": "164  proc python;",
+    "type": "source"
+   },
+   {
+    "line": "165  submit",
+    "type": "source"
+   },
+   {
+    "line": "NOTE: Resuming Python state from previous PROC PYTHON invocation.",
+    "type": "note"
+   },
+   {
+    "line": "165!       ;",
+    "type": "source"
+   },
+   {
+    "line": "166  import warnings",
+    "type": "source"
+   },
+   {
+    "line": "167  warnings.warn(\"careful\")",
+    "type": "source"
+   },
+   {
+    "line": "168  endsubmit;",
+    "type": "source"
+   },
+   {
+    "line": "169  run;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": ">>>",
+    "type": "normal"
+   },
+   {
+    "line": "<string>:2: UserWarning: careful",
+    "type": "normal"
+   },
+   {
+    "line": ">>> ",
+    "type": "normal"
+   },
+   {
+    "line": "NOTE: PROCEDURE PYTHON used (Total process time):",
+    "type": "note"
+   },
+   {
+    "line": "      real time           0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      cpu time            0.00 seconds",
+    "type": "note"
+   },
+   {
+    "line": "      ",
+    "type": "note"
+   },
+   {
+    "line": "",
+    "type": "note"
+   },
+   {
+    "line": "170  ods html5 (id=_s2py) close;",
+    "type": "source"
+   },
+   {
+    "line": "171  options ls=&_s2pyls ps=&_s2pyps;",
+    "type": "source"
+   },
+   {
+    "line": "",
+    "type": "note"
+   }
+  ],
+  "listing": "",
+  "html": false,
+  "secs": 1.09
+ }
+}
