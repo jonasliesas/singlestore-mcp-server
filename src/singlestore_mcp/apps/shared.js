@@ -370,11 +370,24 @@ function toastHost() {
   return host;
 }
 if (document.body) toastHost(); else document.addEventListener("DOMContentLoaded", toastHost);
+// Info and success toasts hide after 3.5 s (the timer waits while the pointer is on them or a key is focused in them);
+// errors stay until dismissed (I-2), so a message isn't gone before it's read. Every toast has a ✕. At most five at
+// a time (the oldest goes). Errors say "Error:" in words, not only in red (A-5).
 S2.toast = function (message, kind = "") {
   const host = toastHost();
-  const el = S2.h("div", { class: `s2-toast ${kind}`, role: "status" }, message);
+  const sticky = kind === "err";
+  let timer = null;
+  const close = () => { clearTimeout(timer); el.remove(); };
+  const arm = () => { clearTimeout(timer); if (!sticky) timer = setTimeout(close, 3500); };
+  const el = S2.h("div", { class: `s2-toast ${kind}`, role: sticky ? "alert" : "status", onmouseenter: () => clearTimeout(timer), onmouseleave: arm,
+    onfocusin: () => clearTimeout(timer), onfocusout: arm },
+    sticky ? S2.h("span", { class: "s2-toast-kind" }, "Error: ") : null,
+    S2.h("span", { class: "s2-toast-msg" }, message),
+    S2.h("button", { class: "s2-toast-x", "aria-label": "Dismiss", title: "Dismiss", onclick: close }, "✕"));
   host.append(el);
-  setTimeout(() => el.remove(), kind === "err" ? 7000 : 3500);
+  while (host.children.length > 5) host.firstElementChild.remove();
+  arm();
+  return close;
 };
 
 // Inline confirmation (window.confirm is blocked in sandboxed iframes).

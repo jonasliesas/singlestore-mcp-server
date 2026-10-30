@@ -270,10 +270,13 @@ function card(p) {
     }, "Test"),
     h("button", { class: "s2-btn ghost", "aria-expanded": String(open), onclick: () => toggleDetails(p) }, open ? "Hide" : "Details"));
 
-  return h("div", { class: `s2-card pm-card${p.error_count && p.state !== "Stopped" ? " has-error" : ""}` },
+  const hasError = p.error_count && p.state !== "Stopped";
+  return h("div", { class: `s2-card pm-card${hasError ? " has-error" : ""}` },
     h("div", { class: "pm-row" },
       h("span", { class: "pm-name" }, state.database ? null : h("span", { class: "pm-db" }, `${p.database}.`), p.name),
       h("span", { class: `s2-badge ${STATE_BADGE[p.state] ?? "warn"}` }, p.state),
+      // A-5: the red edge says "errors" in words too.
+      hasError ? h("span", { class: "s2-badge plain err pm-has-err", title: "This running pipeline has errors (see below)" }, "▲ Errors") : null,
       h("span", { class: "s2-badge plain" }, p.source_type ?? "?"),
       h("span", { class: "s2-spacer" }),
       actions),

@@ -119,3 +119,45 @@ def test_query_grid_numbers(ui, app_url) -> None:
     cells = qg.evaluate("[...document.querySelectorAll('.qg-grid tbody tr:first-child td')].map((t) => t.textContent)")
     assert cells == ["1", f"1{grp}234{grp}567", "2024"], cells
     assert qg.evaluate(_COPY_ROW, ".qg-grid tbody tr:first-child") == "1234567\t2024"
+
+
+# ----------------------------------------------------------------------------- I-2 toasts, A-5 text next to colour
+
+def test_error_toasts_stay_until_dismissed(ui, app_url) -> None:
+    """Info toasts hide after 3.5 s; error toasts stay (role=alert, "Error:" in words) until their ✕ is clicked."""
+    page, errors = ui
+    page.goto(app_url("cluster_config"), wait_until="domcontentloaded")
+    cf = app_frame(page, 30)
+    cf.evaluate("() => { S2.toast('zz info toast'); S2.toast('zz error toast', 'err'); }")
+    toasts = "[...document.querySelectorAll('#s2-toasts .s2-toast')].map((t) => t.innerText)"
+    shown = cf.evaluate(toasts)
+    assert any("zz info toast" in t for t in shown) and any("zz error toast" in t for t in shown), shown
+    err = cf.locator("#s2-toasts .s2-toast.err")
+    assert err.get_attribute("role") == "alert"
+    assert err.inner_text().startswith("Error:")
+    assert wait_js(cf, f"!{toasts}.some((t) => t.includes('zz info toast'))", 6), cf.evaluate(toasts)
+    page.wait_for_timeout(4000)  # past the old 7 s limit for errors
+    assert any("zz error toast" in t for t in cf.evaluate(toasts))
+    err.get_by_role("button", name="Dismiss").click()
+    assert wait_js(cf, f"!{toasts}.some((t) => t.includes('zz error toast'))", 3)
+
+
+def test_colour_signals_have_text(ui, app_url) -> None:
+    """Config's changed variables carry a "changed" chip (not only the coloured bar); Security's red / yellow flags
+    carry ▲ / ● and say the severity to screen readers."""
+    page, errors = ui
+    page.goto(app_url("cluster_config"), wait_until="domcontentloaded")
+    cf = app_frame(page, 30)
+    assert wait_js(cf, "document.querySelectorAll('.cf-table tbody tr.row').length > 10", 40), text(cf)[:400]
+    missing = cf.evaluate("[...document.querySelectorAll('.cf-table tr.changed:not(.differs)')].filter((r) => !r.querySelector('.cf-chg')).length")
+    assert missing == 0
+    page.goto(app_url("security"), wait_until="domcontentloaded")
+    sc = app_frame(page, 30)
+    assert wait_js(sc, "document.querySelector('.sc-flags')", 40), text(sc)[:400]
+    flags = sc.evaluate("[...document.querySelectorAll('.sc-flags .s2-badge')].map((b) => [b.className, b.textContent])")
+    assert flags, "no flagged users to check"
+    for cls, label in flags:
+        if " err" in cls:
+            assert label.startswith("▲") and "High risk:" in label, label
+        elif " warn" in cls:
+            assert label.startswith("●") and "Worth a look:" in label, label

@@ -141,7 +141,10 @@ function drawTable() {
       onclick: () => { open ? state.open.delete(v.name) : state.open.add(v.name); drawTable(); reportContext(v); } },
       h("td", { class: "name", title: v.name }, v.name),
       h("td", { class: "val", title: v.differs ? Object.entries(v.values).map(([n, x]) => `node ${n}: ${x}`).join("\n") : String(valueText(v)) },
-        v.differs ? h("span", { class: "s2-badge info", style: { marginRight: "6px" } }, "differs by node") : null, String(valueText(v))),
+        v.differs ? h("span", { class: "s2-badge info", style: { marginRight: "6px" } }, "differs by node") : null,
+        // A-5: "changed" in words too, not only the colour and the bar.
+        !v.differs && v.status === "changed" ? h("span", { class: "s2-badge warn cf-chg", style: { marginRight: "6px" }, title: `Changed from the default (${v.default ?? "–"})` }, "changed") : null,
+        String(valueText(v))),
       h("td", { class: `dflt${v.default == null ? " null" : ""}`, title: v.default ?? "" }, v.default ?? "–"),
       h("td", { title: v.category ?? "" }, v.category ?? "–"),
       h("td", {}, v.sync ?? "–"),

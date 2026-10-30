@@ -32,7 +32,9 @@
   .sc-table tr.open td { background: var(--s2-bg-2); }
   .sc-table td.wrap { white-space: normal; max-width: 520px; }
   .sc-flags { display: inline-flex; gap: 4px; flex-wrap: wrap; }
-  .sc-flags .s2-badge { font-size: 11px; padding: 0 7px; }
+  .sc-flags .s2-badge { font-size: 11px; padding: 0 7px; gap: 3px; }
+  .sc-sev { font-size: 9px; }
+  .sc-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .sc-detail td { background: var(--s2-bg-2); white-space: normal !important; max-width: none !important; padding: 10px 12px 14px !important; }
   .sc-detail h3 { font-size: var(--s2-fs-xs); margin: 10px 0 5px; color: var(--s2-text-2); font-weight: var(--font-weight-semibold, 600); }
   .sc-detail h3:first-child { margin-top: 0; }
@@ -116,6 +118,14 @@ const FLAGS = {
   unused: ["unused", "warn", "No traced query in the local Query History store for the chosen number of days"],
   require_ssl: ["TLS required", "plain", "REQUIRE SSL: this user can only log in over TLS"],
 };
+// A-5: a flag's severity as a shape too, not only red / yellow: ▲ high risk (err), ● worth a look (warn).
+const SEVERITY = { err: ["▲", "High risk"], warn: ["●", "Worth a look"] };
+function flagBadge(f) {
+  const [label, kind, title] = FLAGS[f];
+  const sev = SEVERITY[kind];
+  return h("span", { class: `s2-badge plain ${kind}`, "data-flag": f, title: sev ? `${sev[1]}: ${title}` : title },
+    sev ? h("span", { class: "sc-sev", "aria-hidden": "true" }, sev[0]) : null, sev ? h("span", { class: "sc-sr" }, `${sev[1]}: `) : null, label);
+}
 const DOCS = {
   grant: "https://docs.singlestore.com/db/v9.0/reference/sql-reference/security-management-commands/grant/",
   create_view: "https://docs.singlestore.com/db/v9.0/reference/sql-reference/data-definition-language-ddl/create-view/",
@@ -310,7 +320,7 @@ function usersTable(list) {
       h("td", { title: u.groups.join(", ") }, u.groups.length ? `${u.groups.length}: ${u.groups.slice(0, 2).join(", ")}${u.groups.length > 2 ? " …" : ""}` : "–"),
       h("td", { title: u.last_seen ? `${u.history_queries} traced queries in the store` : "" },
         u.last_seen ? fmt.relTime(u.last_seen) : u.unused === true ? h("span", { class: "s2-faint" }, "none") : h("span", { class: "s2-faint" }, "–")),
-      h("td", {}, h("span", { class: "sc-flags" }, u.flags.map((f) => h("span", { class: `s2-badge ${FLAGS[f][1]}`, title: FLAGS[f][2] }, FLAGS[f][0])),
+      h("td", {}, h("span", { class: "sc-flags" }, u.flags.map(flagBadge),
         u.all_checked === false ? h("span", { class: "s2-faint", title: "SHOW GRANTS couldn't be read for this user, so ALL PRIVILEGES wasn't checked" }, "?") : null))));
     if (open) body.append(h("tr", { class: "sc-detail" }, h("td", { colspan: String(cols.length) }, userDetail(u))));
   }
