@@ -241,6 +241,43 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && S2.displayMode === "fullscreen" && !e.defaultPrevented) S2.toggleFullscreen();
 });
 
+// Tab bars (I-4): in any role=tablist of button tabs, Left / Right move to the previous / next tab (wrapping),
+// Home / End to the first / last, and activate it (a click, as the views expect). A view usually redraws its tab
+// bar on a click, so the focus goes to the tab at the same place in the redrawn bar.
+document.addEventListener("keydown", (e) => {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key) || e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
+  const tab = e.target?.closest?.('button[role="tab"]');
+  const list = tab?.closest('[role="tablist"]');
+  if (!list) return;
+  const tabs = [...list.querySelectorAll('button[role="tab"]')].filter((t) => !t.disabled && t.getClientRects().length);
+  const i = tabs.indexOf(tab);
+  if (i < 0) return;
+  const j = e.key === "Home" ? 0 : e.key === "End" ? tabs.length - 1 : (i + (e.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+  e.preventDefault();
+  const at = [...document.querySelectorAll('[role="tablist"]')].indexOf(list);
+  tabs[j].focus();
+  tabs[j].click();
+  // The tab's content often loads and redraws the page a while later too (a slow cluster read): until the focus moves
+  // elsewhere (a click, or focus outside a tab bar; at most 30 s), focus that drops to the page because its element
+  // was replaced goes back to the selected tab of the same tab bar.
+  const refocus = () => {
+    const a = document.activeElement;
+    if (a && a !== document.body && a.isConnected) return;
+    const now = [...document.querySelectorAll('[role="tablist"]')][at];
+    const again = [...(now?.querySelectorAll('button[role="tab"]') ?? [])];
+    (again.find((t) => t.getAttribute("aria-selected") === "true") ?? again[j])?.focus({ preventScroll: true });
+  };
+  tabRefocus.observer?.disconnect();
+  clearTimeout(tabRefocus.timer);
+  tabRefocus.observer = new MutationObserver(refocus);
+  tabRefocus.observer.observe(document.body, { childList: true, subtree: true });
+  tabRefocus.timer = setTimeout(stopTabRefocus, 30000);
+});
+const tabRefocus = { observer: null, timer: null };
+function stopTabRefocus() { tabRefocus.observer?.disconnect(); tabRefocus.observer = null; clearTimeout(tabRefocus.timer); }
+document.addEventListener("pointerdown", stopTabRefocus, true);
+document.addEventListener("focusin", (e) => { if (tabRefocus.observer && !e.target?.closest?.('[role="tablist"]')) stopTabRefocus(); }, true);
+
 // Put a user message into the chat, e.g. "Explain this table".
 // Returns true if the host accepted the message. `quiet` skips the error toast
 // (for callers with their own fallback).

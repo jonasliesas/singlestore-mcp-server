@@ -161,3 +161,68 @@ def test_colour_signals_have_text(ui, app_url) -> None:
             assert label.startswith("▲") and "High risk:" in label, label
         elif " warn" in cls:
             assert label.startswith("●") and "Worth a look:" in label, label
+
+
+# ----------------------------------------------------------------------------- I-4 tab bars, I-3 tree keyboard
+
+_SELECTED = "[...document.querySelectorAll('.cm-tabs [role=tab]')].map((t) => [t.getAttribute('aria-selected'), document.activeElement === t])"
+
+
+def test_tab_bar_arrow_keys(ui, app_url) -> None:
+    """Left / Right / Home / End move between tabs and select them; the focus stays on the selected tab."""
+    page, errors = ui
+    page.goto(app_url("cluster_monitor"), wait_until="domcontentloaded")
+    cm = app_frame(page, 30)
+    assert wait_js(cm, "document.querySelectorAll('.cm-tabs [role=tab]').length > 3", 30)
+    n = cm.evaluate("document.querySelectorAll('.cm-tabs [role=tab]').length")
+    cm.evaluate("document.querySelector('.cm-tabs [role=tab]').click(); document.querySelector('.cm-tabs [role=tab]').focus()")
+
+    def at() -> int:
+        wait_js(cm, "document.activeElement?.getAttribute('role') === 'tab'", 5)
+        st = cm.evaluate(_SELECTED) + [cm.evaluate("document.activeElement?.outerHTML?.slice(0, 120)")]
+        sel = [i for i, (a, _) in enumerate(st[:-1]) if a == "true"]
+        foc = [i for i, (_, f) in enumerate(st[:-1]) if f]
+        assert sel == foc, st
+        return sel[0]
+
+    assert at() == 0
+    page.keyboard.press("ArrowRight")
+    assert wait_js(cm, "document.querySelectorAll('.cm-tabs [role=tab]')[1].getAttribute('aria-selected') === 'true'", 5)
+    assert at() == 1
+    page.keyboard.press("End")
+    assert wait_js(cm, f"document.querySelectorAll('.cm-tabs [role=tab]')[{n - 1}].getAttribute('aria-selected') === 'true'", 5)
+    assert at() == n - 1
+    page.keyboard.press("ArrowRight")  # wraps
+    assert wait_js(cm, "document.querySelectorAll('.cm-tabs [role=tab]')[0].getAttribute('aria-selected') === 'true'", 5)
+    assert at() == 0
+    page.keyboard.press("ArrowLeft")
+    assert wait_js(cm, f"document.querySelectorAll('.cm-tabs [role=tab]')[{n - 1}].getAttribute('aria-selected') === 'true'", 5)
+    page.wait_for_timeout(1500)  # the tab's data arrives and the page redraws: the focus stays on the tab
+    assert at() == n - 1
+    page.keyboard.press("Home")
+    assert wait_js(cm, "document.querySelectorAll('.cm-tabs [role=tab]')[0].getAttribute('aria-selected') === 'true'", 5)
+    assert at() == 0
+    assert not banners(page), banners(page)
+
+
+def test_sql_tree_keyboard(ui, app_url) -> None:
+    """The SQL Editor's tree has one row in the Tab order; arrow keys move between rows, Right opens a table, and a
+    focused table row shows its actions (SELECT columns, Top 100) without hovering."""
+    page, errors = ui
+    sql = _sql_tab(page, app_url)
+    row = f"[...document.querySelectorAll('.sq-tree-list [role=treeitem]')].find((r) => r.dataset.key === 't|{DB}\u0000CARS')"
+    assert wait_js(sql, row, 30), text(sql)[:600]
+    assert sql.evaluate("document.querySelectorAll('.sq-tree-list [role=treeitem][tabindex=\"0\"]').length") == 1
+    assert sql.evaluate(f"getComputedStyle({row}.querySelector('.act')).display") == "none"
+    sql.evaluate(f"{row}.focus()")
+    assert sql.evaluate(f"[...{row}.querySelectorAll('.act')].map((b) => getComputedStyle(b).display !== 'none')") == [True, True]
+    page.keyboard.press("ArrowRight")  # opens CARS: its columns show, the focus stays on the row
+    assert wait_js(sql, f"{row}.getAttribute('aria-expanded') === 'true' && document.activeElement === {row}", 10)
+    assert sql.locator(".sq-row.col", has_text="MSRP").count() == 1
+    page.keyboard.press("ArrowLeft")
+    assert wait_js(sql, f"{row}.getAttribute('aria-expanded') === 'false' && document.activeElement === {row}", 10)
+    page.keyboard.press("ArrowUp")
+    assert wait_js(sql, f"document.activeElement !== {row} && document.activeElement.getAttribute('role') === 'treeitem'", 5)
+    page.keyboard.press("ArrowDown")
+    assert wait_js(sql, f"document.activeElement === {row}", 5)
+    assert not banners(page), banners(page)

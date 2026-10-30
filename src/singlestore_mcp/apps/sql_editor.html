@@ -90,7 +90,8 @@
   .sq-row .name { overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
   .sq-row .meta { color: var(--s2-text-3); font-size: 11px; }
   .sq-row .act { display: none; font-size: 11px; padding: 0 6px; }
-  .sq-row:hover .act, .sq-row .act.on { display: inline-flex; }
+  .sq-row:hover .act, .sq-row .act.on, .sq-row:focus-within .act { display: inline-flex; }
+  .sq-row[role="treeitem"]:focus-visible { outline: 2px solid var(--s2-ring); outline-offset: -2px; }
   .sq-row.tbl { padding-left: 22px; }
   .sq-row.col { padding-left: 40px; cursor: copy; color: var(--s2-text-2); }
   .sq-row.col input[type=checkbox] { margin: 0 2px 0 -18px; cursor: pointer; }
@@ -427,10 +428,40 @@ function chooseLibrary(lib) {
   renderHeader(); renderTree(); refreshCompletion(); scheduleDraftSave();
 }
 
+// The tree with the keyboard (I-3): one row is in the Tab order (roving tabindex); Up / Down / Home / End move between
+// rows, Right / Left open / close one, Enter clicks it. A focused row shows its actions (SELECT columns, Top 100) like
+// a hovered one, and Tab reaches them. A redraw keeps the focus on the same row.
+let treeFocusKey = null;
+function fillTree(rows) {
+  const had = treeList.contains(document.activeElement) && document.activeElement?.getAttribute("role") === "treeitem";
+  treeList.replaceChildren(...rows);
+  const items = [...treeList.querySelectorAll('[role="treeitem"]')];
+  for (const it of items) it.tabIndex = -1;
+  const cur = items.find((it) => it.dataset.key === treeFocusKey) ?? items.find((it) => it.classList.contains("cur")) ?? items[0];
+  if (cur) cur.tabIndex = 0;
+  if (had && cur) cur.focus({ preventScroll: true });
+}
+function treeKey(e) {
+  const row = e.target.closest?.('[role="treeitem"]');
+  if (!row || e.target !== row) return;
+  const items = [...treeList.querySelectorAll('[role="treeitem"]')];
+  const i = items.indexOf(row);
+  const go = (j) => { const t = items[Math.max(0, Math.min(items.length - 1, j))]; if (!t) return; row.tabIndex = -1; t.tabIndex = 0; treeFocusKey = t.dataset.key; t.focus(); };
+  if (e.key === "ArrowDown") go(i + 1);
+  else if (e.key === "ArrowUp") go(i - 1);
+  else if (e.key === "Home") go(0);
+  else if (e.key === "End") go(items.length - 1);
+  else if (e.key === "Enter" || (e.key === "ArrowRight" && row.getAttribute("aria-expanded") === "false") || (e.key === "ArrowLeft" && row.getAttribute("aria-expanded") === "true")) {
+    treeFocusKey = row.dataset.key; row.click();
+  } else return;
+  e.preventDefault();
+}
+
 // ---------------------------------------------------------------- layout
 const root = document.getElementById("root");
 const headEl = h("div", { class: "sq-head" });
-const treeList = h("div", { class: "sq-tree-list", role: "tree" });
+const treeList = h("div", { class: "sq-tree-list", role: "tree", "aria-label": "Tables", onkeydown: treeKey,
+  onfocusin: (e) => { if (e.target.getAttribute?.("role") === "treeitem") treeFocusKey = e.target.dataset.key; } });
 const treeFilter = h("input", { class: "s2-input", type: "search", placeholder: "Filter tables…", "aria-label": "Filter tables",
   oninput: (e) => { state.filter = e.target.value; renderTree(); } });
 const treeSrcSlot = h("div", {});
@@ -1074,7 +1105,7 @@ function renderSasTree() {
   if (err) rows.push(h("div", { class: "sq-row" }, h("span", { class: "s2-error", style: { padding: "2px 6px", whiteSpace: "normal" } }, err.message)));
   if (!list) {
     rows.push(h("div", { class: "sq-placeholder" }, loading ? [h("span", { class: "s2-spinner" }), cas ? " Starting CAS…" : " Starting the SAS session (the first time takes a while)…"] : ""));
-    treeList.replaceChildren(...rows);
+    fillTree(rows);
     return;
   }
   for (const l of list) {
@@ -1085,7 +1116,7 @@ function renderSasTree() {
     if (q && !matches.length && !l.name.toLowerCase().includes(q)) continue;
     const open = state.expanded.has(key) || (q && matches.length > 0);
     const engine = cas ? l.type : l.engine;
-    rows.push(h("div", { class: `sq-row${l.name === cur ? " cur" : ""}`, role: "treeitem", "aria-expanded": String(open),
+    rows.push(h("div", { class: `sq-row${l.name === cur ? " cur" : ""}`, role: "treeitem", "aria-expanded": String(open), "data-key": key,
       title: [`${l.name} (${engine}${l.singlestore ? " → SingleStore" : ""})`, l.database ? `SingleStore database ${l.database}` : null, l.path, l.description,
         mine ? "Click to make this the tab's library" : `Click to make this the tab's ${cas ? "caslib" : "library"} (the tab switches to ${langOf(lang).label})`].filter(Boolean).join("\n"),
       onclick: () => {
@@ -1106,7 +1137,7 @@ function renderSasTree() {
       const c = sas.columns.get(tkey);
       const cols = c?.status === "ok" ? c.data.columns : [];
       const picked = state.picked.get(tkey) ?? new Set();
-      rows.push(h("div", { class: "sq-row tbl", role: "treeitem", "aria-expanded": String(topen),
+      rows.push(h("div", { class: "sq-row tbl", role: "treeitem", "aria-expanded": String(topen), "data-key": tkey,
         title: `${l.name}.${tb.name}${tb.type && tb.type !== "DATA" ? ` (${tb.type.toLowerCase()})` : ""}${cas && !tb.loaded ? " (not loaded in CAS)" : ""}${tb.label ? `\n${tb.label}` : ""}\nClick: show columns · Double-click: insert name`,
         onclick: () => { if (topen) state.expanded.delete(tkey); else { state.expanded.add(tkey); loadSasColumns(l.name, tb.name, lang); } renderTree(); },
         ondblclick: () => viaTree(lang, `insert ${l.name}.${tb.name}`, () => insert(`${libQual(l.name, lang)}.${sasIdent(tb.name, lang)}`)) },
@@ -1141,7 +1172,7 @@ function renderSasTree() {
     }
     if (matches.length > 2000) rows.push(h("div", { class: "sq-row tbl meta" }, `… ${matches.length - 2000} more: filter to find them`));
   }
-  treeList.replaceChildren(...rows);
+  fillTree(rows);
 }
 
 function renderTree() {
@@ -1156,7 +1187,7 @@ function renderTree() {
     const matches = q ? tables.filter((t) => t.name.toLowerCase().includes(q)) : tables;
     if (q && s?.status === "ok" && !matches.length && !db.toLowerCase().includes(q)) continue;
     const open = state.expanded.has(db) || (q && matches.length > 0);
-    rows.push(h("div", { class: `sq-row${db === state.database ? " cur" : ""}`, role: "treeitem", "aria-expanded": String(open),
+    rows.push(h("div", { class: `sq-row${db === state.database ? " cur" : ""}`, role: "treeitem", "aria-expanded": String(open), "data-key": `db|${db}`,
       title: isSas() ? "Click to make this the current database (the tab switches to SingleStore SQL)" : "Click to make this the current database",
       onclick: () => {
         if (!isSas() && state.database === db && state.expanded.has(db)) { state.expanded.delete(db); renderTree(); return; }
@@ -1174,7 +1205,7 @@ function renderTree() {
       // Ticked columns (Shift+click ticks a range): the SELECT button then lists just those, in table order.
       const picked = state.picked.get(key) ?? new Set();
       const selectCols = picked.size ? t.columns.map((c) => c.name).filter((n) => picked.has(n)) : t.columns.map((c) => c.name);
-      rows.push(h("div", { class: "sq-row tbl", role: "treeitem", "aria-expanded": String(topen),
+      rows.push(h("div", { class: "sq-row tbl", role: "treeitem", "aria-expanded": String(topen), "data-key": `t|${key}`,
         title: `${db}.${t.name}${t.view ? " (view)" : ""}\nClick: show columns · Double-click: insert name`,
         onclick: () => { topen ? state.expanded.delete(key) : state.expanded.add(key); renderTree(); },
         ondblclick: () => viaTree("singlestore", `insert ${db}.${t.name}`, () => insert(db === state.database ? ident(t.name) : `${ident(db)}.${ident(t.name)}`)) },
@@ -1203,7 +1234,7 @@ function renderTree() {
       }
     }
   }
-  treeList.replaceChildren(...(rows.length ? rows : [h("div", { class: "sq-placeholder" }, state.databases.length ? "No matches" : "Loading…")]));
+  fillTree(rows.length ? rows : [h("div", { class: "sq-placeholder" }, state.databases.length ? "No matches" : "Loading…")]);
 }
 
 // ---------------------------------------------------------------- running
