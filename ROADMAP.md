@@ -14,7 +14,7 @@ Last updated 2026-10-27 (latest release 0.10.1; design round from `studio-design
 - **0.10.1** (2026-10-14) – SAS autocomplete fetches columns itself (case-insensitive), SAS session no longer
   restarted on a missing table, Viya connection retries, SAS tests opt-in (`--sas`).
 
-## Since 0.10.1 (committed, not released – collecting for 0.11.0)
+## Since 0.10.1 (committed, not released – 0.11.0 planned the week of 2026-11-02: Jonas tests Monday, fixes, release before the Zeus deploy)
 - Security: **SQL script instead of Run** – Copy / Open in SQL Editor / Save as .sql, script basket, password
   placeholder, works without change privileges.
 - Security (not committed yet): **password change** (own password via SET PASSWORD without ALTER USER; optional
