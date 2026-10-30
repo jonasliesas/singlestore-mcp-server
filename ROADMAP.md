@@ -256,7 +256,8 @@ in step 1, "Ask Claude" off by default (switchable later with an Anthropic / Fou
     Zeus on 2026-11-02, so the local hub test can check real group membership.
   - Shared kernel volume: 50 GB in total, 5 GB quota per user (decided 2026-10-30; data belongs in SingleStore / Viya).
   - Question for Zeus's admin (deploy week): is there a PyPI mirror at SAS (Artifactory?) – until then `pypi`.
-- **Step 2 – the rest:** Ask Claude via an org key held by the hub (relay, per-user limits), shared metrics sampler
+- **Step 2 – the rest:** Ask Claude stays **off** in the server version (decided 2026-10-30; later via an org key held by
+  the hub – Foundry on SAS Azure or the Anthropic API – with a relay and per-user limits), shared metrics sampler
   instead of one per Studio, more than one hub replica (sessions out of memory), SingleStore per-user JWT logins.
 
 ## Known small issues
