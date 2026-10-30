@@ -833,9 +833,9 @@ const app = await S2.connect({
       const data = S2.resultData(result);
       ws.sqlResult = result;
       ws.args = { ...ws.args, database: data.database ?? ws.args.database, sql: data.sql ?? ws.args.sql, table: data.table ?? ws.args.table };
-      // Server mode: views switched off there (notebooks) leave the rail; opening one says why.
+      // Server mode: local notebook kernels are off there; the Notebook stays in the rail for its Python in SAS cells
+      // (PROC PYTHON in the user's own SAS Compute session), and says that only those and text cells run.
       ws.features = data.features ?? {};
-      if (ws.features.notebooks === false) delete VIEWS.notebook;
       buildShell();
       setPresenter(initialPresenter(), { save: false });
       await loadSqlTabs(data.tab_id, { early: true });  // sql_editor(new_tab=true) made that tab

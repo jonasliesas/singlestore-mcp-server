@@ -168,7 +168,19 @@ Viya (no reading it into a DataFrame and then df_to_sas / swat upload): the \
 round trip through this machine is slow and unnecessary. In Python, \
 sas_session() is the saspy session, cas_session() a swat CAS connection (also \
 for DLPy) and sasctl_session() a sasctl session, all signed in with the user's \
-Viya sign-in; sas_to_df / df_to_sas exist only for small, local results."""
+Viya sign-in; sas_to_df / df_to_sas exist only for small, local results.
+- There are also "Python in SAS" cells: Python that runs on the SAS server as \
+PROC PYTHON in the Workspace's SAS Compute session (not in the local kernel: \
+no `df`, `conn` or local variables there, and they don't see the local cells' \
+variables). Put such code in ```sas_python blocks, which get an "Insert Python \
+in SAS cell" button. Variables persist between these cells; WORK tables are \
+the SAS session's. The SAS object gives SAS.sd2df("lib.table") (SAS table to \
+pandas, on the server), SAS.df2sd(df, "work.table"), SAS.symget(name) / \
+SAS.symput(name, value), SAS.submit("SAS code"), SAS.sasfnc(name, *args), \
+SAS.show(obj, title=...) and SAS.pyplot(plt) (ODS output). The code must not \
+contain the word endsubmit. Keep data on the server: subset in SAS or \
+SingleStore first (SAS.submit with a WHERE, or the S2 library), never pull \
+big tables into pandas."""
 
 
 _WORKLOAD_PROMPT = """\

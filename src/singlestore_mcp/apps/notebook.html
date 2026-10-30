@@ -137,6 +137,14 @@
   .nb-ask { display: flex; gap: 6px; align-items: flex-end; padding: 6px 8px; border-top: 1px solid var(--s2-border-2); }
   .nb-ask textarea { flex: 1; resize: none; min-height: 34px; max-height: 120px; font-size: var(--s2-fs-xs); }
   .nb-chat .hint { font-size: 11px; color: var(--s2-text-3); padding: 0 8px 6px; }
+  .cell.sas_python .gutter .badge { background: color-mix(in srgb, var(--s2-eng-sas) 12%, var(--s2-bg)); color: var(--s2-eng-sas); }
+  .pysas-help { margin: 0; padding: 6px 10px; border-bottom: 1px solid var(--s2-border-2); background: var(--s2-bg-2); font-size: var(--s2-fs-xs); line-height: 1.5; }
+  .pysas-help[hidden] { display: none; }
+  .pysas-help code { font-family: var(--s2-mono); font-size: 11.5px; }
+  .pysas-help ul { margin: 4px 0; padding-left: 18px; }
+  .pysas-help .warn { color: var(--s2-warn); }
+  .nb-pysas-note { color: var(--s2-text-2); }
+  .cell .status .warn { color: var(--s2-warn); }
   .cell.sas .badge { background: color-mix(in srgb, var(--s2-eng-sas) 12%, var(--s2-bg)); color: var(--s2-eng-sas); }
   .sas-out { display: grid; gap: 6px; }
   .sas-head { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: var(--s2-fs-xs); }
@@ -165,7 +173,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const state = {
   env: null, kernel: { state: "stopped" }, databases: [], database: null, schema: null,
   file: { name: null, folder: null, savedJson: "" }, cells: [], active: null, chatOpen: false,
-  runningAll: false,
+  runningAll: false, features: {}, execCount: 0,
 };
 
 // ---------------------------------------------------------------- CodeMirror setup (matches the SQL Editor)
@@ -231,7 +239,8 @@ function makeEditor(cell, parent) {
         theme,
         CM.syntaxHighlighting(highlight),
         CM.placeholder(cell.type === "sql" ? "SQL: the result becomes a DataFrame (Shift+Enter runs)" : cell.type === "python" ? "Python: use df, pd, plt, conn (Shift+Enter runs)"
-          : cell.type === "sas" ? "SAS: DATA steps and PROCs run on SAS Viya; S2 is this notebook's SingleStore database (Shift+Enter runs)" : "Text (Markdown). Shift+Enter shows it."),
+          : cell.type === "sas" ? "SAS: DATA steps and PROCs run on SAS Viya; S2 is this notebook's SingleStore database (Shift+Enter runs)"
+          : cell.type === "sas_python" ? "Python in SAS: runs as PROC PYTHON in SAS Compute; use SAS.sd2df, SAS.submit … (Shift+Enter runs)" : "Text (Markdown). Shift+Enter shows it."),
         CM.EditorView.updateListener.of((u) => {
           if (u.docChanged) { cell.source = u.state.doc.toString(); markDirty(); }
           if (u.focusChanged && u.view.hasFocus) setActive(cell);
@@ -242,7 +251,7 @@ function makeEditor(cell, parent) {
   });
 }
 function languageFor(type) {
-  return type === "sql" ? sqlLanguage() : type === "python" ? CM.python() : [];
+  return type === "sql" ? sqlLanguage() : type === "python" || type === "sas_python" ? CM.python() : [];
 }
 
 // ---------------------------------------------------------------- tiny markdown (safe: builds DOM, no HTML)
@@ -378,15 +387,18 @@ function renderHeader() {
     fileLabel,
     dbSelect,
     h("button", { class: "s2-btn ghost", title: "Refresh the database list", "aria-label": "Refresh databases", onclick: () => refreshDatabases({ force: true }) }, "↻"),
-    h("button", { class: "s2-btn primary", disabled: state.runningAll || !envReady(), title: "Run all cells from the top", onclick: runAll }, state.runningAll ? h("span", { class: "s2-spinner" }) : null, "▶▶ Run all"),
-    kernelEl,
+    h("button", { class: "s2-btn primary", disabled: state.runningAll || (!envReady() && !state.cells.some((c) => c.type === "sas_python")), title: "Run all cells from the top", onclick: runAll }, state.runningAll ? h("span", { class: "s2-spinner" }) : null, "▶▶ Run all"),
+    ...(kernelsOff() ? [] : [kernelEl,
     h("button", { class: "s2-btn ghost", title: "Python packages in the notebook environment", disabled: !envReady(), onclick: () => togglePackages() }, "Packages"),
     h("button", { class: "s2-btn ghost", title: "Interrupt the running cell (the kernel and its variables stay)", "aria-label": "Interrupt the running cell",
       disabled: !envReady(), onclick: () => kernelControl("interrupt") }, "■ Interrupt"),
     h("button", { class: "s2-btn ghost", title: "Restart the Python kernel: stops it and starts a new one (clears every variable)", "aria-label": "Restart kernel",
-      disabled: !envReady(), onclick: () => kernelControl("restart") }, "Restart kernel"),
+      disabled: !envReady(), onclick: () => kernelControl("restart") }, "Restart kernel")]),
+    state.cells.some((c) => c.type === "sas_python") ? h("button", { class: "s2-btn ghost", "aria-label": "Restart SAS session",
+      title: "End the SAS session the Python in SAS cells run in (shared with the SQL Editor): clears their Python variables and WORK tables",
+      onclick: () => restartSasSession() }, "Restart SAS session") : null,
     h("span", { class: "s2-spacer" }),
-    S2.askClaudeButton({ title: "Ask Claude about this notebook (a chat panel on the right)", "aria-pressed": String(state.chatOpen), onclick: () => toggleChat() }),
+    state.features?.assistant === false ? null : S2.askClaudeButton({ title: "Ask Claude about this notebook (a chat panel on the right)", "aria-pressed": String(state.chatOpen), onclick: () => toggleChat() }),
     S2.openInBrowserButton("notebook", () => ({ name: state.file.name, database: state.database })),
     S2.fullscreenButton(),
   ].filter(Boolean));
@@ -405,6 +417,7 @@ const envReady = () => state.env?.state === "ready";
 // ---------------------------------------------------------------- environment
 function renderEnv() {
   const env = state.env;
+  if (kernelsOff()) { envEl.hidden = true; return; }
   const missing = env?.state === "ready" ? env.missing ?? [] : [];
   envEl.hidden = !env || (env.state === "ready" && !missing.length);
   if (envEl.hidden) return;
@@ -554,10 +567,11 @@ function cellEl(cell) {
   const outputs = h("div", { class: "outputs" });
   const status = h("div", { class: "status" });
   const confirm = h("div", {});
-  const body = h("div", { class: "body", onclick: () => setActive(cell) }, bar, editor, mdView, confirm, outputs, status);
+  const help = h("div", { class: "pysas-help", hidden: true });
+  const body = h("div", { class: "body", onclick: () => setActive(cell) }, bar, help, editor, mdView, confirm, outputs, status);
   outputs.dataset.s2Data = "";  // what the cell printed / returned: presenter mode leaves it as it is
   const el = h("div", { class: `cell ${cell.type}`, dataset: { id: cell.id } }, gutter, body);
-  cell.el = { root: el, gutter, bar, editor, mdView, outputs, status, confirm };
+  cell.el = { root: el, gutter, bar, help, editor, mdView, outputs, status, confirm };
   makeEditor(cell, editor);
   renderCell(cell);
   renderOutputs(cell);
@@ -565,7 +579,13 @@ function cellEl(cell) {
 }
 // Where a cell runs: SQL on SingleStore (the active connection), Python in the kernel on this computer, SAS in SAS
 // Compute (the active SAS Viya connection).
-const CELL_ENGINE = { sql: "s2", python: "python", sas: "compute" };
+const CELL_ENGINE = { sql: "s2", python: "python", sas: "compute", sas_python: "compute" };
+const CELL_LABEL = { sql: "SQL", python: "Python", sas: "SAS", sas_python: "Python in SAS", markdown: "Text" };
+// Cells that run in the local Jupyter kernel (Python, SQL and SAS via saspy). Python in SAS cells run as PROC PYTHON
+// in the Workspace's SAS Compute session instead, so they work without a kernel (server mode: kernels off).
+const KERNEL_CELL = new Set(["sql", "python", "sas"]);
+const kernelsOff = () => state.features?.notebooks === false;
+const canRun = (cell) => (cell.type === "sas_python" ? true : !kernelsOff() && envReady());
 const cellConn = (engine) => (engine === "s2" ? S2.connections().s2 : engine === "compute" ? S2.connections().viya : null) || null;
 function cellEngineChip(cell, verb = "Runs") {
   const eng = CELL_ENGINE[cell.type];
@@ -573,11 +593,11 @@ function cellEngineChip(cell, verb = "Runs") {
 }
 S2.onConnections(() => { for (const c of state.cells) if (c.el) { renderCell(c); renderOutputs(c); } });
 function renderGutter(cell) {
-  const badge = { sql: "SQL", python: "PY", sas: "SAS", markdown: "TEXT" }[cell.type];
+  const badge = { sql: "SQL", python: "PY", sas: "SAS", sas_python: "PY·SAS", markdown: "TEXT" }[cell.type];
   cell.el.gutter.replaceChildren(...[
     h("span", { class: "badge" }, badge),
     cell.type === "markdown" ? null : h("span", {}, cell.running ? "[*]" : cell.count ? `[${cell.count}]` : "[ ]"),
-    cell.type === "markdown" ? null : h("button", { class: "run", title: "Run (Shift+Enter)", disabled: !envReady(), onclick: (e) => { e.stopPropagation(); runCell(cell); } }, cell.running ? "…" : "▶"),
+    cell.type === "markdown" ? null : h("button", { class: "run", title: "Run (Shift+Enter)", disabled: !canRun(cell), onclick: (e) => { e.stopPropagation(); runCell(cell); } }, cell.running ? "…" : "▶"),
   ].filter(Boolean));
 }
 function renderCell(cell) {
@@ -585,7 +605,7 @@ function renderCell(cell) {
   el.className = `cell ${cell.type}${state.active === cell ? " active" : ""}${cell.type === "markdown" && !cell.editing ? " rendered" : ""}`;
   renderGutter(cell);
   const typeSelect = h("select", { class: "s2-input", "aria-label": "Cell type", onchange: (e) => changeType(cell, e.target.value) },
-    ["sql", "python", "sas", "markdown"].map((t) => h("option", { value: t, selected: t === cell.type }, { sql: "SQL", python: "Python", sas: "SAS", markdown: "Text" }[t])));
+    cellTypes(cell.type).map((t) => h("option", { value: t, selected: t === cell.type }, CELL_LABEL[t])));
   const nameInput = cell.type === "sql" ? h("input", { class: "s2-input", value: cell.name, placeholder: "df", spellcheck: false,
     title: "Python variable for the result (always also df)",
     oninput: (e) => { cell.name = e.target.value.trim(); markDirty(); } }) : null;
@@ -594,6 +614,8 @@ function renderCell(cell) {
     typeSelect,
     cellEngineChip(cell),
     nameInput ? h("span", {}, "result →") : null, nameInput,
+    cell.type === "sas_python" ? h("button", { class: "s2-btn ghost", "aria-expanded": String(!!cell.help), title: "The SAS object's helpers and where the data stays",
+      onclick: () => { cell.help = !cell.help; renderCell(cell); } }, "SAS helpers") : null,
     h("span", { class: "spacer" }),
     h("button", { class: "s2-btn ghost", title: "Move up", "aria-label": "Move cell up", disabled: idx <= 0, onclick: () => moveCell(cell, -1) }, "↑"),
     h("button", { class: "s2-btn ghost", title: "Move down", "aria-label": "Move cell down", disabled: idx >= state.cells.length - 1, onclick: () => moveCell(cell, 1) }, "↓"),
@@ -601,6 +623,8 @@ function renderCell(cell) {
     h("button", { class: "s2-btn ghost", title: "Delete cell", "aria-label": "Delete cell", onclick: () => deleteCell(cell) }, "🗑"),
   ].filter(Boolean));
   const showEditor = cell.type !== "markdown" || cell.editing;
+  cell.el.help.hidden = !(cell.type === "sas_python" && cell.help);
+  if (!cell.el.help.hidden) cell.el.help.replaceChildren(...pysasHelp());
   editor.hidden = !showEditor;
   mdView.hidden = showEditor;
   if (!showEditor) mdView.replaceChildren(...renderMarkdown(cell.source));
@@ -615,11 +639,40 @@ function renderAll() {
   cellsEl.replaceChildren(...items);
 }
 function addBar(after) {
-  return h("div", { class: "nb-add" },
-    h("button", { class: "s2-btn", onclick: () => addCell("sql", after, { focus: true }) }, "+ SQL"),
-    h("button", { class: "s2-btn", onclick: () => addCell("python", after, { focus: true }) }, "+ Python"),
-    h("button", { class: "s2-btn", title: "SAS code (DATA steps, PROCs) on SAS Viya", onclick: () => addCell("sas", after, { focus: true }) }, "+ SAS"),
-    h("button", { class: "s2-btn", onclick: () => addCell("markdown", after, { focus: true }) }, "+ Text"));
+  const off = kernelsOff();
+  return h("div", { class: "nb-add" }, ...[
+    off ? null : h("button", { class: "s2-btn", onclick: () => addCell("sql", after, { focus: true }) }, "+ SQL"),
+    off ? null : h("button", { class: "s2-btn", onclick: () => addCell("python", after, { focus: true }) }, "+ Python"),
+    off ? null : h("button", { class: "s2-btn", title: "SAS code (DATA steps, PROCs) on SAS Viya", onclick: () => addCell("sas", after, { focus: true }) }, "+ SAS"),
+    h("button", { class: "s2-btn", title: "Python that runs on the SAS server (PROC PYTHON in the Workspace's SAS Compute session)",
+      onclick: () => addCell("sas_python", after, { focus: true }) }, "+ Python in SAS"),
+    h("button", { class: "s2-btn", onclick: () => addCell("markdown", after, { focus: true }) }, "+ Text"),
+  ].filter(Boolean));
+}
+// The cell kinds this notebook offers (without local kernels only Python in SAS and Text; a loaded cell keeps its own).
+const cellTypes = (current) => ["sql", "python", "sas", "sas_python", "markdown"].filter((t) => !kernelsOff() || !KERNEL_CELL.has(t) || t === current);
+// What a Python in SAS cell can use: the SAS object PROC PYTHON provides (names and signatures checked on SAS Viya with
+// dir(SAS) / inspect.signature), and where the data should stay.
+function pysasHelp() {
+  const li = (code, text) => h("li", {}, h("code", {}, code), ` – ${text}`);
+  const viya = S2.connections().viya;
+  return [
+    h("div", {}, h("strong", {}, "Python in SAS"), " runs as PROC PYTHON in the Workspace's SAS Compute session",
+      viya ? ` (${viya})` : "", ": the same session as the SQL Editor's SAS runs. ",
+      "Variables stay between these cells; WORK tables are the session's. The local Python cells' variables (df, conn) aren't there."),
+    h("ul", {},
+      li('SAS.sd2df("work.cars")', "a SAS table (libref.table, data set options allowed) as a pandas DataFrame"),
+      li('SAS.df2sd(df, "work.result")', "a DataFrame back to a SAS table"),
+      li('SAS.symget("name") / SAS.symput("name", value)', "read / set a SAS macro variable"),
+      li('SAS.submit("proc means data=work.cars; run;")', "run SAS code in the same session (its output shows below)"),
+      li('SAS.sasfnc("upcase", "abc")', "call a SAS or FCMP function"),
+      li('SAS.show(df, title="…") / SAS.pyplot(plt)', "ODS output: a table or a matplotlib chart under the cell"),
+      li('SAS.logMessage(text, "WARNING")', "a NOTE / WARNING / ERROR line in the SAS log")),
+    h("div", { class: "warn" }, "Keep the data on the server: subset in SAS or SingleStore first (a WHERE in SAS.submit, the S2 library, ",
+      'SAS.sd2df("lib.t(where=(…) obs=1000)")) – never pull big tables into pandas; only the output comes to this page.'),
+    h("div", { class: "nb-pysas-note" }, "The first cell of a SAS session starts Python (~8 s); then cells start at once. ",
+      "Restart SAS session (header) clears the Python variables and WORK. & and % aren't resolved here; the word endsubmit can't be used."),
+  ];
 }
 function setActive(cell) {
   if (state.active === cell) return;
@@ -635,6 +688,7 @@ function addCell(type, after, { focus = false, source = "" } = {}) {
   renderAll();
   state.cells.forEach((c) => c.el && renderCell(c));
   markDirty();
+  if (type === "sas_python") renderHeader();
   if (focus) { cell.view.focus(); setActive(cell); cell.el.root.scrollIntoView({ block: "nearest" }); }
   return cell;
 }
@@ -657,8 +711,10 @@ function moveCell(cell, delta) {
   markDirty();
 }
 function changeType(cell, type) {
+  const pysas = cell.type === "sas_python" || type === "sas_python";
   cell.type = type;
   cell.editing = true;
+  if (pysas) renderHeader();
   cell.view.dispatch({ effects: cell.lang.reconfigure(languageFor(type)) });
   renderCell(cell);
   markDirty();
@@ -695,12 +751,16 @@ function outputEl(o) {
 // SAS cells: counts of errors / warnings, the ODS output (in a shadow root, so SAS's own styles stay inside it;
 // scripts and event handlers removed), and the log with ERROR / WARNING lines marked.
 function sasOutput(s) {
-  const head = h("div", { class: "sas-head" },
+  // Python in SAS: the Python output is a stream / error output of its own; this part is SAS's: its errors and
+  // warnings (only when there are any), the ODS output and the full log (collapsed).
+  const quiet = s.python && !s.errors && !s.warnings;
+  const head = quiet ? null : h("div", { class: "sas-head" },
     h("span", { class: `s2-badge ${s.errors ? "err" : "ok"}` }, `${s.errors} error${s.errors === 1 ? "" : "s"}`),
     s.warnings ? h("span", { class: "s2-badge warn" }, `${s.warnings} warning${s.warnings === 1 ? "" : "s"}`) : null,
     s.library ? h("span", { class: "s2-faint" }, s.library) : null);
   const parts = [head];
   if (s.first_error) parts.push(h("div", { class: "err" }, s.first_error));
+  if (s.python && s.warning_lines?.length) parts.push(h("pre", { class: "stderr" }, s.warning_lines.join("\n")));
   if (s.listing) {
     const doc = new DOMParser().parseFromString(String(s.listing), "text/html");
     doc.querySelectorAll("script, iframe, object, embed, link, meta, base, form").forEach((n) => n.remove());
@@ -731,7 +791,8 @@ function renderOutputs(cell) {
   // Interrupt stops Python code at once, but on Windows not a call waiting in C (a network read, a lock, a long
   // numpy/C loop): after a few seconds, offer the restart that does stop it.
   const stuck = cell.running && state.interruptAt && Date.now() - state.interruptAt > INTERRUPT_GRACE_MS;
-  if (cell.running) st.replaceChildren(h("span", { class: "s2-spinner" }), ` ${S2.runningText(CELL_ENGINE[cell.type] ?? "python")}${cell.seconds ? ` · ${cell.seconds}s` : ""}`,
+  if (cell.running && cell.type === "sas_python") st.replaceChildren(...pysasStatus(cell));
+  else if (cell.running) st.replaceChildren(h("span", { class: "s2-spinner" }), ` ${S2.runningText(CELL_ENGINE[cell.type] ?? "python")}${cell.seconds ? ` · ${cell.seconds}s` : ""}`,
     cellEngineChip(cell),
     stuck ? h("span", { class: "nb-stuck", role: "alert" }, ` · Interrupt didn't stop it: the cell is waiting in code that can't be interrupted here `,
       "(a network read, a lock or a long C call). ",
@@ -746,6 +807,12 @@ async function runCell(cell, { advance = false, confirmed = false } = {}) {
     cell.editing = false; renderCell(cell);
     if (advance) focusNext(cell);
     return true;
+  }
+  if (cell.type === "sas_python") return runSasPython(cell, { advance });
+  if (kernelsOff()) {
+    cell.outputs = [{ output_type: "error", ename: "Not available", evalue: `${state.features.notes?.notebooks ?? "Local notebook kernels are off here."} Only Python in SAS and Text cells run here.`, traceback: [] }];
+    renderOutputs(cell);
+    return false;
   }
   if (!envReady()) { S2.toast("Install the notebook Python environment first", "err"); return false; }
   if (cell.running) return false;
@@ -796,6 +863,85 @@ async function runCell(cell, { advance = false, confirmed = false } = {}) {
   report(cell, result.status);
   return result.status === "ok";
 }
+// ---------------------------------------------------------------- Python in SAS (PROC PYTHON in SAS Compute)
+// The cell runs in the Workspace's SAS Compute session of the active SAS Viya connection (the SQL Editor's session,
+// queue and pre-warm): notebook_sas_python answers with the outputs, or "running" after a while, and the cell asks
+// again. Stop cancels the Compute job (sas_stop); when Viya doesn't stop it, the status offers Restart SAS session.
+const PYSAS_WAIT_MS = 15000;
+async function runSasPython(cell, { advance = false } = {}) {
+  if (cell.running) return false;
+  const source = cell.view.state.doc.toString();
+  if (!source.trim()) { if (advance) focusNext(cell); return true; }
+  if (advance) focusNext(cell);
+  const id = rid("py-") + rid("");
+  cell.running = true; cell.outputs = []; cell.seconds = 0; cell.lastRun = null; cell.el.confirm.replaceChildren();
+  cell.lastEngine = "compute"; cell.lastConn = cellConn("compute");
+  cell.pysas = { id, info: null, started: Date.now(), stopping: false };
+  renderGutter(cell); renderOutputs(cell);
+  const tick = setInterval(() => { if (cell.running) renderOutputs(cell); }, 1000);
+  let data;
+  try {
+    data = await S2.callTool("notebook_sas_python", { source, notebook_id: notebookId, run_id: id, wait_ms: 1500 });
+    while (data.running) {
+      cell.pysas.info = data; renderOutputs(cell);
+      data = await S2.callTool("notebook_sas_python_status", { run_id: id, wait_ms: data.cancel_failed ? 3000 : data.waiting_for?.warming ? 2000 : PYSAS_WAIT_MS });
+    }
+  } catch (e) {
+    data = { status: "error", seconds: Math.round((Date.now() - cell.pysas.started) / 100) / 10,
+      outputs: [{ output_type: "error", ename: "Error", evalue: cleanError(e).message, traceback: [] }] };
+  } finally { clearInterval(tick); }
+  cell.running = false; cell.pysas = null;
+  cell.outputs = data.outputs ?? [];
+  cell.count = (state.execCount = (state.execCount ?? 0) + 1);
+  if (data.connection) cell.lastConn = data.connection;
+  cell.lastRun = `${data.status === "ok" ? "✓" : data.status === "aborted" ? "◼ stopped" : "✕ error"} · ${data.seconds ?? 0}s`;
+  renderGutter(cell); renderOutputs(cell); renderCell(cell);
+  markDirty();
+  report(cell, data.status);
+  return data.status === "ok";
+}
+async function stopSasPython(cell, btn) {
+  const r = cell.pysas;
+  if (!r) return;
+  if (btn) btn.disabled = true;
+  r.stopping = true; renderOutputs(cell);
+  try { r.info = { ...(r.info ?? {}), ...(await S2.callTool("sas_stop", { run_id: r.id })), stopping: true }; }
+  catch (e) { S2.toast(`Couldn't stop: ${cleanError(e).message}`, "err"); }
+  renderOutputs(cell);
+}
+// "Restart SAS session": ends the connection's Compute and CAS sessions (the SQL Editor's too), which also ends the
+// Python interpreter PROC PYTHON keeps in it: every variable and WORK table is gone; the next cell starts Python again.
+async function restartSasSession() {
+  try {
+    await S2.callTool("sas_session_reset", {});
+    for (const c of state.cells) if (c.type === "sas_python") { c.count = null; renderGutter(c); }
+    S2.toast("SAS session ended: Python variables and WORK tables are cleared; the next cell starts a new session", "ok");
+  } catch (e) { S2.toast(`Couldn't restart the SAS session: ${cleanError(e).message}`, "err"); }
+}
+const secsText = (ms) => (ms < 60000 ? `${Math.round(ms / 1000)} s` : `${Math.floor(ms / 60000)} min ${Math.round((ms % 60000) / 1000)} s`);
+function pysasStatus(cell) {
+  const r = cell.pysas ?? { started: Date.now() };
+  const i = r.info ?? {};
+  const w = i.waiting_for;
+  const parts = [h("span", { class: "s2-spinner" })];
+  if (i.cancel_failed) {
+    parts.push(h("span", { class: "warn" }, " SAS didn't stop the run. "),
+      h("button", { class: "s2-btn danger", title: "End this connection's SAS sessions (the run stops; Python variables and WORK tables are cleared)",
+        onclick: () => restartSasSession() }, "Restart SAS session"));
+  } else if (r.stopping || i.stopping) parts.push(" Stopping…");
+  else if (i.state === "queued") {
+    parts.push(w?.warming ? " Waiting for the SAS session to start…"
+      : w?.tab ? ` Waiting for the SAS run in “${w.tab}” (running ${secsText(w.elapsed_ms ?? 0)})…` : " Waiting for the SAS session (busy)…");
+  } else if (r.info && !i.python_started) parts.push(` Starting Python in SAS (first call ~8 s)… ${secsText(Date.now() - r.started)}`);
+  else parts.push(` ${S2.runningText("compute")} ${secsText(Date.now() - r.started)}`);
+  if (!r.stopping && !i.stopping) {
+    parts.push(h("button", { class: "s2-btn ghost", title: i.state === "queued" ? "Don't run it" : "Cancel the SAS job (the SAS session and its Python state stay)",
+      onclick: (e) => stopSasPython(cell, e.currentTarget) }, "Stop"));
+  }
+  parts.push(cellEngineChip(cell));
+  return parts;
+}
+
 function focusNext(cell) {
   const i = state.cells.indexOf(cell);
   const next = state.cells[i + 1] ?? addCell(cell.type === "markdown" ? "python" : cell.type, cell);
@@ -854,8 +1000,11 @@ function toIpynb() {
   return {
     cells: state.cells.map((c) => {
       if (c.type === "markdown") return { cell_type: "markdown", id: c.id, metadata: {}, source: toLines(c.source) };
-      const src = c.type === "sql" ? `%%sql${c.name ? ` ${c.name} <<` : ""}\n${c.source}` : c.type === "sas" ? `%%sas\n${c.source}` : c.source;
-      return { cell_type: "code", id: c.id, metadata: {}, execution_count: c.count ?? null, outputs: c.outputs, source: toLines(src) };
+      const src = c.type === "sql" ? `%%sql${c.name ? ` ${c.name} <<` : ""}\n${c.source}` : c.type === "sas" ? `%%sas\n${c.source}`
+        : c.type === "sas_python" ? `%%sas_python\n${c.source}` : c.source;
+      // Python in SAS: the %%sas_python magic and the kind in the cell's metadata (no Jupyter kernel runs it).
+      const metadata = c.type === "sas_python" ? { singlestore: { kind: "sas_python" } } : {};
+      return { cell_type: "code", id: c.id, metadata, execution_count: c.count ?? null, outputs: c.outputs, source: toLines(src) };
     }),
     metadata: {
       kernelspec: { name: "python3", display_name: "Python 3", language: "python" },
@@ -869,6 +1018,9 @@ function fromIpynb(nb) {
   return (nb.cells ?? []).map((c) => {
     const src = joinText(c.source);
     if (c.cell_type === "markdown" || c.cell_type === "raw") return makeCell("markdown", src, { editing: !src.trim() });
+    const pyMagic = /^%%sas_python\b[^\n]*\n?/i.exec(src);
+    if (pyMagic || c.metadata?.singlestore?.kind === "sas_python")
+      return makeCell("sas_python", pyMagic ? src.slice(pyMagic[0].length) : src, { outputs: c.outputs ?? [], count: c.execution_count ?? null });
     const sasMagic = /^%%sas\b[^\n]*\n?/i.exec(src);
     if (sasMagic) return makeCell("sas", src.slice(sasMagic[0].length), { outputs: c.outputs ?? [], count: c.execution_count ?? null });
     const m = /^%%sql\b([^\n]*)\n?/.exec(src);
@@ -884,10 +1036,20 @@ function loadCells(cells) {
   state.cells = cells;
   state.active = null;
   renderAll();
+  renderHeader();
   state.cells.forEach((c) => renderCell(c));
 }
 function newNotebook() {
   state.file = { name: null, folder: state.file.folder, savedJson: "" };
+  if (kernelsOff()) {
+    loadCells([
+      makeCell("markdown", "# Untitled notebook\nPython in SAS cells run as PROC PYTHON in your SAS Compute session: `SAS.sd2df`, `SAS.submit` and the other helpers are under **SAS helpers** on each cell.", { editing: false }),
+      makeCell("sas_python", 'df = SAS.sd2df("sashelp.class")\nprint(df.describe())'),
+    ]);
+    state.file.savedJson = JSON.stringify(toIpynb());
+    renderFileLabel();
+    return;
+  }
   loadCells([
     makeCell("markdown", "# Untitled notebook\nSQL cells put their result in `df` (or the name you give); Python cells can use it with pandas and matplotlib.", { editing: false }),
     makeCell("sql", state.database ? "SHOW TABLES;" : "SELECT 1 AS x;"),
@@ -1057,8 +1219,9 @@ function warmAssistant(force = false) {
   S2.callTool("notebook_assistant_warm", { notebook_id: notebookId, profile: profileSelect.value }).catch(() => { chat.warmed = null; });
 }
 function codeBlock(code, lang) {
-  const type = /^(sql|mysql)$/i.test(lang) ? "sql" : /^(py|python|ipython)$/i.test(lang) ? "python" : /^sas$/i.test(lang) ? "sas" : null;
-  const label = { sql: "SQL", python: "Python", sas: "SAS" }[type];
+  const type = /^(sql|mysql)$/i.test(lang) ? "sql" : /^(py|python|ipython)$/i.test(lang) ? "python" : /^sas$/i.test(lang) ? "sas"
+    : /^(sas[_-]?python|pysas|python[_-]?in[_-]?sas)$/i.test(lang) ? "sas_python" : null;
+  const label = CELL_LABEL[type];
   return h("div", { class: "nb-code" }, h("pre", {}, code),
     h("div", { class: "cbar" }, h("span", { class: "lang" }, type ?? (lang || "code")),
       type ? h("button", { class: "s2-btn", title: "Insert as a new cell after the selected cell", onclick: () => {
@@ -1092,16 +1255,22 @@ function renderChat() {
   msgsEl.scrollTop = msgsEl.scrollHeight;
 }
 function notebookContext() {
-  const parts = [`Notebook ${state.file.name ?? "(unsaved)"}; database for SQL cells: ${state.database ?? "(default)"}.`];
+  const parts = [`Notebook ${state.file.name ?? "(unsaved)"}; database for SQL cells: ${state.database ?? "(default)"}.`
+    + (kernelsOff() ? " Local kernels are off here: only Python in SAS and text cells run (answer with ```sas_python blocks)." : "")];
   state.cells.forEach((c, i) => {
     const sel = state.active === c ? " (selected)" : "";
     if (c.type === "markdown") { if (c.source.trim()) parts.push(`[${i + 1}] Text${sel}:\n${c.source.slice(0, 600)}`); return; }
-    const head = c.type === "sql" ? `[${i + 1}] SQL cell${sel}, result → ${c.name || "df"}` : `[${i + 1}] Python cell${sel}`;
+    const viya = S2.connections().viya;
+    const head = c.type === "sql" ? `[${i + 1}] SQL cell${sel}, result → ${c.name || "df"}`
+      : c.type === "sas" ? `[${i + 1}] SAS cell${sel}`
+      : c.type === "sas_python" ? `[${i + 1}] Python in SAS cell${sel} (PROC PYTHON in the SAS Compute session${viya ? ` of ${viya}` : ""}: the SAS object, not the local kernel's variables)`
+      : `[${i + 1}] Python cell${sel}`;
     const outs = c.outputs.map((o) => {
       if (o.output_type === "error") return `Error: ${o.ename}: ${stripAnsi(o.evalue)}`.slice(0, 400);
       if (o.output_type === "stream") return joinText(o.text).slice(0, 300);
       const d = o.data ?? {};
       if (d[TABLE_MIME]) return `Table ${d[TABLE_MIME].row_count} rows; columns ${d[TABLE_MIME].columns.join(", ")}`;
+      if (d[SAS_MIME]) return [d[SAS_MIME].first_error, d[SAS_MIME].listing ? "(SAS output)" : null].filter(Boolean).join("\n");
       if (d["image/png"]) return "(chart)";
       return joinText(d["text/plain"] ?? "").slice(0, 300);
     }).filter(Boolean).join("\n");
@@ -1151,7 +1320,7 @@ function report(cell, status) {
 function reportContext(extra = "") {
   const counts = state.cells.reduce((a, c) => ((a[c.type] = (a[c.type] ?? 0) + 1), a), {});
   S2.updateModelContext(`Notebook ${state.file.name ?? "(unsaved)"} is open (id ${notebookId}, database ${state.database ?? "default"}): `
-    + `${counts.sql ?? 0} SQL, ${counts.python ?? 0} Python and ${counts.markdown ?? 0} text cells. ${extra}`.trim());
+    + `${counts.sql ?? 0} SQL, ${counts.python ?? 0} Python, ${counts.sas ?? 0} SAS, ${counts.sas_python ?? 0} Python in SAS and ${counts.markdown ?? 0} text cells. ${extra}`.trim());
 }
 
 // ---------------------------------------------------------------- host wiring
@@ -1188,12 +1357,15 @@ await S2.connect({
       const dbs = await S2.callTool("schema_explorer_databases", {});
       state.databases = (dbs.databases ?? []).map((d) => d.name ?? d);
     } catch { state.databases = []; }
+    state.features = data.features ?? {};
     state.env = data.environment ?? null;
     renderEnv();
     if (data.database && state.databases.includes(data.database)) await chooseDatabase(data.database);
     if (data.name) openFile(data.name); else newNotebook();
     renderHeader();
     reportContext();
+    document.body.dataset.loaded = "1";  // the opening result is applied (cells added from now on stay)
+    if (kernelsOff()) { renderAll(); renderHeader(); return; }  // no local kernel here: Python in SAS cells only
     await loadEnv();
   },
 });
