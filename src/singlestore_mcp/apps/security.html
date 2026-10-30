@@ -1156,30 +1156,14 @@ async function scriptAction(where, what) {
   else if (what === "show") { state.basketScript = s.script; renderBasket(); }
 }
 
-// A new SQL Editor tab holding the script; it is not run (the hand-off has no "run").
+// A new SQL Editor tab holding the script; it is not run (the hand-off has no "run"). Shared with the Schema
+// Explorer's reshard script (S2.openScriptInEditor / S2.scriptSaveBox / S2.scriptButtons in shared.js).
 async function openScriptInEditor(sql, where) {
-  if (S2.embedded()) {
-    S2.openView("sql:new", { sql });
-    S2.toast("Script opened in a new SQL Editor tab: nothing ran", "ok");
-    return;
-  }
-  try {
-    const t = await S2.callTool("sql_editor_tab_new", {});
-    await S2.callTool("sql_editor_save_draft", { tab_id: t.tab.id, sql, dirty: true, anchor: 0, head: 0 });
-    await S2.openAppInBrowser("sql_editor", { view: "sql" });
-  } catch (e) { setScriptErr(where, e); }
+  try { await S2.openScriptInEditor(sql); } catch (e) { setScriptErr(where, e); }
 }
 
 // Save as .sql: the file browser with its location bar (this computer, SAS Content, SAS Server), as the SQL Editor's
 // Save as. The browser element is kept while the change panel / basket re-render around it.
-async function saveScriptTo(path, overwrite) {
-  const r = await S2.callTool("sql_editor_save_file", { name: path, sql: save.sql, overwrite: Boolean(overwrite) });
-  if (r.exists || r.conflict) return { ...r, exists: true };  // the browser asks "Replace it?"
-  if (r.connection_mismatch) throw new Error(r.message);
-  S2.toast(`Saved ${r.display ?? `${r.name} in ${r.folder ?? "the SQL folder"}`}`, "ok");
-  closeSave();
-  return r;
-}
 function closeSave() {
   const w = save?.where;
   save = null;
@@ -1188,19 +1172,12 @@ function closeSave() {
 
 function saveForm(where) {
   if (save?.where !== where) return null;
-  if (!save.el) {
-    save.el = h("div", { class: "sc-save s2-files", role: "group", "aria-label": "Save the script as a .sql file" });
-    S2.fileLocations(save.el, { kind: "sql", mode: "save", name: save.name, onSave: saveScriptTo, onClose: closeSave });
-  }
+  if (!save.el) save.el = S2.scriptSaveBox({ name: save.name, sql: save.sql, onClose: closeSave, cls: "sc-save" });
   return save.el;
 }
 
 function scriptButtons(where) {
-  return [
-    h("button", { class: "s2-btn", onclick: () => scriptAction(where, "copy"), title: "Copy the statements as a commented SQL script (nothing runs)" }, "Copy SQL"),
-    h("button", { class: "s2-btn", onclick: () => scriptAction(where, "open"), title: "Open the script in a new SQL Editor tab (it isn't run)" }, "Open in SQL Editor"),
-    h("button", { class: "s2-btn", onclick: () => scriptAction(where, "save"), title: "Save the script as a .sql file: on this computer, in SAS Content or on the SAS server" }, "Save as .sql…"),
-  ];
+  return S2.scriptButtons((what) => scriptAction(where, what));
 }
 
 // In the change panel, next to Run.

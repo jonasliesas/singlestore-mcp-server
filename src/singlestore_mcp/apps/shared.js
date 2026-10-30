@@ -1241,3 +1241,43 @@ S2.fileLocations = function (box, opts) {
   }
   show(startLoc);
 };
+
+// SQL scripts handed over, never run (the Security view's script basket, the Schema Explorer's reshard script):
+// Copy SQL / Open in SQL Editor / Save as .sql… with the same wording and behaviour everywhere.
+//   S2.scriptButtons((what) => …) -> the three buttons; what = "copy" | "open" | "save"
+//   S2.openScriptInEditor(sql) -> a new SQL Editor tab holding the script (not run); throws on failure
+//   S2.scriptSaveBox({ name, sql, onClose }) -> the file browser (This computer / SAS Content / SAS Server) in save
+//     mode; an existing file is only replaced after "Replace it"
+S2.scriptButtons = function (onAction) {
+  const { h } = S2;
+  return [
+    h("button", { class: "s2-btn", onclick: () => onAction("copy"), title: "Copy the statements as a commented SQL script (nothing runs)" }, "Copy SQL"),
+    h("button", { class: "s2-btn", onclick: () => onAction("open"), title: "Open the script in a new SQL Editor tab (it isn't run)" }, "Open in SQL Editor"),
+    h("button", { class: "s2-btn", onclick: () => onAction("save"), title: "Save the script as a .sql file: on this computer, in SAS Content or on the SAS server" }, "Save as .sql…"),
+  ];
+};
+S2.openScriptInEditor = async function (sql) {
+  if (S2.embedded()) {
+    S2.openView("sql:new", { sql });
+    S2.toast("Script opened in a new SQL Editor tab: nothing ran", "ok");
+    return;
+  }
+  const t = await S2.callTool("sql_editor_tab_new", {});
+  await S2.callTool("sql_editor_save_draft", { tab_id: t.tab.id, sql, dirty: true, anchor: 0, head: 0 });
+  await S2.openAppInBrowser("sql_editor", { view: "sql" });
+};
+S2.scriptSaveBox = function ({ name, sql, onClose, cls = "" }) {
+  const box = S2.h("div", { class: `s2-files ${cls}`.trim(), role: "group", "aria-label": "Save the script as a .sql file" });
+  S2.fileLocations(box, {
+    kind: "sql", mode: "save", name, onClose,
+    onSave: async (path, overwrite) => {
+      const r = await S2.callTool("sql_editor_save_file", { name: path, sql, overwrite: Boolean(overwrite) });
+      if (r.exists || r.conflict) return { ...r, exists: true };  // the browser asks "Replace it?"
+      if (r.connection_mismatch) throw new Error(r.message);
+      S2.toast(`Saved ${r.display ?? `${r.name} in ${r.folder ?? "the SQL folder"}`}`, "ok");
+      onClose?.();
+      return r;
+    },
+  });
+  return box;
+};
