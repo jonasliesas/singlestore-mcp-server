@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-    Install or update the SingleStore Workspace on Windows: one command, no Claude needed.
+    Install or update SAS SpeedyStore Studio (the SingleStore Workspace) on Windows: one command, no Claude needed.
 
 .DESCRIPTION
     Installs uv (which brings Python 3.12), downloads this project, installs its
-    dependencies, creates a "SingleStore Workspace" shortcut on the desktop and in
+    dependencies, creates a "SAS SpeedyStore Studio" shortcut on the desktop and in
     the Start menu, and opens the workspace. Run it again to update.
 
     One-line install (PowerShell or the Windows Run box):
@@ -40,7 +40,8 @@
     instead of downloading it from GitHub.
 
 .PARAMETER ShortcutName
-    Name of the shortcuts. Default: SingleStore Workspace
+    Name of the shortcuts. Default: SAS SpeedyStore Studio (an old "SingleStore Workspace"
+    shortcut is replaced)
 
 .PARAMETER Uninstall
     Remove the program and its shortcuts. Your connections, SQL files and
@@ -54,7 +55,7 @@ param(
     [switch]$NoLaunch,
     [switch]$Uninstall,
     [string]$Source = "",
-    [string]$ShortcutName = "SingleStore Workspace",
+    [string]$ShortcutName = "SAS SpeedyStore Studio",
     [string]$Repo = "https://github.com/jonasliesas/singlestore-mcp-server",
     [string]$Branch = "master"
 )
@@ -82,18 +83,20 @@ function Stop-Workspace {
     Start-Sleep -Milliseconds 800
 }
 
-function Shortcut-Paths {
+function Shortcut-Paths($name = $ShortcutName) {
     @(
-        (Join-Path ([Environment]::GetFolderPath("Desktop")) "$ShortcutName.lnk"),
-        (Join-Path ([Environment]::GetFolderPath("Programs")) "$ShortcutName.lnk")
+        (Join-Path ([Environment]::GetFolderPath("Desktop")) "$name.lnk"),
+        (Join-Path ([Environment]::GetFolderPath("Programs")) "$name.lnk")
     )
 }
 
+$LegacyShortcutName = "SingleStore Workspace"   # the name before 0.11.0
+
 # ---------------------------------------------------------------- uninstall
 if ($Uninstall) {
-    Step "Removing the SingleStore Workspace"
+    Step "Removing SAS SpeedyStore Studio"
     Stop-Workspace
-    foreach ($lnk in Shortcut-Paths) {
+    foreach ($lnk in (Shortcut-Paths) + (Shortcut-Paths $LegacyShortcutName)) {
         if (Test-Path $lnk) { Remove-Item $lnk -Force; Info "Removed $lnk" }
     }
     if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force; Info "Removed $InstallDir" }
@@ -103,7 +106,7 @@ if ($Uninstall) {
     return
 }
 
-Write-Host "SingleStore Workspace installer" -ForegroundColor Green
+Write-Host "SAS SpeedyStore Studio installer" -ForegroundColor Green
 Info "Program folder: $InstallDir"
 
 # ---------------------------------------------------------------- 1. uv (brings Python)
@@ -163,7 +166,7 @@ Step "Installing Python 3.12 and the dependencies (first time: a minute or two)"
 if ($LASTEXITCODE -ne 0) {
     Stop-Workspace
     & $uv sync --directory $InstallDir --frozen --no-dev
-    if ($LASTEXITCODE -ne 0) { Fail "Installing the dependencies failed. Close any SingleStore Workspace windows and run this again." }
+    if ($LASTEXITCODE -ne 0) { Fail "Installing the dependencies failed. Close any SAS SpeedyStore Studio windows and run this again." }
 }
 $python = Join-Path $InstallDir ".venv\Scripts\python.exe"
 $pythonw = Join-Path $InstallDir ".venv\Scripts\pythonw.exe"
@@ -184,6 +187,11 @@ if ($LASTEXITCODE -ne 0) { Fail "Creating the desktop shortcut failed." }
 $desktopLnk, $startLnk = Shortcut-Paths
 Copy-Item $desktopLnk $startLnk -Force
 Info "Desktop and Start menu: $ShortcutName"
+if ($ShortcutName -ne $LegacyShortcutName) {
+    foreach ($lnk in Shortcut-Paths $LegacyShortcutName) {
+        if (Test-Path $lnk) { Remove-Item $lnk -Force; Info "Replaced the old shortcut $lnk (pin the new one again if the old was pinned)" }
+    }
+}
 
 # ---------------------------------------------------------------- 6. Claude (optional)
 if ($WithClaude) {

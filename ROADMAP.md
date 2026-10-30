@@ -138,6 +138,11 @@ Last updated 2026-10-27 (latest release 0.10.1; design round from `studio-design
   Measured: 15 / 80 → 80 / 80 of the assistant's answers run (README). Tests: `test_sas_guide.py`, `test_assistants.py`
   (`--assistants --sas`).
 
+- Installer and desktop shortcut renamed **SAS SpeedyStore Studio** (agreed with Jonas 2026-10-30): the old
+  "SingleStore Workspace" shortcut is replaced on the next install (pin it again if it was pinned); the shortcut's
+  icon is the Studio mark (`scripts/studio.ico`, rendered by `scripts/make_studio_icon.py`). Program folder and MCP
+  tool names unchanged.
+
 ## Backlog
 **Design review – what's left** (`../studio-design-review.md`; IDs from there)
 - Bigger ideas: a Home / overview start view (1), responsive tables with column priorities (3: L-6 Query text and
@@ -156,8 +161,6 @@ Last updated 2026-10-27 (latest release 0.10.1; design round from `studio-design
   focus), I-4 (arrow keys in tabs), I-5 (skeletons), I-7, I-8, A-1 (`--s2-text-3` under 4.5:1; comes from the host in
   Claude), A-3 (input borders), A-5 (colour-only signals).
 - Tests: Playwright's hit testing is off inside CSS-zoomed frames, so presenter-mode UI tests click with JS.
-- Naming: the desktop shortcut / installer still say "SingleStore Workspace" (`install.ps1`; renaming moves the
-  user's shortcut, so only with Jonas); the splash and every title say SAS SpeedyStore Studio.
 
 **Security**
 - Ideas: `REQUIRE X509 / SUBJECT` (mutual TLS); `PASSWORD EXPIRE` / `ACTIVATE`; "Drop view" for column views;

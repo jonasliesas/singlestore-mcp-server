@@ -1,10 +1,11 @@
-"""Create a desktop shortcut that opens the standalone SingleStore Workspace.
+"""Create a desktop shortcut that opens the standalone SAS SpeedyStore Studio.
 
-    uv run python scripts/make_shortcut.py [--database SASDP] [--name "SingleStore Workspace"]
+    uv run python scripts/make_shortcut.py [--database SASDP] [--name "SAS SpeedyStore Studio"]
 
 The shortcut runs ``pythonw -m singlestore_mcp.workspace_app`` from this
-project's virtual environment (no console window). It also writes a small
-database icon (scripts/singlestore-workspace.ico) for it. Windows only.
+project's virtual environment (no console window). Its icon is the Studio mark
+(scripts/studio.ico, made by scripts/make_studio_icon.py); without that file it
+writes a small database icon (scripts/singlestore-workspace.ico). Windows only.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 ICON = ROOT / "scripts" / "singlestore-workspace.ico"
+STUDIO_ICON = ROOT / "scripts" / "studio.ico"
 
 
 def _png(size: int) -> bytes:
@@ -69,10 +71,13 @@ def write_icon(path: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--database", default="")
-    parser.add_argument("--name", default="SingleStore Workspace")
+    parser.add_argument("--name", default="SAS SpeedyStore Studio")
     parser.add_argument("--view", default="", help="view to open: sql, notebook, schema, pipelines, cluster, history, alerts or connections")
     opts = parser.parse_args()
-    write_icon(ICON)
+    icon = STUDIO_ICON
+    if not icon.exists():
+        write_icon(ICON)
+        icon = ICON
     pythonw = ROOT / ".venv" / "Scripts" / "pythonw.exe"
     arguments = "-m singlestore_mcp.workspace_app" + (f" --database {opts.database}" if opts.database else "")
     if opts.view:
@@ -83,8 +88,8 @@ $s = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $desktop '{
 $s.TargetPath = '{pythonw}'
 $s.Arguments = '{arguments}'
 $s.WorkingDirectory = '{ROOT}'
-$s.IconLocation = '{ICON},0'
-$s.Description = 'Open the SingleStore Workspace in its own window'
+$s.IconLocation = '{icon},0'
+$s.Description = 'Open SAS SpeedyStore Studio in its own window'
 $s.Save()
 Write-Output (Join-Path $desktop '{opts.name}.lnk')
 """

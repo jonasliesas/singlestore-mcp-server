@@ -2008,7 +2008,7 @@ The workspace also runs **without Claude**, in its own window:
 uv run python scripts/make_shortcut.py --database SASDP
 ```
 
-creates a **SingleStore Workspace** desktop shortcut. It starts the app server
+creates a **SAS SpeedyStore Studio** desktop shortcut. It starts the app server
 on `127.0.0.1` and opens the workspace in an Edge app window (`--browser` for
 your default browser). Clicking it again opens another window; after a code
 update it replaces the running server; it stops 5 minutes after the last
@@ -2123,7 +2123,7 @@ No administrator rights needed. [`install.ps1`](install.ps1):
 2. downloads the program to `%USERPROFILE%\singlestore-workspace` (with git if
    available, otherwise as a ZIP);
 3. installs the dependencies;
-4. creates a **SingleStore Workspace** shortcut on the desktop and in the Start
+4. creates a **SAS SpeedyStore Studio** shortcut (replacing an old "SingleStore Workspace" one) on the desktop and in the Start
    menu;
 5. opens the workspace. On the first start it opens on **Connections**, where
    you add your cluster (password, JWT, Helios SSO or Microsoft Entra ID).
@@ -2217,7 +2217,7 @@ the shortcut, or sign out and in again afterwards.
 uv run python scripts/make_shortcut.py --database SASDP
 ```
 
-This creates a **SingleStore Workspace** shortcut with a database icon on your
+This creates a **SAS SpeedyStore Studio** shortcut with the Studio logo on your
 desktop. To find it from the Start menu too, copy it to
 `%APPDATA%\Microsoft\Windows\Start Menu\Programs`. Options:
 
