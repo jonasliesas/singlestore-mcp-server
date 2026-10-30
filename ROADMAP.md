@@ -234,8 +234,12 @@ in step 1, "Ask Claude" off by default (switchable later with an Anthropic / Fou
   reaches its own kernels).
   - **2a – one shared kernel pod:** the gateway starts kernels as processes in its own pod. Tokens come from a hub
     relay that knows each kernel's user (never in the kernel's environment); per-kernel memory cap (`RLIMIT_AS`), low
-    CPU priority, max kernels per user and in total; one image environment + a per-user `pip install --target` folder
-    via a PyPI mirror; egress only to SingleStore, Viya / SAS Logon, the relay and the mirror. Notebooks only for a
+    CPU priority, max kernels per user and in total; one image environment + a per-user `pip install --target` folder.
+    Package installs are a setting (`STUDIO_PIP_MODE`, decided 2026-10-30): `mirror` (default when
+    `STUDIO_PIP_INDEX_URL` is set – an internal Artifactory / Nexus PyPI proxy; egress only to the mirror), `pypi`
+    (alternative: straight to pypi.org + files.pythonhosted.org, needs that egress opening in the NetworkPolicy), `off`
+    (only the image's packages). The deploy files ship a NetworkPolicy variant per mode; the admin page shows the mode.
+    Egress otherwise only to SingleStore, Viya / SAS Logon and the relay. Notebooks only for a
     named group of colleagues. **No isolation between users' kernels** (same OS user and pod: one kernel can read
     another's files / key and act as that user; one runaway kernel can take the pod down) – say so in the docs and on
     the admin page.
@@ -244,8 +248,8 @@ in step 1, "Ask Claude" off by default (switchable later with an Anthropic / Fou
     limits on the kernel pods; the hub then needs a Role to manage pods in its namespace.
   - Option to check: "Python in SAS" cells via `PROC PYTHON` in the user's own Compute session, if Zeus has Python
     configured (isolated by Viya, nothing from the K8s admins).
-  - Questions for Jonas: which colleagues get notebooks, is there a PyPI mirror at SAS (Artifactory?), size of the
-    shared volume.
+  - Who gets notebooks: the `STUDIO_NOTEBOOK_GROUP` SAS group (see the hub's group access).
+  - Questions for Jonas: is there a PyPI mirror at SAS (Artifactory?) – until then `pypi`; size of the shared volume.
 - **Step 2 – the rest:** Ask Claude via an org key held by the hub (relay, per-user limits), shared metrics sampler
   instead of one per Studio, more than one hub replica (sessions out of memory), SingleStore per-user JWT logins.
 
