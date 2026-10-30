@@ -16,6 +16,16 @@ review polish round on branch `claude/polish`).
   restarted on a missing table, Viya connection retries, SAS tests opt-in (`--sas`).
 
 ## Since 0.10.1 (committed, not released – 0.11.0 planned the week of 2026-11-02: Jonas tests Monday, fixes, release before the Zeus deploy)
+- **Load file into table** (2026-10-30, branch `claude/load-file`): Schema Explorer (database / table header) and the
+  SQL Editor tree. Large Open dialog on This computer; detected encoding (UTF-8 / Windows-1252 / Latin-1), delimiter,
+  quote, header, NULL markers (SAS `.`), decimal comma, date / time formats (SAS DATE9 / DATETIME too); 200-row preview;
+  new table with an editable CREATE TABLE (conservative types, SORT KEY on a date, SHARD KEY on a unique id) or append
+  with a by-name mapping; review = confirmation with the engine chip; above `SINGLESTORE_MCP_LOAD_LIMIT_MB` (100) a
+  CREATE PIPELINE template (S3 / Azure, placeholders) and a second confirmation. Every row checked locally first (bad
+  rows: line + reason, skip on request), then `LOAD DATA LOCAL INFILE ':stream:'` (UTF-8 TSV, all or nothing,
+  `SKIP ALL ERRORS … ERRORS HANDLE` for the cluster's own refusals) or batched INSERTs in one transaction; Cancel
+  aborts / rolls back and removes a new empty table; a network break is never re-sent ("may or may not"); row count
+  checked; history entries. Off in server mode. Code: `apps/load_file.py`, `apps/vendor/s2-load-file.js`.
 - Security: **SQL script instead of Run** – Copy / Open in SQL Editor / Save as .sql, script basket, password
   placeholder, works without change privileges.
 - Security (not committed yet): **password change** (own password via SET PASSWORD without ALTER USER; optional
@@ -222,6 +232,17 @@ review polish round on branch `claude/polish`).
 - Idea: show a tab's pinned SAS Viya connection in the Workspace tab bar (now in the editor's header and ⚙).
 - File browser: rename / delete of several items at once, and moving between folders (today one item, in its own
   folder); a local delete goes straight away, not to the Recycle Bin.
+
+**Load file into table – open items**
+- Parquet and Excel (.xlsx): no reader among the dependencies (no pyarrow / openpyxl / pandas); .xlsx could be read with
+  the stdlib (zip + XML, first sheet) if wanted; Parquet needs pyarrow (~100 MB) – decide before adding it.
+- Server mode: upload from the browser (today the feature is shown as unavailable there).
+- INSERT fallback: rows SingleStore refuses can't be skipped one by one (the transaction fails with the error and line
+  range); LOAD DATA's `SKIP ALL ERRORS` covers it when local infile is allowed (it is on the test cluster).
+- Gzip'd files (.csv.gz), several files at once, a fixed-width reader; type inference only sees the first 5,000 rows
+  (a later value that doesn't fit is reported as a bad row – then widen the type in the CREATE TABLE).
+- Presenter mode masks the path's user name and the connection like elsewhere; the CREATE TABLE text (a textarea) isn't
+  masked (it only holds database / table / column names).
 
 **Workspace / performance**
 - Start-up, what's left (2026-10-26): a cold server is ~3 s of imports before the handshake, ~2 s of it the MCP SDK

@@ -1013,7 +1013,7 @@ the exact `jwks_endpoint`, `jwks_username_field` and user the cluster needs.
 
 | App (tool) | What it shows and does |
 |---|---|
-| **Schema Explorer** `schema_explorer(database?, table?)` | Databases (with a bottomless / local icon) → tables with row counts and sizes; per table the columns, DDL (shard / sort keys), a row preview and its **Distribution** (data skew over partitions and leaves); **Check skew** for a whole database. **Ask Claude**, **Query in grid** and **Analyze…** (refresh statistics, with confirmation). |
+| **Schema Explorer** `schema_explorer(database?, table?)` | Databases (with a bottomless / local icon) → tables with row counts and sizes; per table the columns, DDL (shard / sort keys), a row preview and its **Distribution** (data skew over partitions and leaves); **Check skew** for a whole database. **Ask Claude**, **Query in grid**, **Analyze…** (refresh statistics, with confirmation) and **Load file into table…** (see [Load a file into a table](#load-a-file-into-a-table)). |
 | **Pipeline Monitor** `pipeline_monitor(database?)` | Every pipeline's state, source → table, progress (files loaded / Kafka lag), latest batches and errors. Start / Stop (with confirmation), Test, error details, **Ask Claude**, auto-refresh. |
 | **Cluster Monitor** `cluster_monitor()` | Tabs **Overview** (per node SingleStore CPU against its core limit, memory and disk, beside a 15-minute CPU chart), **Health** (node and partition state, cluster events, license, problems explained), **Queries** (running now, plus every statement that ran in the last 60 s), **Disk**, **Bottomless**, **IO**, **History** (CPU, memory, disk, queue and connections over 1 h / 24 h / 7 d) and **Backups**. Refreshes every 5 s. |
 | **Security** `security(tab?)` | Users with risk flags, effective privileges with the reason for each, "who can access …", resource pools and the workload manager queue, audit log settings. Changes (users, grants, roles, groups, pools) only in the view, each previewed and confirmed, or written to a SQL script for a DBA. See [Security](#security). |
@@ -1697,6 +1697,59 @@ tools `workload_define`, `workload_run`, `workload_status`, `workload_stop`,
 `workload_list` and `workload_compare` work the same way without opening the
 app, so Claude can define, run, watch and compare a workload from the chat.
 
+### Load a file into a table
+
+**Load file into table…** in the Schema Explorer (a database's header: new or
+existing table; a table's header: add rows to it) and **Load file…** in the SQL
+Editor's tree (on a database row when you hover it, and under an expanded table's
+columns). Studio runs on your PC and
+reads the file itself – nothing is uploaded through the browser.
+
+1. **Pick the file** on *This computer* in the large Open dialog (`.csv`, `.tsv`,
+   `.txt`, `.tab`, `.psv`, `.dat`; the same folders as the SQL Editor's Open).
+2. **How to read it** – detected, and yours to change: encoding (UTF-8, or
+   Windows-1252 / Latin-1 as SAS and Excel exports on Windows often are; a wrong
+   pick shows replaced characters), delimiter, quote, header line, NULL markers
+   (empty values, and SAS's `.` for a missing number when the file has it) and
+   decimal comma (`12,5`). The first 200 rows show as read, with each column's
+   suggested type and date / time format (`DD.MM.YYYY`, `01FEB2024`,
+   `01FEB2024:10:15:00`, ISO …; *ambiguous* when day and month could swap).
+3. **Target** – a new table gets an editable **CREATE TABLE**: conservative
+   types from the first 5,000 rows (VARCHARs at least twice the longest value,
+   BIGINT, DECIMAL with headroom or DOUBLE, DATE / DATETIME(6), text with leading
+   zeros stays text), columnstore with a **SORT KEY** on the first date column and
+   a **SHARD KEY** on a unique id-like column (else keyless). An existing table
+   shows the **column mapping** by name (any case), each column changeable;
+   table columns without a file column get their default, a NOT NULL column
+   without a default stops you.
+4. **Review = the confirmation**: file, size, estimated rows, how it's read,
+   target and *Runs on SingleStore · connection*. Nothing is written before
+   **Load**. Above the size limit (100 MB, `SINGLESTORE_MCP_LOAD_LIMIT_MB`) the
+   server route is recommended – a **CREATE PIPELINE** template for S3 or Azure
+   blob with `<placeholders>` for the credentials (fill them in yourself) – and
+   **Load anyway** needs a second tick.
+5. **Load**: every row is checked on your PC first (nothing is sent yet). Bad
+   rows (wrong number of fields, a value that isn't a number / date) are listed
+   with line and reason and stop the load – a new table is removed again – until
+   you choose **Skip these rows and load the rest**. Then `LOAD DATA LOCAL
+   INFILE` streams the rows (re-written as UTF-8 text, dates as ISO), all or
+   nothing; with *skip* on, rows SingleStore refuses (too long, out of range) are
+   skipped and listed too (`ERRORS HANDLE`). If the cluster or driver doesn't
+   allow local infile, batched INSERTs in one transaction are used instead.
+   Progress (rows, MB, %), **Cancel** (the statement is aborted / rolled back,
+   nothing is kept), the **row count checked** before and after, and **Open in
+   SQL Editor** (`SELECT … LIMIT 100`). The CREATE TABLE and the load land in the
+   SQL Editor's history.
+
+A load cut off by a network break is never sent again by itself: the wizard
+says it may or may not have finished and shows the table's row count. On the
+Studio server (server mode) the feature is off – the server can't read your
+PC's disk; upload is a later step.
+
+Measured on the 4-node test cluster over VPN, a 10 MB CSV (112,829 rows, 6
+columns): about 11 s with `LOAD DATA LOCAL INFILE` (2 s connect and create,
+1.6 s checking, 7 s loading), about 29 s with the INSERT fallback.
+
 ### Security
 
 Who can do what, and (for users with the right privileges) a GUI to change it.
@@ -2035,6 +2088,7 @@ All optional, as environment variables of the MCP server:
 | `SINGLESTORE_MCP_CLAUDE` | `claude` on PATH | Claude Code executable for the in-app assistant |
 | `SINGLESTORE_MCP_ASSISTANT_MODEL` / `_EFFORT` | `sonnet` / `medium` | The *Balanced* assistant profile |
 | `SINGLESTORE_MCP_ASSISTANT_TIMEOUT` | `300` | Seconds before an answer is abandoned |
+| `SINGLESTORE_MCP_LOAD_LIMIT_MB` | `100` | Load file into table: above this size the pipeline route is recommended and loading through this computer needs a second confirmation |
 | `SINGLESTORE_MCP_POOL_SIZE` | `8` | Database connections in the server's pool |
 | `SINGLESTORE_MCP_POOL_WAIT` | `120` | Seconds a call waits for a free pooled connection before it gives up with a readable error |
 | `SINGLESTORE_MCP_TCP_KEEPALIVE` | `10,5,3` | TCP keepalive of every cluster / Viya connection: idle seconds, seconds between probes, probes (`0` = the OS default) |
