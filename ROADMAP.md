@@ -26,6 +26,19 @@ review polish round on branch `claude/polish`).
   `SKIP ALL ERRORS … ERRORS HANDLE` for the cluster's own refusals) or batched INSERTs in one transaction; Cancel
   aborts / rolls back and removes a new empty table; a network break is never re-sent ("may or may not"); row count
   checked; history entries. Off in server mode. Code: `apps/load_file.py`, `apps/vendor/s2-load-file.js`.
+- **Reshard script** (2026-10-30, branch `claude/reshard-dropview`): Schema Explorer Distribution tab, next to a
+  simulation result, "Copy to a new table with this shard key…" – a SQL script that never runs (Copy / Open in SQL
+  Editor / Save as .sql, the Security basket's code now shared in `shared.js`): CREATE TABLE `<t>__reshard` from the
+  real SHOW CREATE TABLE with only the SHARD KEY replaced, INSERT … SELECT (+ AGGREGATOR SYNC AUTO_INCREMENT), row-count
+  and skew checks, the two-step rename swap, `-- DROP TABLE <t>__old`; warnings filled in (size ×2, pipelines with
+  STOP / START, views and grants by name, existing work names, duration from the simulation, quiet window); unique
+  keys without the new key refused (error 1744). Checked in the 9.0 docs and on 9.0.40 in `test`: no RENAME TABLE /
+  atomic swap, renames keep dependent views working by name, AGGREGATOR SYNC refuses a backquoted table name (error
+  1103 → database-wide sync). Code: `reshard.py`, `schema_explorer_reshard_script`.
+- Security: **Drop view…** for column views (the "Grant columns (view)" form lists the views on the table; also next
+  to views in a user's effective privileges and a role's privileges): preview lists the grants that go, which are
+  revoked first (the docs don't say DROP VIEW removes them), then DROP VIEW; typed name to confirm, or into the
+  script basket; creator / SUPER check (docs). New app-only `security_views`.
 - Security: **SQL script instead of Run** – Copy / Open in SQL Editor / Save as .sql, script basket, password
   placeholder, works without change privileges.
 - Security (not committed yet): **password change** (own password via SET PASSWORD without ALTER USER; optional
@@ -210,8 +223,9 @@ review polish round on branch `claude/polish`).
 - Tests: Playwright's hit testing is off inside CSS-zoomed frames, so presenter-mode UI tests click with JS.
 
 **Security**
-- Ideas: `REQUIRE X509 / SUBJECT` (mutual TLS); `PASSWORD EXPIRE` / `ACTIVATE`; "Drop view" for column views;
-  re-apply locks after a cluster restart (restarts clear them).
+- Ideas: `REQUIRE X509 / SUBJECT` (mutual TLS); `PASSWORD EXPIRE` / `ACTIVATE`; re-apply locks after a cluster
+  restart (restarts clear them). Drop view: check on 9.0.40 (with a zz_test_ role) whether DROP VIEW alone removes
+  the grants on a view – if it does, the REVOKEs before it could go.
 - Audit view – needs an admin: `auditlog_level` (e.g. ADMIN-ONLY) in the Operator's `spec.globalVariables`, the
   node log files shipped (Fluent Bit) into a table; then an Audit tab with filters. Today: guidance tab only.
 
@@ -271,8 +285,6 @@ review polish round on branch `claude/polish`).
   per process: a new server behind an `HTTPS_PROXY` that can't reach Viya waits for the proxy first again.
 - singlestoredb compiles its Fusion SQL grammars on every start (~0.5 s of the connection import; no option skips
   it, also not on upstream `main`) – issue text ready for Jonas to file: `docs/upstream-singlestoredb-fusion.md`.
-- Reshard simulation: a "Copy to a new table with this shard key" script (CREATE TABLE … SHARD KEY + INSERT …
-  SELECT + swap) for a DBA, like the Security basket.
 
 **SAS EP (with the SAS EP owners)**
 - The fixed ~5 s wait before the EP's first SQL (no CPU or queueing in SingleStore; concurrent calls share one

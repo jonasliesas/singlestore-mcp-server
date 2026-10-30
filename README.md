@@ -1179,6 +1179,38 @@ pipeline's batch history and error log.
   up; every row is still read, but fewer are moved and grouped). **Query in SQL
   Editor** shows the query. Backend: `schema_explorer_reshard(database, table,
   columns, sample_rows?)` (app-only, read-only).
+- **Copy to a new table with this shard key…** (next to a simulation result)
+  writes a SQL script for a DBA and **never runs it**: the same **Copy SQL**,
+  **Open in SQL Editor** and **Save as .sql…** as the Security view's script
+  basket. A shard key can't be changed in place on 9.0 (*Shard keys*: "cannot
+  be modified"; *ALTER TABLE*: "Altering PRIMARY or SHARD keys is
+  unsupported"), so the script copies the table:
+  1. `CREATE TABLE <t>__reshard` from the table's real `SHOW CREATE TABLE`
+     with only the SHARD KEY replaced (columns, SORT KEY, indexes, rowstore /
+     columnstore, AUTO_INCREMENT, comments and table options stay; a table
+     sharded by its PRIMARY KEY gets an explicit SHARD KEY);
+  2. `INSERT INTO <t>__reshard SELECT * FROM <t>` (a column list when there
+     are computed columns), then `AGGREGATOR SYNC AUTO_INCREMENT … ALL` for an
+     AUTO_INCREMENT column (copied values don't move the counter, docs);
+  3. a row-count check and 4. the skew check of the new table
+     (`TABLE_STATISTICS`, the docs' skew score);
+  5. the rename swap – `ALTER TABLE <t> RENAME TO <t>__old`, then
+     `<t>__reshard` → `<t>` (two statements: 9.0 has no `RENAME TABLE` and no
+     atomic swap; tried on 9.0.40);
+  6. `-- DROP TABLE <t>__old;`, commented out.
+
+  The header's warnings are filled in for the table: its size (disk and
+  memory twice until the old table is dropped), pipelines that load into it
+  (with `STOP PIPELINE` / `START PIPELINE` for the running ones), views and
+  grants that refer to it by name (views fail between the two renames, then
+  read the new table), work names that already exist, an estimated duration
+  (2–6 × the simulation's time) and "run it in a quiet window". Refused up
+  front: a key that a PRIMARY / UNIQUE key doesn't contain (SingleStore error
+  1744), a reference table, the table's current key. Found on 9.0.40:
+  `AGGREGATOR SYNC AUTO_INCREMENT ON db.t` refuses a table name with a
+  backquote (error 1103), so such a script syncs the whole database. Backend:
+  `schema_explorer_reshard_script(database, table, columns, simulation?)`
+  (app-only, read-only; logic and doc references in `reshard.py`).
 
 **Schema Explorer: bottomless and Analyze**
 
@@ -1935,13 +1967,26 @@ the SingleStore 9.0 docs and tried on 9.0.40 with `zz_test_` users:
   `GRANT SELECT ON db.v TO …`. Views run as their creator (`DEFINER`), so the
   grantee needs nothing on the table; the plan warns when the grantee already
   has `SELECT` on the table, the database or `*.*` (then the restriction doesn't
-  hold). Remove it later with Revoke on the view or `DROP VIEW`.
+  hold). The form lists the views that already read the picked table, with
+  their columns and grants.
+- **Drop view…** – for a column view: in that list, next to a view in a user's
+  effective privileges and in a role's privileges (Roles & groups). Like every
+  change it is previewed and runs only after the typed view name (or goes to
+  the SQL script). The preview lists **the grants that go with it**: the 9.0
+  docs don't say whether `DROP VIEW` removes the grants on a view (MySQL keeps
+  them, and a new view with the same name would get them back), so the plan
+  revokes each grant on the view first (users and roles), then
+  `DROP VIEW db.v`. It warns about other views that read the view, names the
+  table it reads (that stays) and its creator: `DROP VIEW` is allowed for the
+  view's creator and users with `SUPER` (docs); the REVOKEs need the grant
+  option.
 
 Docs: [ALTER USER](https://docs.singlestore.com/db/v9.0/reference/sql-reference/security-management-commands/alter-user/),
 [CREATE USER](https://docs.singlestore.com/db/v9.0/reference/sql-reference/security-management-commands/create-user/),
 [SET PASSWORD](https://docs.singlestore.com/db/v9.0/reference/sql-reference/security-management-commands/set-password/),
 [GRANT](https://docs.singlestore.com/db/v9.0/reference/sql-reference/security-management-commands/grant/),
-[CREATE VIEW](https://docs.singlestore.com/db/v9.0/reference/sql-reference/data-definition-language-ddl/create-view/).
+[CREATE VIEW](https://docs.singlestore.com/db/v9.0/reference/sql-reference/data-definition-language-ddl/create-view/),
+[DROP VIEW](https://docs.singlestore.com/db/v9.0/reference/sql-reference/data-definition-language-ddl/drop-view/).
 
 #### Audit log
 
