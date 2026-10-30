@@ -98,8 +98,22 @@ def _access(r: dict[str, Any]) -> str:
     return f"<td>{escape(app)}</td><td>{escape(nb)}</td>"
 
 
+def _kernels(kernels: list[dict[str, Any]] | None) -> str:
+    """The kernel gateway's section (STUDIO_NOTEBOOKS=gateway): the gateway's health and every kernel."""
+    if kernels is None:
+        return ""
+    gw = next((k for k in kernels if "gateway" in k), {})
+    rows = "".join(
+        f"<tr><td><code>{escape(k['user'])}</code></td><td><code>{escape(k['id'])}</code></td><td>{escape(k['purpose'])}</td>"
+        f"<td>{_ago(k.get('started'))}</td><td>{_ago(k.get('last_activity'))}</td><td>{'yes' if k.get('channels') else 'no'}</td></tr>"
+        for k in kernels if "gateway" not in k) or '<tr><td colspan="6">No kernel is running.</td></tr>'
+    state = "answers" if gw.get("healthy") else "doesn't answer"
+    return (f"<h2>Notebook kernels</h2><p>Kernel gateway <code>{escape(str(gw.get('gateway') or ''))}</code>: {state}.</p>"
+            f"<table><tr><th>User</th><th>Kernel</th><th>Use</th><th>Started</th><th>Last activity</th><th>Connected</th></tr>{rows}</table>")
+
+
 def admin(rows: list[dict[str, Any]], sessions: list[dict[str, Any]], events: list[dict[str, Any]], csrf: str,
-          limits: dict[str, Any], warning: str | None = None) -> str:
+          limits: dict[str, Any], warning: str | None = None, kernels: list[dict[str, Any]] | None = None) -> str:
     studio_rows = "".join(
         f"<tr><td><code>{escape(r['user'])}</code></td><td>{escape(str(r.get('pid') or ''))}</td><td>{escape(r['state'])}</td>"
         f"<td>{_ago(r.get('started'))}</td><td>{_ago(r.get('last_activity'))}</td><td>{_mb(r.get('rss'))}</td>{_access(r)}"
@@ -118,5 +132,6 @@ def admin(rows: list[dict[str, Any]], sessions: list[dict[str, Any]], events: li
     return page("Admin", f"""<div class="card">{_brand()}<h1>Admin</h1><p>{escape(lim)}</p>{warn}
 <div class="row"><a class="btn ghost" href="/account">Account</a><a class="btn ghost" href="/admin">Refresh</a></div>
 <h2>Studios</h2><table><tr><th>User</th><th>PID</th><th>State</th><th>Started</th><th>Last use</th><th>Memory</th><th>Studio access</th><th>Notebooks</th><th></th></tr>{studio_rows}</table>
+{_kernels(kernels)}
 <h2>Signed in</h2><table><tr><th>User</th><th>Name</th><th>Address</th><th>Signed in</th><th>Last request</th><th>Studio access</th><th>Notebooks</th></tr>{session_rows}</table>
 <h2>Recent events</h2><table><tr><th>Time (UTC)</th><th>Event</th><th>User</th><th>Details</th></tr>{event_rows}</table></div>""", wide=True)

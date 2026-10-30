@@ -67,12 +67,29 @@ class HubConfig:
     users_group: str = ""                 # SAS group whose members may use Studio (empty: no group check)
     notebook_group: str = ""              # SAS group whose members may use notebooks (and Studio)
     trust_forwarded: bool = False        # take the client address from X-Forwarded-For (behind the ingress)
-    notebooks: bool = False               # STUDIO_NOTEBOOKS=local: kernels in each user's Studio process (no isolation)
+    notebooks: bool = False               # STUDIO_NOTEBOOKS=local or gateway (notebooks_mode says which)
+    notebooks_mode: str = "off"           # off | local (kernels in each user's Studio) | gateway (Enterprise Gateway)
+    gateway_url: str = ""                 # STUDIO_GATEWAY_URL: the kernel gateway (http://studio-gateway:8888)
+    gateway_token: str = ""               # STUDIO_GATEWAY_AUTH_TOKEN (a Secret; only the hub holds it)
+    gateway_verify: bool = True
+    kernels_per_user: int = 3
+    kernels_total: int = 20
+    relay_bind: str = "127.0.0.1"         # the token relay kernels ask (STUDIO_RELAY_BIND / _PORT / _URL)
+    relay_port: int = 0
+    relay_url: str = ""
+    pip_mode: str = "off"                 # STUDIO_PIP_MODE: mirror | pypi | off
+    pip_index: str = ""
     notebook_python: str = ""             # STUDIO_NOTEBOOK_PYTHON: the shared notebook environment's python
     assistant: bool = False
     metrics: bool = True
     default_s2: dict[str, str] = field(default_factory=dict)
     python: str = ""                      # Python that runs the Studio processes (default: this one)
+
+    def __post_init__(self) -> None:
+        # HubConfig(notebooks=True) without a mode: local notebooks, as before step 2a.
+        if self.notebooks and self.notebooks_mode == "off":
+            self.notebooks_mode = "local"
+        self.notebooks = self.notebooks_mode != "off"
 
     @property
     def secure(self) -> bool:
@@ -105,6 +122,10 @@ class HubConfig:
 
         return Rules(users_group=self.users_group, notebook_group=self.notebook_group, allowed_users=self.allowed_users,
                      notebooks=self.notebooks)
+
+    @property
+    def gateway(self) -> bool:
+        return self.notebooks_mode == "gateway"
 
     def may_sign_in(self, user: str) -> bool:
         return not self.allowed_users or user.lower() in {a.lower() for a in self.allowed_users}
@@ -142,16 +163,22 @@ def _master_key(data_dir: Path) -> bytes:
 
 NOTEBOOKS_LOCAL_NOTE = ("local notebooks: no isolation between users' kernels - test use with a few trusted users "
                         "only; the kernel gateway (step 2a) replaces this")
+NOTEBOOKS_GATEWAY_NOTE = ("kernel gateway, one shared kernel pod (step 2a): no isolation between users' kernels - they "
+                          "run as one OS user in one pod, so one user's code can read another's kernel files and act as "
+                          "that user, and one runaway kernel can slow down or stop the others; one pod per kernel is step 2b")
 
 
-def _notebooks_mode() -> bool:
-    """STUDIO_NOTEBOOKS: off (default) | local (each user's Studio runs its kernels itself, as on the desktop)."""
+def _notebooks_mode() -> str:
+    """STUDIO_NOTEBOOKS: off (default) | local (each user's Studio runs its kernels itself, as on the desktop) |
+    gateway (kernels behind Jupyter Enterprise Gateway, STUDIO_GATEWAY_URL)."""
     raw = _env("STUDIO_NOTEBOOKS").lower()
     if raw in ("", "off", "0", "false", "no"):
-        return False
+        return "off"
     if raw in ("local", "1", "true", "yes", "on"):
-        return True
-    raise SystemExit("STUDIO_NOTEBOOKS is off or local (kernels in each user's Studio process).")
+        return "local"
+    if raw == "gateway":
+        return "gateway"
+    raise SystemExit("STUDIO_NOTEBOOKS is off, local (kernels in each user's Studio process) or gateway (kernel gateway).")
 
 
 def load() -> HubConfig:
@@ -166,6 +193,10 @@ def load() -> HubConfig:
     mode = (_env("STUDIO_OAUTH_MODE") or ("redirect" if client_id and client_id != "vscode" else "paste")).lower()
     if mode not in ("redirect", "paste"):
         raise SystemExit("STUDIO_OAUTH_MODE is redirect (own SAS Logon client) or paste (the vscode client's code).")
+    nb_mode = _notebooks_mode()
+    from ..server_mode import pip_settings
+
+    pip_mode, pip_index = pip_settings()
     default_s2 = {k: _env(f"STUDIO_DEFAULT_S2_{k.upper()}") for k in ("name", "host", "port", "database")}
     default_s2 = {k: v for k, v in default_s2.items() if v}
     if default_s2.get("host"):
@@ -195,7 +226,18 @@ def load() -> HubConfig:
         users_group=_env("STUDIO_USERS_GROUP"),
         notebook_group=_env("STUDIO_NOTEBOOK_GROUP"),
         trust_forwarded=_flag("STUDIO_TRUST_FORWARDED", False),
-        notebooks=_notebooks_mode(),
+        notebooks=nb_mode != "off",
+        notebooks_mode=nb_mode,
+        gateway_url=_env("STUDIO_GATEWAY_URL").rstrip("/"),
+        gateway_token=_env("STUDIO_GATEWAY_AUTH_TOKEN"),
+        gateway_verify=_flag("STUDIO_GATEWAY_VERIFY", True),
+        kernels_per_user=max(1, _int("STUDIO_KERNELS_PER_USER", 3)),
+        kernels_total=max(1, _int("STUDIO_KERNELS_TOTAL", 20)),
+        relay_bind=_env("STUDIO_RELAY_BIND") or "127.0.0.1",
+        relay_port=_int("STUDIO_RELAY_PORT", 8801),
+        relay_url=_env("STUDIO_RELAY_URL").rstrip("/"),
+        pip_mode=pip_mode,
+        pip_index=pip_index,
         notebook_python=_env("STUDIO_NOTEBOOK_PYTHON"),
         assistant=_flag("STUDIO_ASSISTANT", False),
         metrics=_flag("STUDIO_METRICS", True),
@@ -204,6 +246,9 @@ def load() -> HubConfig:
     )
     if cfg.oauth_mode == "redirect" and cfg.client_id == "vscode":
         raise SystemExit("STUDIO_OAUTH_MODE=redirect needs the hub's own SAS Logon client (STUDIO_OAUTH_CLIENT_ID).")
+    if cfg.gateway and (not cfg.gateway_url or len(cfg.gateway_token) < 32):
+        raise SystemExit("STUDIO_NOTEBOOKS=gateway needs STUDIO_GATEWAY_URL and STUDIO_GATEWAY_AUTH_TOKEN (32+ characters, "
+                         "the same as the gateway's; from a Secret).")
     if len(cfg.master_key) < 32:
         raise SystemExit("STUDIO_MASTER_KEY must be at least 32 characters (e.g. python -c \"import secrets; print(secrets.token_urlsafe(48))\").")
     return cfg

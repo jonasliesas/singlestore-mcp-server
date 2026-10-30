@@ -81,6 +81,7 @@ class Studio:
     restart: bool = False          # started again after a crash or hang (the pages say "restarting")
     busy: int = 0                  # requests in flight (a long call isn't "idle")
     ping_failures: int = 0
+    gateway_key: str = field(default="", repr=False)   # this Studio's key at the kernel broker (STUDIO_NOTEBOOKS=gateway)
 
     @property
     def pid(self) -> int | None:
@@ -209,6 +210,7 @@ class Spawner:
         self._crashes: dict[str, deque[float]] = {}
         self.access: dict[str, Access] = {}   # per user, from the hub's sign-in check (SAS groups)
         self.on_access: Any = None            # hub callback(user, report): a Studio re-checked the user's groups
+        self.broker: Any = None               # hub.gateway.KernelBroker (STUDIO_NOTEBOOKS=gateway)
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._reaper: threading.Thread | None = None
@@ -245,7 +247,13 @@ class Spawner:
             "SINGLESTORE_MCP_FILE_ROOTS": "",
             "PYTHONUNBUFFERED": "1", "PYTHONDONTWRITEBYTECODE": "1",
         })
-        if self.cfg.notebook_python and self.notebooks_for(user):
+        if self.cfg.gateway:
+            # Kernels on the kernel gateway (the broker's URL and this Studio's key go over stdin, not here).
+            env["SINGLESTORE_MCP_NOTEBOOKS_MODE"] = "gateway"
+            env["SINGLESTORE_MCP_PIP_MODE"] = self.cfg.pip_mode
+            if self.cfg.pip_index:
+                env["SINGLESTORE_MCP_PIP_INDEX_URL"] = self.cfg.pip_index
+        elif self.cfg.notebook_python and self.notebooks_for(user):
             env["SINGLESTORE_MCP_NOTEBOOK_PYTHON"] = self.cfg.notebook_python  # the shared notebook environment
         if os.environ.get("SINGLESTORE_MCP_SAS_PREWARM"):
             env["SINGLESTORE_MCP_SAS_PREWARM"] = os.environ["SINGLESTORE_MCP_SAS_PREWARM"]
@@ -348,6 +356,9 @@ class Spawner:
                "seed": self.seed(st.user, tokens)}
         if self.cfg.client_secret:
             cfg["sas_client"] = {"id": self.cfg.client_id, "secret": self.cfg.client_secret}
+        if self.broker is not None and self.broker.url:
+            st.gateway_key = self.broker.register_studio(st.user)
+            cfg["gateway"] = {"url": self.broker.url, "key": st.gateway_key, "max_kernels": self.cfg.kernels_per_user}
         try:
             assert st.proc.stdin is not None
             st.proc.stdin.write((json.dumps(cfg) + "\n").encode())
@@ -458,6 +469,7 @@ class Spawner:
             return False
         st.stopping = True
         self._kill(st)
+        self._forget_kernels(st, reason)
         self.audit.record("studio_stop", user=user, reason=reason, by=by,
                           minutes=round((time.time() - st.started) / 60, 1))
         return True
@@ -471,6 +483,7 @@ class Spawner:
             st.stopping = True
             self._crashes.setdefault(st.user, deque()).append(time.time())
         self._kill(st, grace=1.0)  # closes its stdin even when it's gone; a hung one is killed after 1 s
+        self._forget_kernels(st, reason)
         self.audit.record("studio_stop", user=st.user, reason=reason, exit=st.proc.returncode if st.proc else None,
                           minutes=round((time.time() - st.started) / 60, 1))
         return True
@@ -487,6 +500,13 @@ class Spawner:
         while q and now - q[0] > CRASH_WINDOW_S:
             q.popleft()
         return len(q) if q else 0
+
+    def _forget_kernels(self, st: Studio, reason: str) -> None:
+        """Gateway: the stopped Studio's key stops working and its kernels are shut down (in the background) - only
+        that Studio's, so a new Studio of the same user started meanwhile keeps its own."""
+        if self.broker is not None and st.gateway_key:
+            threading.Thread(target=self.broker.forget_studio, args=(st.user, f"studio {reason}", st.gateway_key),
+                             daemon=True).start()
 
     @staticmethod
     def _kill(st: Studio, grace: float = 8.0) -> None:

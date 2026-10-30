@@ -42,7 +42,7 @@ from typing import Any
 
 from . import access, oauth, pages
 from .audit import Audit
-from .config import NOTEBOOKS_LOCAL_NOTE, HubConfig
+from .config import NOTEBOOKS_GATEWAY_NOTE, NOTEBOOKS_LOCAL_NOTE, HubConfig
 from .sessions import PENDING_TTL_S, RateLimiter, Session, SessionStore
 from .spawner import PUBLIC_BASE, Spawner, Studio, StudioFailed, StudioFull, rss_bytes
 
@@ -63,16 +63,34 @@ class Hub:
         self.sessions = SessionStore(cfg.session_hours * 3600)
         self.spawner = Spawner(cfg, self.audit)
         self.spawner.on_access = self.studio_access
+        self.broker = None
+        if cfg.gateway:
+            from .gateway import GatewaySettings, KernelBroker
+            from .spawner import safe_name
+
+            self.broker = KernelBroker(GatewaySettings(url=cfg.gateway_url, token=cfg.gateway_token,
+                                                       kernels_per_user=cfg.kernels_per_user, kernels_total=cfg.kernels_total,
+                                                       relay_bind=cfg.relay_bind, relay_port=cfg.relay_port,
+                                                       relay_url=cfg.relay_url, verify=cfg.gateway_verify),
+                                       self.audit, allowed=self._kernel_access, folder=safe_name)
+            self.spawner.broker = self.broker
         self.login_limit = RateLimiter(cfg.login_rate, 60.0)
         self.httpd: ThreadingHTTPServer | None = None
         self._close_lock = threading.Lock()
         self._closed = False
+
+    def _kernel_access(self, user: str) -> bool:
+        """Gateway kernels only for users whose sign-in check (or a later re-check) gave notebooks."""
+        acc = self.spawner.access.get(user)
+        return acc is not None and acc.app and acc.notebooks
 
     # ------------------------------------------------------------ lifecycle
     def serve(self, block: bool = True) -> int:
         handler = _handler(self)
         self.httpd = ThreadingHTTPServer((self.cfg.bind, self.cfg.port), handler)
         self.httpd.daemon_threads = True
+        if self.broker is not None:
+            self.broker.serve()
         self.spawner.start_reaper()
         port = self.httpd.server_address[1]
         self.audit.record("hub_start", port=port, mode=self.cfg.oauth_mode, viya=self.cfg.viya_url,
@@ -99,6 +117,8 @@ class Hub:
                 except Exception:  # noqa: BLE001 - serve_forever already ended
                     pass
             self.spawner.stop_all()
+            if self.broker is not None:
+                self.broker.close()
             if httpd is not None:
                 httpd.server_close()
                 self.audit.record("hub_stop")
@@ -134,6 +154,8 @@ class Hub:
         self.spawner.access[st.user] = new
         self.audit.record("access_changed", user=st.user, app=new.app, app_via=new.app_via, notebooks=new.notebooks,
                           notebooks_via=new.notebooks_via)
+        if self.broker is not None and old.notebooks and not new.notebooks:  # gateway kernels stop with the access
+            threading.Thread(target=self.broker.forget_studio, args=(st.user, "notebook access removed"), daemon=True).start()
         if not new.app:
             dropped = self.sessions.drop_user(st.user)
             threading.Thread(target=self.spawner.stop, args=(st.user, "access removed"), daemon=True).start()
@@ -434,10 +456,21 @@ def _handler(hub: Hub) -> type[BaseHTTPRequestHandler]:
                      "started": st.started, "last_activity": st.last_activity, "rss": rss_bytes(st.pid)} for st in hub.spawner.running()]
             sess = [{**acc(x.user), "user": x.user, "name": x.name, "ip": x.ip, "created": x.created, "last_seen": x.last_seen} for x in hub.sessions.all()]
             limits = {"users": f"{len(rows)} of {cfg.max_users}", "idle stop": f"{cfg.idle_minutes} min",
-                      "sign-in": cfg.oauth_mode, "notebooks": "local" if cfg.notebooks else "off", "Ask Claude": "on" if cfg.assistant else "off",
+                      "sign-in": cfg.oauth_mode, "notebooks": cfg.notebooks_mode, "Ask Claude": "on" if cfg.assistant else "off",
                       "users group": cfg.users_group or "none", "notebook group": cfg.notebook_group or "none"}
-            warning = NOTEBOOKS_LOCAL_NOTE if cfg.notebooks else None
-            return self._send(200, pages.admin(rows, sess, hub.audit.tail(50), s.csrf, limits, warning))
+            warning = NOTEBOOKS_LOCAL_NOTE if cfg.notebooks_mode == "local" else None
+            kernels = None
+            if hub.broker is not None:
+                warning = NOTEBOOKS_GATEWAY_NOTE
+                counts = hub.broker.counts()
+                for r in rows:
+                    r["kernels"] = counts.get(r["user"], 0)
+                limits.update({"kernels": f"{sum(counts.values())} of {cfg.kernels_total} ({cfg.kernels_per_user} per user)",
+                               "package installs": cfg.pip_mode + (f" ({cfg.pip_index})" if cfg.pip_mode == "mirror" else "")})
+                kernels = [{"user": k.user, "id": k.id[:8], "purpose": k.purpose, "started": k.created,
+                            "last_activity": k.last_activity, "channels": k.channels} for k in hub.broker.kernels()]
+                kernels.append({"gateway": cfg.gateway_url, "healthy": hub.broker.healthy()})
+            return self._send(200, pages.admin(rows, sess, hub.audit.tail(50), s.csrf, limits, warning, kernels))
 
         def _admin_stop(self) -> None:
             s = self._admin_session()
