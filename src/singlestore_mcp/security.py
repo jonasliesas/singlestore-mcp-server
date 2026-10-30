@@ -337,21 +337,28 @@ def _resolve_user(user: str, host: str | None) -> tuple[str, str]:
     return user, hosts[0]
 
 
+def _view_of(row: dict[str, Any], database: str, table: str) -> dict[str, str] | None:
+    """{"database", "view"} when a privilege row's object is a view (TABLE_TYPE from a join with TABLES)."""
+    return {"database": database, "view": table} if str(row.get("TABLE_TYPE") or "").upper() == "VIEW" else None
+
+
 def user_privileges(user: str, host: str | None = None) -> dict[str, Any]:
     user, host = _resolve_user(user, host)
     g = grantee(user, host)
     (glob, schema, table, column, groups, chain, roles, pools, grants, info) = db.parallel(
         _soft(lambda: _q(f"SELECT PRIVILEGE_TYPE, IS_GRANTABLE FROM {IS}.USER_PRIVILEGES WHERE GRANTEE = %s", (g,))),
         _soft(lambda: _q(f"SELECT TABLE_SCHEMA, PRIVILEGE_TYPE, IS_GRANTABLE FROM {IS}.SCHEMA_PRIVILEGES WHERE GRANTEE = %s", (g,))),
-        _soft(lambda: _q(f"SELECT TABLE_SCHEMA, TABLE_NAME, PRIVILEGE_TYPE, IS_GRANTABLE FROM {IS}.TABLE_PRIVILEGES"
-                         " WHERE GRANTEE = %s", (g,))),
+        _soft(lambda: _q(f"SELECT tp.TABLE_SCHEMA, tp.TABLE_NAME, tp.PRIVILEGE_TYPE, tp.IS_GRANTABLE, t.TABLE_TYPE"
+                         f" FROM {IS}.TABLE_PRIVILEGES tp LEFT JOIN {IS}.TABLES t ON t.TABLE_SCHEMA = tp.TABLE_SCHEMA"
+                         " AND t.TABLE_NAME = tp.TABLE_NAME WHERE tp.GRANTEE = %s", (g,))),
         _soft(lambda: _q(f"SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, PRIVILEGE_TYPE, IS_GRANTABLE FROM {IS}.COLUMN_PRIVILEGES"
                          " WHERE GRANTEE = %s", (g,))),
         _soft(lambda: _q(f"SELECT `GROUP` FROM {IS}.USERS_GROUPS WHERE USER = %s", (g,))),
         _soft(lambda: _q(f"SELECT gr.`GROUP`, gr.ROLE FROM {IS}.GROUPS_ROLES gr JOIN {IS}.USERS_GROUPS ug"
                          " ON ug.`GROUP` = gr.`GROUP` WHERE ug.USER = %s", (g,))),
-        _soft(lambda: _q(f"SELECT rp.ROLE, rp.`DATABASE`, rp.`TABLE`, rp.PRIVILEGES FROM {IS}.ROLE_PRIVILEGES rp"
+        _soft(lambda: _q(f"SELECT rp.ROLE, rp.`DATABASE`, rp.`TABLE`, rp.PRIVILEGES, t.TABLE_TYPE FROM {IS}.ROLE_PRIVILEGES rp"
                          f" JOIN {IS}.GROUPS_ROLES gr ON gr.ROLE = rp.ROLE JOIN {IS}.USERS_GROUPS ug ON ug.`GROUP` = gr.`GROUP`"
+                         f" LEFT JOIN {IS}.TABLES t ON t.TABLE_SCHEMA = rp.`DATABASE` AND t.TABLE_NAME = rp.`TABLE`"
                          " WHERE ug.USER = %s", (g,))),
         _soft(lambda: _q(f"SELECT RESOURCE_POOL, PRIVILEGE_TYPE FROM {IS}.RESOURCE_POOL_PRIVILEGES WHERE GRANTEE = %s", (g,))),
         _soft(lambda: show_grants(user, host)),
@@ -361,8 +368,10 @@ def user_privileges(user: str, host: str | None = None) -> dict[str, Any]:
     )
     rows: dict[tuple[str, str], dict[str, Any]] = {}
 
-    def add(priv: str, obj: str, scope: str, how: str, grantable: bool = False) -> None:
+    def add(priv: str, obj: str, scope: str, how: str, grantable: bool = False, view: dict[str, str] | None = None) -> None:
         r = rows.setdefault((priv, obj), {"privilege": priv, "object": obj, "scope": scope, "how": [], "grantable": False})
+        if view:  # a view: the Security view offers "Drop view…" for it
+            r["view"] = view
         if how not in r["how"]:
             r["how"].append(how)
         r["grantable"] |= grantable
@@ -376,7 +385,8 @@ def user_privileges(user: str, host: str | None = None) -> dict[str, Any]:
     for r in _rows(schema):
         add(r["PRIVILEGE_TYPE"], _obj(r["TABLE_SCHEMA"]), "database", "direct", r["IS_GRANTABLE"] == "YES")
     for r in _rows(table):
-        add(r["PRIVILEGE_TYPE"], _obj(r["TABLE_SCHEMA"], r["TABLE_NAME"]), "table", "direct", r["IS_GRANTABLE"] == "YES")
+        add(r["PRIVILEGE_TYPE"], _obj(r["TABLE_SCHEMA"], r["TABLE_NAME"]), "table", "direct", r["IS_GRANTABLE"] == "YES",
+            _view_of(r, r["TABLE_SCHEMA"], r["TABLE_NAME"]))
     for r in _rows(column):
         add(r["PRIVILEGE_TYPE"], _obj(r["TABLE_SCHEMA"], r["TABLE_NAME"], r["COLUMN_NAME"]), "column", "direct",
             r["IS_GRANTABLE"] == "YES")
@@ -393,7 +403,7 @@ def user_privileges(user: str, host: str | None = None) -> dict[str, Any]:
         obj = _obj(None if r["DATABASE"] == "*" else r["DATABASE"], None if r["TABLE"] == "*" else r["TABLE"])
         for grp in sorted(groups_by_role.get(r["ROLE"], [])):
             for p in split_privs(r["PRIVILEGES"]):
-                add(p, obj, scope, f"via role {r['ROLE']} ← group {grp}")
+                add(p, obj, scope, f"via role {r['ROLE']} ← group {grp}", view=_view_of(r, r["DATABASE"], r["TABLE"]))
     order = {"global": 0, "database": 1, "table": 2, "column": 3}
     effective = sorted(rows.values(), key=lambda r: (order[r["scope"]], r["object"], r["privilege"]))
     errors = {k: v["error"] for k, v in (("USER_PRIVILEGES", glob), ("USERS_GROUPS", groups), ("ROLE_PRIVILEGES", roles),
@@ -443,7 +453,8 @@ def collect_roles() -> dict[str, Any]:
         _soft(lambda: _q(f"SELECT USER, `GROUP` FROM {IS}.USERS_GROUPS")),
         _soft(lambda: _q(f"SELECT `GROUP`, ROLE FROM {IS}.GROUPS_ROLES")),
         _soft(lambda: _q(f"SELECT ROLE, PERMISSIONS FROM {IS}.ROLES ORDER BY ROLE")),
-        _soft(lambda: _q(f"SELECT ROLE, `DATABASE`, `TABLE`, PRIVILEGES FROM {IS}.ROLE_PRIVILEGES")),
+        _soft(lambda: _q(f"SELECT rp.ROLE, rp.`DATABASE`, rp.`TABLE`, rp.PRIVILEGES, t.TABLE_TYPE FROM {IS}.ROLE_PRIVILEGES rp"
+                         f" LEFT JOIN {IS}.TABLES t ON t.TABLE_SCHEMA = rp.`DATABASE` AND t.TABLE_NAME = rp.`TABLE`")),
         _soft(lambda: _q(f"SELECT SCHEMA_NAME FROM {IS}.SCHEMATA ORDER BY SCHEMA_NAME")),
     )
     if not _ok(groups) and not _ok(roles):
@@ -462,7 +473,8 @@ def collect_roles() -> dict[str, Any]:
     for r in _rows(rp):
         privs.setdefault(r["ROLE"], []).append({
             "object": _obj(None if r["DATABASE"] == "*" else r["DATABASE"], None if r["TABLE"] == "*" else r["TABLE"]),
-            "privileges": split_privs(r["PRIVILEGES"])})
+            "privileges": split_privs(r["PRIVILEGES"]),
+            **({"view": v} if (v := _view_of(r, r["DATABASE"], r["TABLE"])) else {})})
     return {
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(), "mode": "cluster",
         "groups": [{"group": g["GROUPNAME"], "num_users": int(g["NUM_USERS"] or 0), "members": sorted(members.get(g["GROUPNAME"], [])),
@@ -494,6 +506,35 @@ def list_columns(database: str, table: str) -> list[str]:
     rows = _q(f"SELECT COLUMN_NAME FROM {IS}.COLUMNS WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s ORDER BY ORDINAL_POSITION",
               (database, table))
     return [r["COLUMN_NAME"] for r in rows]
+
+
+def list_views(database: str, table: str | None = None) -> list[dict[str, Any]]:
+    """Views of a database (those that read ``table`` when given) with their creator and the grants on them, for the
+    "Grant columns (view)" form's "Drop view…" (one parallel batch)."""
+    from .reshard import refers_to
+
+    views, tgrants, rgrants = db.parallel(
+        lambda: _q(f"SELECT TABLE_NAME, DEFINER, VIEW_DEFINITION FROM {IS}.VIEWS WHERE TABLE_SCHEMA = %s ORDER BY TABLE_NAME",
+                   (database,)),
+        _soft(lambda: _q(f"SELECT GRANTEE, TABLE_NAME, PRIVILEGE_TYPE FROM {IS}.TABLE_PRIVILEGES WHERE TABLE_SCHEMA = %s",
+                         (database,))),
+        _soft(lambda: _q(f"SELECT ROLE, `TABLE`, PRIVILEGES FROM {IS}.ROLE_PRIVILEGES WHERE `DATABASE` = %s", (database,))),
+    )
+    grants: dict[str, list[str]] = {}
+    for r in _rows(tgrants):
+        u, h = parse_grantee(r["GRANTEE"])
+        grants.setdefault(r["TABLE_NAME"], []).append(f"{r['PRIVILEGE_TYPE']} to {u}@{h}")
+    for r in _rows(rgrants):
+        grants.setdefault(r["TABLE"], []).append(f"{r['PRIVILEGES']} to role {r['ROLE']}")
+    out = []
+    for v in views:
+        definition = str(v.get("VIEW_DEFINITION") or "")
+        if table and not refers_to(definition, database, database, table):
+            continue
+        cols = re.findall(r"AS\s+`((?:[^`]|``)*)`\s*(?:,|FROM\b)", definition)
+        out.append({"view": v["TABLE_NAME"], "definer": v.get("DEFINER"), "columns": [c.replace("``", "`") for c in cols],
+                    "grants": sorted(grants.get(v["TABLE_NAME"], []))})
+    return out
 
 
 def who_can_access(database: str, table: str | None = None) -> dict[str, Any]:

@@ -618,6 +618,64 @@ class TestColumnGrants:
         assert [i["action"] for i in out["items"]] == ["create_user", "set_require"]
 
 
+def drop_view_ctx(**over: Any) -> dict[str, Any]:
+    """bob has SELECT (with grant option) on SASDP.zz_test_v, role reader SELECT on it; another view reads it."""
+    c = ctx(**copy_view())
+    c["table"][BOB][("SASDP", "zz_test_v")] = {"SELECT", "GRANT OPTION"}
+    c["role_privs"]["reader"][("SASDP", "zz_test_v")] = {"SELECT"}
+    c["views"] = {"SASDP": {"zz_test_v": {"definer": "admin@%", "base": "SASDP.CARS"}, "my `odd` view": {"definer": "ann@10.0.0.%"}}}
+    c["view_dependents"] = {("SASDP", "zz_test_v"): ["SASDP.zz_test_v2"], ("SASDP", "my `odd` view"): []}
+    c.update(over)
+    return c
+
+
+class TestDropView:
+    def test_revokes_the_grants_then_drops(self) -> None:
+        p = adm.build(drop_view_ctx(), {"action": "drop_view", "database": "SASDP", "view": "zz_test_v"})
+        assert stmts(p) == ["REVOKE SELECT ON `SASDP`.`zz_test_v` FROM 'bob'@'%';",
+                            "REVOKE GRANT OPTION ON `SASDP`.`zz_test_v` FROM 'bob'@'%';",
+                            "REVOKE SELECT ON `SASDP`.`zz_test_v` FROM ROLE 'reader';",
+                            "DROP VIEW `SASDP`.`zz_test_v`;"]
+        w = " ".join(p["warnings"])
+        assert p["warnings"][0] == "Other views read this view and stop working: SASDP.zz_test_v2."
+        assert "go with it" in w and "SELECT (with grant option) to bob@%" in w and "SELECT to role reader" in w
+        assert "Reads SASDP.CARS: that table stays" in w and "Created by admin@%" in w
+        assert p["confirm"] == {"typed": True, "phrase": "zz_test_v", "reasons": ["it drops an object"]}
+
+    def test_no_grants_and_backquotes(self) -> None:
+        p = adm.build(drop_view_ctx(), {"action": "drop_view", "database": "SASDP", "view": "my `odd` view"})
+        assert stmts(p) == ["DROP VIEW `SASDP`.`my ``odd`` view`;"]
+        assert any(w.startswith("No grants on SASDP.my `odd` view") for w in p["warnings"])
+
+    def test_only_views(self) -> None:
+        with pytest.raises(adm.ChangeError, match="No view SASDP.CARS"):
+            adm.build(drop_view_ctx(), {"action": "drop_view", "database": "SASDP", "view": "CARS"})
+        with pytest.raises(adm.ChangeError, match="No database nope"):
+            adm.build(drop_view_ctx(), {"action": "drop_view", "database": "nope", "view": "v"})
+
+    def test_who_may_run_it(self) -> None:
+        a = {"action": "drop_view", "database": "SASDP", "view": "zz_test_v"}
+        assert adm._allowed(drop_view_ctx(), a)["ok"]  # the creator, with the grant option for the REVOKEs
+        ann_view = {"action": "drop_view", "database": "SASDP", "view": "my `odd` view"}
+        r = adm._allowed(drop_view_ctx(), ann_view)
+        assert not r["ok"] and "creator (ann@10.0.0.%)" in r["reason"]
+        c = drop_view_ctx(my_grants=["GRANT SUPER ON *.* TO 'admin'@'%'"])
+        assert adm._allowed(c, ann_view)["ok"]  # SUPER may drop any view
+
+    def test_script(self, offline: pytest.MonkeyPatch) -> None:
+        offline.setattr(adm, "load_context", lambda: drop_view_ctx())
+        out = adm.script([{"action": "drop_view", "database": "SASDP", "view": "zz_test_v"},
+                          {"action": "create_role", "role": "zz_test_r"}])
+        sql = [line for line in out["script"].splitlines() if line and not line.startswith("--")]
+        assert sql[0] == "CREATE ROLE 'zz_test_r';" and sql[-1] == "DROP VIEW `SASDP`.`zz_test_v`;"
+        assert "-- WARNING: These grants on SASDP.zz_test_v go with it" in out["script"]
+        offline.setattr(adm, "load_context", lambda: drop_view_ctx())
+        assert adm.script([{"action": "drop_view", "database": "SASDP", "view": "zz_test_v"}])["file_name"].endswith(
+            "-drop-view-zz_test_v.sql")
+        with pytest.raises(adm.ChangeError, match="No view"):  # dropped earlier in the same script
+            adm.script([{"action": "drop_view", "database": "SASDP", "view": "zz_test_v"}] * 2)
+
+
 def copy_view() -> dict[str, Any]:
     import copy
 

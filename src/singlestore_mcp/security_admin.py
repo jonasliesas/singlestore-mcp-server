@@ -49,6 +49,11 @@ with zz_test_ users and views):
   (TABLE_PRIVILEGES gets the row, COLUMN_PRIVILEGES stays empty, every column is readable), and ``REVOKE SELECT (c)``
   revokes the whole table privilege. So the column picker creates a view with the chosen columns and grants SELECT
   on the view: views run as their definer (SECURITY_TYPE DEFINER), so the grantee needs nothing on the base table.
+- Drop view (DROP VIEW in the 9.0 docs: ``DROP VIEW [IF EXISTS] <view_name>``; "DROP VIEW privileges are granted only to
+  the user who created the view and to users with SUPER privileges"). Neither the DROP VIEW nor the GRANT / REVOKE
+  page says whether grants on a view are removed with it (MySQL keeps them, and they would apply again to a new view
+  with the same name), so the plan revokes every grant on the view first (users: TABLE_PRIVILEGES, roles:
+  ROLE_PRIVILEGES), then drops it: the grants it lists really go with the view.
 """
 
 from __future__ import annotations
@@ -108,7 +113,7 @@ ACTIONS = {
     "revoke_pool": "Revoke resource pool usage",
     "change_password": "Change password", "lock_user": "Lock account", "unlock_user": "Unlock account",
     "set_login_policy": "Failed-login lockout", "set_require": "Require TLS (SSL)",
-    "grant_view": "Grant columns (through a view)",
+    "grant_view": "Grant columns (through a view)", "drop_view": "Drop view",
 }
 # Actions that take a password (sent as a bound parameter; a script gets SCRIPT_PASSWORD instead).
 PASSWORD_ACTIONS = {"create_user", "change_password"}
@@ -122,6 +127,8 @@ DOCS = {
     "set_password": f"{_D}/security-management-commands/set-password/",
     "grant": f"{_D}/security-management-commands/grant/",
     "create_view": f"{_D}/data-definition-language-ddl/create-view/",
+    "drop_view": f"{_D}/data-definition-language-ddl/drop-view/",
+    "revoke": f"{_D}/security-management-commands/revoke/",
 }
 
 _PW = "\x00password\x00"  # where the password goes; names can't hold control characters
@@ -404,7 +411,7 @@ _ACTION_CAP = {
     "revoke_role": "roles", "grant_group": "roles", "revoke_group": "roles", "create_pool": "create_pool",
     "alter_pool": "alter_pool", "drop_pool": "drop_pool", "set_default_pool": "alter_user", "grant_pool": "pool_grants",
     "revoke_pool": "pool_grants", "change_password": "alter_user", "lock_user": "alter_user", "unlock_user": "alter_user",
-    "set_login_policy": "alter_user", "set_require": "alter_user", "grant_view": "grants",
+    "set_login_policy": "alter_user", "set_require": "alter_user", "grant_view": "grants", "drop_view": "grants",
 }
 
 
@@ -1059,6 +1066,59 @@ def build(ctx: dict[str, Any], action: dict[str, Any], password: str | None = No
         phrase = view
         refresh = ["users", "roles"]
 
+    elif kind == "drop_view":
+        database = _name(action.get("database"), "database")
+        view = _name(action.get("view"), "view")
+        if ctx["databases"] and database not in ctx["databases"]:
+            raise ChangeError(f"No database {database} (names are case-sensitive)")
+        views = ctx.get("views", {}).get(database)
+        info = (views or {}).get(view)
+        if views is not None and info is None:
+            raise ChangeError(f"No view {database}.{view} (names are case-sensitive; DROP VIEW drops only views)")
+        lvl = priv_level(database, view)
+        gone = []
+        for g in sorted(ctx["table"]):
+            privs = ctx["table"][g].get((database, view))
+            if not privs:
+                continue
+            u, hst = sec.parse_grantee(g)
+            plain = sorted(set(privs) - {"GRANT OPTION", "USAGE"})
+            if plain:
+                stmts.append(_stmt(f"REVOKE {', '.join(plain)} ON {lvl} FROM {account(u, hst)}"))
+            if "GRANT OPTION" in privs:
+                stmts.append(_stmt(f"REVOKE GRANT OPTION ON {lvl} FROM {account(u, hst)}"))
+            gone.append(f"{', '.join(plain) or 'GRANT OPTION'}{' (with grant option)' if plain and 'GRANT OPTION' in privs else ''} "
+                        f"to {u}@{hst}")
+        for role in sorted(ctx["role_privs"]):
+            privs = ctx["role_privs"][role].get((database, view))
+            if not privs:
+                continue
+            plain = sorted(set(privs) - {"USAGE"})
+            if "*" in plain or "ALL PRIVILEGES" in plain:
+                plain = ["ALL PRIVILEGES"]
+            stmts.append(_stmt(f"REVOKE {', '.join(plain)} ON {lvl} FROM ROLE {q(role)}"))
+            gone.append(f"{', '.join(plain)} to role {role}")
+        stmts.append(_stmt(f"DROP VIEW {lvl}"))
+        if gone:
+            warnings.append(f"These grants on {database}.{view} go with it (revoked first, then the view is dropped): "
+                            + "; ".join(gone) + ".")
+            warnings.append("The 9.0 docs don't say whether DROP VIEW removes the grants on a view (MySQL keeps them, and "
+                            "a new view with the same name would get them back), so they are revoked explicitly. If a "
+                            "REVOKE fails, nothing after it runs and the view stays.")
+        else:
+            warnings.append(f"No grants on {database}.{view} (none directly to a user or a role).")
+        definer = (info or {}).get("definer")
+        if definer:
+            warnings.append(f"Created by {definer}. DROP VIEW is allowed only for the user who created the view and users "
+                            "with SUPER (docs); the REVOKEs need the grant option.")
+        if info and info.get("base"):
+            warnings.append(f"Reads {info['base']}: that table stays; only the view and its grants go.")
+        deps = ctx.get("view_dependents", {}).get((database, view)) or []
+        if deps:
+            warnings.insert(0, f"Other views read this view and stop working: {', '.join(deps)}.")
+        phrase = view
+        refresh = ["users", "roles"]
+
     lk = lockout_checks(ctx, {**action, "privileges": [" ".join(str(p).upper().split()) for p in action.get("privileges") or []]})
     blockers += lk["blockers"]
     warnings += lk["warnings"]
@@ -1091,9 +1151,30 @@ def _own_password(ctx: dict[str, Any], action: dict[str, Any]) -> bool:
     return _is_me(ctx, sec.grantee(str(action["user"]).strip(), str(host)))
 
 
+def _view_grants(ctx: dict[str, Any], database: Any, view: Any) -> bool:
+    key = (database, view)
+    return any(key in t for t in ctx["table"].values()) or any(key in r for r in ctx["role_privs"].values())
+
+
+def _drop_view_allowed(ctx: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    """DROP VIEW: the view's creator or SUPER (9.0 docs); the REVOKEs before it need the grant option."""
+    caps = capabilities(ctx)
+    me = f"{ctx['me']['user']}@{ctx['me']['host']}"
+    info = ctx.get("views", {}).get(action.get("database"), {}).get(action.get("view")) or {}
+    definer = str(info.get("definer") or "")
+    mine = definer.rstrip("@%") in (me.rstrip("@%"), ctx["me"]["user"]) or definer == me
+    if not (mine or "SUPER" in caps["global_privileges"]):
+        return {"ok": False, "reason": f"DROP VIEW is allowed only for the view's creator ({definer or '?'}) and users with SUPER."}
+    if _view_grants(ctx, action.get("database"), action.get("view")) and not caps["grants"]["ok"]:
+        return {"ok": False, "reason": caps["grants"]["reason"]}
+    return {"ok": True, "reason": None}
+
+
 def _allowed(ctx: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
     if _own_password(ctx, action):  # SET PASSWORD for yourself needs no privilege
         return {"ok": True, "reason": None}
+    if action.get("action") == "drop_view":
+        return _drop_view_allowed(ctx, action)
     cap = capabilities(ctx).get(_ACTION_CAP.get(action.get("action", ""), ""), {"ok": True})
     return {"ok": bool(cap["ok"]), "reason": None if cap["ok"] else cap["reason"]}
 
@@ -1104,8 +1185,49 @@ def _check_allowed(ctx: dict[str, Any], action: dict[str, Any]) -> None:
         raise ChangeError(f"Not allowed for {ctx['me']['user']}@{ctx['me']['host']}: {a['reason']}")
 
 
+def like_pattern(s: str) -> str:
+    """A LIKE pattern that matches ``s`` literally (a backslash escapes % and _)."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _enrich_views(ctx: dict[str, Any], d: str, v: Any) -> dict[str, Any]:
+    """Reads a drop_view needs: the database's views (creator, the table it reads) and views elsewhere that read it."""
+    views = ctx.setdefault("views", {})
+    deps = ctx.setdefault("view_dependents", {})
+    need_deps = isinstance(v, str) and v and (d, v) not in deps
+    if d in views and not need_deps:
+        return ctx
+    rows, dep_rows = db.parallel(
+        _soft(lambda: _q(f"SELECT TABLE_NAME, DEFINER, VIEW_DEFINITION FROM {IS}.VIEWS WHERE TABLE_SCHEMA = %s", (d,))),
+        _soft(lambda: _q(f"SELECT TABLE_SCHEMA, TABLE_NAME, VIEW_DEFINITION FROM {IS}.VIEWS WHERE VIEW_DEFINITION LIKE CONCAT('%%', %s, '%%')",
+                         (like_pattern(bt(v)),)) if need_deps else []),
+    )
+    if isinstance(rows, list):
+        views[d] = {r["TABLE_NAME"]: {"definer": r.get("DEFINER"), "base": _view_base(str(r.get("VIEW_DEFINITION") or ""), d)}
+                    for r in rows}
+    if need_deps and isinstance(dep_rows, list):
+        from .reshard import refers_to
+
+        deps[(d, v)] = [f"{r['TABLE_SCHEMA']}.{r['TABLE_NAME']}" for r in dep_rows
+                        if (r["TABLE_SCHEMA"], r["TABLE_NAME"]) != (d, v)
+                        and refers_to(str(r.get("VIEW_DEFINITION") or ""), r["TABLE_SCHEMA"], d, v)]
+    return ctx
+
+
+def _view_base(definition: str, database: str) -> str | None:
+    """The first table a view definition reads (`db`.`t`, or `t` in the view's own database), for the plan's note."""
+    m = re.search(r"\bFROM\s+\(*\s*((?:`(?:[^`]|``)*`\s*\.\s*)?`(?:[^`]|``)*`)", definition, re.I)
+    if not m:
+        return None
+    name = re.sub(r"\s+", "", m.group(1)).replace("`", "")
+    return name if m.group(1).count("`") > 2 else f"{database}.{name}"
+
+
 def _enrich(ctx: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
-    """Reads only a grant_view needs: the table's columns and the database's table/view names (once per context)."""
+    """Reads only a grant_view / drop_view needs: the table's columns and the database's table/view names (once per
+    context)."""
+    if action.get("action") == "drop_view" and isinstance(action.get("database"), str) and action["database"]:
+        return _enrich_views(ctx, action["database"], action.get("view"))
     if action.get("action") != "grant_view":
         return ctx
     d, t = action.get("database"), action.get("table")
@@ -1203,7 +1325,7 @@ _SCRIPT_PHASES = [
     ["alter_pool", "grant", "grant_view", "grant_role", "grant_group", "grant_pool", "set_default_pool", "change_password",
      "set_require", "set_login_policy", "unlock_user", "lock_user"],
     ["revoke", "revoke_all", "revoke_role", "revoke_group", "revoke_pool"],
-    ["drop_user", "drop_group", "drop_role", "drop_pool"],
+    ["drop_view", "drop_user", "drop_group", "drop_role", "drop_pool"],
 ]
 _SCRIPT_ORDER = [k for phase in _SCRIPT_PHASES for k in phase]
 _PHASE = {k: n for n, phase in enumerate(_SCRIPT_PHASES) for k in phase}
@@ -1237,7 +1359,7 @@ def script_order(actions: list[dict[str, Any]], keep_order: bool = False) -> lis
 def _advance(ctx: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
     """The context after the action ran (for the checks of later changes in the same script)."""
     keys = ("users", "global", "grantable", "schema", "table", "user_groups", "group_roles", "roles", "groups", "role_privs",
-            "pools", "pool_grants", "ssl", "objects")
+            "pools", "pool_grants", "ssl", "objects", "views")
     c = {**ctx, **copy.deepcopy({k: ctx[k] for k in keys if k in ctx})}
     c.setdefault("ssl", set())
     kind = action["action"]
@@ -1258,6 +1380,15 @@ def _advance(ctx: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
         (c["ssl"].add if _require(action.get("require")) == "SSL" else c["ssl"].discard)(g)
     elif kind == "grant_view" and isinstance(c.get("objects", {}).get(action.get("database")), set):
         c["objects"][action["database"]].add(str(action.get("view")).strip())
+    elif kind == "drop_view":
+        key = (action.get("database"), action.get("view"))
+        c.get("views", {}).get(key[0], {}).pop(key[1], None)
+        if isinstance(c.get("objects", {}).get(key[0]), set):
+            c["objects"][key[0]].discard(key[1])
+        for t in c["table"].values():
+            t.pop(key, None)
+        for r in c["role_privs"].values():
+            r.pop(key, None)
     elif kind == "create_role":
         c["roles"].add(str(action.get("role")).strip())
     elif kind == "create_group":
@@ -1444,8 +1575,8 @@ def apply(action: dict[str, Any], confirm: bool = False, typed: str | None = Non
     if kind not in PASSWORD_ACTIONS:
         password = None
     ctx = load_context()
+    _enrich(ctx, action)  # before the check: a drop_view's check reads the view's creator
     _check_allowed(ctx, action)
-    _enrich(ctx, action)
     p = build(ctx, action, password=password)
     if p["blockers"]:
         raise ChangeError("Refused: " + " ".join(p["blockers"]))

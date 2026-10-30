@@ -93,6 +93,8 @@
   .sc-script { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--s2-border); }
   .sc-save { margin-top: 6px; border: 1px solid var(--s2-border); border-radius: var(--s2-radius-sm, 6px); background: var(--s2-bg-2); padding: 8px 10px; }
   .sc-save .s2-input { min-width: 200px; }
+  .sc-views { margin: 4px 0 0; padding-left: 18px; }
+  .sc-views li { margin: 2px 0; }
   .sc-basket { border: 1px solid var(--s2-border); border-radius: var(--s2-radius-sm, 6px); background: var(--s2-bg-2); padding: 10px 14px; margin: 4px 0 12px; }
   .sc-basket h2 { font-size: var(--font-text-md-size, 14px); font-weight: var(--font-weight-semibold, 600); margin: 0; }
   .sc-basket ol { margin: 8px 0; padding-left: 22px; font-size: var(--s2-fs-xs); }
@@ -130,6 +132,7 @@ function flagBadge(f) {
 const DOCS = {
   grant: "https://docs.singlestore.com/db/v9.0/reference/sql-reference/security-management-commands/grant/",
   create_view: "https://docs.singlestore.com/db/v9.0/reference/sql-reference/data-definition-language-ddl/create-view/",
+  drop_view: "https://docs.singlestore.com/db/v9.0/reference/sql-reference/data-definition-language-ddl/drop-view/",
 };
 
 const state = {
@@ -437,7 +440,7 @@ function effectiveTable(d) {
   const groups = new Map();
   for (const r of d.effective) {
     const key = `${r.object}\u0000${r.how.join("\u0001")}`;
-    const g = groups.get(key) ?? { object: r.object, scope: r.scope, how: r.how, privs: [], grant: [] };
+    const g = groups.get(key) ?? { object: r.object, scope: r.scope, how: r.how, privs: [], grant: [], view: r.view };
     g.privs.push(r.privilege);
     if (r.grantable) g.grant.push(r.privilege);
     groups.set(key, g);
@@ -445,7 +448,7 @@ function effectiveTable(d) {
   const body = h("tbody");
   for (const g of groups.values()) {
     body.append(h("tr", {},
-      h("td", { class: "mono", title: g.scope }, g.object),
+      h("td", { class: "mono", title: g.view ? "a view" : g.scope }, g.object, g.view ? [" ", h("span", { class: "s2-badge plain" }, "view"), " ", dropViewBtn(g.view)] : null),
       h("td", { class: "wrap sc-privs" }, g.privs.join(", "), g.grant.length ? h("div", { class: "s2-faint" }, `WITH GRANT OPTION: ${g.grant.length === g.privs.length ? "all" : g.grant.join(", ")}`) : null),
       h("td", { class: "wrap" }, g.how.map((x) => h("div", { style: { display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" } },
         h("span", { class: `sc-how ${x === "direct" ? "direct" : "role"}` }, x),
@@ -505,6 +508,7 @@ function rolesTab() {
         h("td", { class: "mono" }, r.role),
         h("td", { class: "wrap" }, r.groups.length ? r.groups.map((g) => h("span", { class: "sc-tag" }, g)) : h("span", { class: "s2-faint" }, "none (no one gets it)")),
         h("td", { class: "wrap" }, r.privileges.map((p) => h("div", { class: "sc-privs" }, `${p.object}: ${p.privileges.join(", ")} `,
+          p.view ? dropViewBtn(p.view) : null,
           canChange() ? actBtn("Revoke…", { action: "revoke", grantee_type: "role", role: r.role, privileges: p.privileges,
             ...levelOf(p.object, p.object === "*.*" ? "global" : p.object.endsWith(".*") ? "database" : "table") }, { cls: "ghost sc-mini" }) : null))),
         canChange() ? h("td", {}, S2.menuButton("Change", [
@@ -696,7 +700,8 @@ const CAP_OF = { create_user: "users", drop_user: "users", grant: "grants", revo
   create_role: "roles", drop_role: "roles", create_group: "roles", drop_group: "roles", grant_role: "roles", revoke_role: "roles",
   grant_group: "roles", revoke_group: "roles", create_pool: "create_pool", alter_pool: "alter_pool", drop_pool: "drop_pool",
   set_default_pool: "alter_user", grant_pool: "pool_grants", revoke_pool: "pool_grants", change_password: "alter_user",
-  lock_user: "alter_user", unlock_user: "alter_user", set_login_policy: "alter_user", set_require: "alter_user", grant_view: "grants" };
+  lock_user: "alter_user", unlock_user: "alter_user", set_login_policy: "alter_user", set_require: "alter_user", grant_view: "grants",
+  drop_view: "grants" };
 const PASSWORD_ACTIONS = new Set(["create_user", "change_password"]);
 const TITLES = { create_user: "Create user", drop_user: "Drop user", grant: "Grant privileges", revoke: "Revoke privileges",
   revoke_all: "Revoke all privileges", create_role: "Create role", drop_role: "Drop role", create_group: "Create group",
@@ -705,7 +710,7 @@ const TITLES = { create_user: "Create user", drop_user: "Drop user", grant: "Gra
   drop_pool: "Drop resource pool", set_default_pool: "Set default resource pool", grant_pool: "Grant resource pool usage",
   revoke_pool: "Revoke resource pool usage", change_password: "Change password", lock_user: "Lock account",
   unlock_user: "Unlock account", set_login_policy: "Failed-login lockout", set_require: "Require TLS (SSL)",
-  grant_view: "Grant columns (through a view)" };
+  grant_view: "Grant columns (through a view)", drop_view: "Drop view" };
 const POOL_LABELS = { MEMORY_PERCENTAGE: "Memory %", QUERY_MEMORY_PERCENTAGE: "Per-query memory %", QUERY_TIMEOUT: "Query timeout (s, ×5)",
   SOFT_CPU_LIMIT_PERCENTAGE: "Soft CPU limit %", HARD_CPU_LIMIT_PERCENTAGE: "Hard CPU limit %", MAX_CONCURRENCY: "Max concurrency (0 = no limit)",
   MAX_QUEUE_DEPTH: "Max queue depth" };
@@ -776,7 +781,7 @@ function openChange(action) {
   pwInput = PASSWORD_ACTIONS.has(a.action) ? pwField(a.action === "create_user" ? "Password" : "New password") : null;
   pwInput2 = a.action === "change_password" ? pwField("Repeat the new password") : null;
   if (a.database && (a.level === "table" || a.action === "grant_view")) loadChgTables();
-  if (a.action === "grant_view" && a.database && a.table) loadChgColumns();
+  if (a.action === "grant_view" && a.database && a.table) { loadChgColumns(); loadChgViews(); }
   renderChange();
   render();
   chgEl.scrollIntoView({ block: "nearest" });
@@ -938,6 +943,35 @@ function columnPickF() {
       } }), c))));
 }
 
+// "Drop view…" for a view (the column views "Grant columns (view)" makes): the same preview / confirm / script flow
+// as every other change; the plan revokes the grants on the view first and lists them.
+function dropViewBtn(v) {
+  return actBtn("Drop view…", { action: "drop_view", database: v.database, view: v.view }, { cls: "danger ghost sc-mini" });
+}
+
+async function loadChgViews() {
+  chg.views = null;
+  const { database, table } = chg.action;
+  if (!database || !table) return;
+  try {
+    const v = (await S2.callTool("security_views", { database, table })).views;
+    if (chg && chg.action.database === database && chg.action.table === table) { chg.views = v; renderChange(); }
+  } catch { if (chg) { chg.views = []; renderChange(); } }
+}
+
+// Views that already read the picked table (earlier column grants), each with its grants and "Drop view…".
+function existingViewsF() {
+  const a = chg.action;
+  if (!a.table || !Array.isArray(chg.views)) return null;
+  return h("div", { class: "sc-f wide", role: "group", "aria-label": "Existing column views" },
+    h("span", {}, `Views on ${a.database}.${a.table} (${chg.views.length})`),
+    chg.views.length ? h("ul", { class: "sc-views s2-small" }, chg.views.map((v) => h("li", {},
+      h("span", { class: "s2-mono" }, v.view), v.columns.length ? h("span", { class: "s2-faint" }, ` (${v.columns.join(", ")})`) : null,
+      " · ", v.grants.length ? `grants: ${v.grants.join("; ")}` : h("span", { class: "s2-faint" }, "no grants"), " ",
+      dropViewBtn({ database: a.database, view: v.view }))))
+      : h("span", { class: "s2-faint s2-small" }, "None yet."));
+}
+
 function viewFields() {
   const a = chg.action;
   return [
@@ -948,10 +982,11 @@ function viewFields() {
     selectF("table", "Table", [["", chg.tables.length ? "Pick a table" : "…"], ...chg.tables.map((t) => [t, t])], (v) => {
       chg.action.columns = []; chg.columns = [];
       if (v && !chg.action.view) chg.action.view = `${v}_cols`.slice(0, 64);
-      setField("table", v); loadChgColumns();
+      setField("table", v); loadChgColumns(); loadChgViews();
     }),
     textF("view", "View name", "a new view in the same database"),
     columnPickF(),
+    existingViewsF(),
     h("div", { class: "sc-f wide" }, h("div", { class: "sc-notice", "aria-label": "Column grants note" },
       "SingleStore 9.0 has no column-level privileges: GRANT SELECT (col, …) ON a table is accepted but grants the WHOLE table "
       + "(checked on 9.0.40). So this creates a view with the chosen columns and grants SELECT on the view (preview both statements). ",
@@ -974,6 +1009,11 @@ function formFields() {
       h("div", { class: "sc-f wide s2-small s2-faint" }, "Both above 0 turns the lockout on, both 0 turns it off (SingleStore refuses one without the other).")];
     case "set_require": return [userPick(), requireF(false)];
     case "grant_view": return viewFields();
+    case "drop_view": return [fixed("View", `${a.database}.${a.view}`),
+      h("div", { class: "sc-f wide" }, h("div", { class: "sc-notice", "aria-label": "Drop view note" },
+        "Drops the view and every grant on it (the preview lists them): the grants are revoked first, then DROP VIEW. "
+        + "The table the view reads stays. ",
+        h("button", { class: "s2-btn ghost sc-mini", title: DOCS.drop_view, onclick: () => openDocs(DOCS.drop_view) }, "DROP VIEW docs")))];
     case "drop_user": return [userFixed()];
     case "grant": case "revoke": return privilegeFields();
     case "revoke_all": return [a.grantee_type === "role" ? fixed("Role", a.role) : userFixed()];

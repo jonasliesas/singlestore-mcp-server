@@ -234,6 +234,14 @@ def security_columns(database: str, table: str) -> CallToolResult:
 
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def security_views(database: str, table: str | None = None) -> CallToolResult:
+    """Views of a database (those that read ``table`` when given) with their creator, columns and the grants on them,
+    for the "Grant columns (view)" form's list of column views and their "Drop view…". Read-only."""
+    views = sec.list_views(database, table)
+    return tool_result(f"{len(views)} views", {"views": views})
+
+
+@apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
 def security_audit() -> CallToolResult:
     """Audit tab data: audit log settings and how to turn audit logging on. Read-only."""
     data = adm.audit_status()
