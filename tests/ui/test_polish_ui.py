@@ -325,3 +325,27 @@ def test_sas_session_badge_one_state(ui, app_url) -> None:
         pytest.skip(f"the test server's SAS session isn't idle: {before!r}")
     assert re.fullmatch(r"SAS session: starting… [12] s", during), during
     assert after == before, (before, after)
+
+
+# ----------------------------------------------------------------------------- renders held while a button is pressed
+
+_HOLD = """async () => {
+  const calls = [];
+  const f = S2.holdWhilePressed((x) => calls.push(x));
+  f(1);
+  document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+  f(2); f(3);                       // e.g. an auto-refresh and data arriving while the button is down
+  const during = [...calls];
+  document.body.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 30));
+  return [during, calls];
+}"""
+
+
+def test_renders_wait_while_a_button_is_pressed(ui, app_url) -> None:
+    """S2.holdWhilePressed: a render between pointerdown and pointerup waits, and only the latest runs after the click."""
+    page, errors = ui
+    page.goto(app_url("alerts"), wait_until="domcontentloaded")
+    al = app_frame(page, 30)
+    during, after = al.evaluate(_HOLD)
+    assert during == [1] and after == [1, 3], (during, after)

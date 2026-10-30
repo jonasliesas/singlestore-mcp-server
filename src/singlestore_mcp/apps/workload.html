@@ -572,6 +572,8 @@ function render() {
     (r?.totals ? `\nShown run ${r.id} (${r.label || "no label"}, ${r.state}): ${r.totals.count} executions, p50 ${r.totals.p50_ms} ms, p95 ${r.totals.p95_ms} ms, errors ${r.totals.errors}.` : "") +
     (state.compare.result ? `\nComparison shown:\n${compareText(state.compare.result)}` : ""));
 }
+// Re-renders on a timer: hold them while a button is pressed, or the click is lost (S2.holdWhilePressed).
+render = S2.holdWhilePressed(render);
 
 // ---------------------------------------------------------------- statements from and to the SQL Editor
 // Appends statements ({name, sql, per_minute, …} without ids) to the draft, giving them ids; a statement whose

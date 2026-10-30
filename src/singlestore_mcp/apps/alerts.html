@@ -177,6 +177,8 @@ function render() {
   S2.updateModelContext(`User is viewing Alerts: ${d.unacknowledged} unacknowledged, ${d.active} active.\n` +
     (d.alerts ?? []).slice(0, 8).map((a) => `[${a.severity}] ${a.title}${a.active ? " (active)" : ""}${a.acked ? "" : " (unacknowledged)"}: ${String(a.detail ?? "").slice(0, 140)}`).join("\n"));
 }
+// Re-renders on a timer: hold them while a button is pressed, or the click is lost (S2.holdWhilePressed).
+render = S2.holdWhilePressed(render);
 
 setInterval(() => { if (!S2.isHidden() && !state.busy && !dirty()) load(); }, REFRESH_MS);
 S2.onDisplayModeChange = () => { if (state.data) render(); };

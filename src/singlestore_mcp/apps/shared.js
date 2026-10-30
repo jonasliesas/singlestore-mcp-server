@@ -488,6 +488,28 @@ S2.menuButton = function (label, items, { title, cls = "", align = "right" } = {
   return wrap;
 };
 
+// A view's render() rebuilds its page. One landing between a button's mousedown and mouseup (an auto-refresh, or data
+// arriving) replaces the button under the pointer, and the browser then fires no click: the click is lost. Wrapped
+// with S2.holdWhilePressed, a render waits while a pointer button is down (at most 1.5 s) and the latest one runs right
+// after the click. (Found in the Cluster Monitor: its flaky UI test was this race.)
+const press = { down: false, at: 0, pending: new Map() };
+document.addEventListener("pointerdown", () => { press.down = true; press.at = Date.now(); }, true);
+function releasePress() {
+  if (!press.down) return;
+  press.down = false;
+  const due = [...press.pending];
+  press.pending.clear();
+  for (const [fn, args] of due) setTimeout(() => fn(...args), 0);  // after this pointerup's click
+}
+for (const ev of ["pointerup", "pointercancel"]) document.addEventListener(ev, releasePress, true);
+window.addEventListener("blur", releasePress);
+S2.pressed = () => press.down && Date.now() - press.at < 1500;
+S2.holdWhilePressed = (fn) => function held(...args) {
+  if (S2.pressed()) { press.pending.set(fn, args); return; }
+  press.pending.delete(fn);
+  return fn.apply(this, args);
+};
+
 // Inline confirmation (window.confirm is blocked in sandboxed iframes).
 // Temporarily replaces `anchor` with "message [Cancel] [Confirm]".
 S2.confirmInline = function (anchor, message, confirmLabel = "Confirm") {

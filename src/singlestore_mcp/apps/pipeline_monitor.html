@@ -367,6 +367,8 @@ function render() {
         : h("div", { class: "pm-list" }, shown.map(card)),
   ].filter(Boolean));
 }
+// Re-renders on a timer: hold them while a button is pressed, or the click is lost (S2.holdWhilePressed).
+render = S2.holdWhilePressed(render);
 
 S2.onDisplayModeChange = render;
 await S2.connect({

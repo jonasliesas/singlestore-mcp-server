@@ -235,6 +235,8 @@ function render() {
   stickyEl.before(...kids.slice(0, i));
   stickyEl.after(...kids.slice(i + 1));
 }
+// Re-renders on a timer: hold them while a button is pressed, or the click is lost (S2.holdWhilePressed).
+render = S2.holdWhilePressed(render);
 
 // ---------------------------------------------------------------- Users tab
 const userSearch = h("input", { class: "s2-input", type: "search", placeholder: "Filter users, groups…", "aria-label": "Filter users",

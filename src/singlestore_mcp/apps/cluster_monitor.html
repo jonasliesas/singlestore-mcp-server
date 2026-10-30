@@ -1068,21 +1068,9 @@ function backupsTab() {
   ];
 }
 
-// render() rebuilds the page. One landing between a button's mousedown and mouseup (auto-refresh, or a tab's data
-// arriving) replaces the button under the pointer, and the browser then fires no click: a tab or button click was
-// lost now and then. Renders wait while a button is pressed (at most 1.5 s) and the last one runs right after the click.
-const press = { down: false, at: 0, pending: false };
-document.addEventListener("pointerdown", () => { press.down = true; press.at = Date.now(); }, true);
-function release() {
-  if (!press.down) return;
-  press.down = false;
-  if (press.pending) { press.pending = false; setTimeout(render, 0); }  // after this pointerup's click
-}
-for (const ev of ["pointerup", "pointercancel"]) document.addEventListener(ev, release, true);
-window.addEventListener("blur", release);
-
+// render() rebuilds the page: it waits while a button is pressed (S2.holdWhilePressed, below), or a click landing
+// on a button an auto-refresh replaced between mousedown and mouseup would be lost.
 function render() {
-  if (press.down && Date.now() - press.at < 1500) { press.pending = true; return; }
   if (!state.data) {
     root.replaceChildren(state.error ? S2.errorBox(state.error) : h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Measuring the cluster…"));
     return;
@@ -1116,6 +1104,8 @@ function render() {
   ].filter(Boolean));
   if (state.tab === "overview") buildChart();
 }
+
+render = S2.holdWhilePressed(render);
 
 function tabs(d) {
   const recent = (d.recent ?? []).length;

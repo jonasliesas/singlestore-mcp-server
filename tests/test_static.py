@@ -176,3 +176,11 @@ def test_ui_fixtures_reach_ui_tests_in_a_mixed_call() -> None:
     assert out.returncode == 0, out.stdout[-2000:] + out.stderr[-2000:]
     ui_ids = [line for line in out.stdout.splitlines() if line.startswith("tests/ui/test_apps.py::test_workspace_every_view_loads")]
     assert ui_ids == ["tests/ui/test_apps.py::test_workspace_every_view_loads[chromium]"], ui_ids
+
+
+@pytest.mark.parametrize("page", ["alerts", "cluster_monitor", "pipeline_monitor", "query_history", "security", "workload"])
+def test_timer_renders_wait_for_a_pressed_button(page: str) -> None:
+    """Views that rebuild their page on a timer hold the render while a button is pressed (a click landing between
+    mousedown and a re-render's mouseup was lost): their render is wrapped with S2.holdWhilePressed."""
+    src = (APPS_DIR / f"{page}.html").read_text(encoding="utf-8")
+    assert "render = S2.holdWhilePressed(render);" in src

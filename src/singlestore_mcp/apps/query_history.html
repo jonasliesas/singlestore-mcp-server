@@ -1153,6 +1153,8 @@ function render() {
   else if (state.tab === "usage") renderUsage();
   else { renderList(); renderDetail(); }
 }
+// Re-renders on a timer: hold them while a button is pressed, or the click is lost (S2.holdWhilePressed).
+render = S2.holdWhilePressed(render);
 
 function setTab(tab) {
   state.tab = tab;
