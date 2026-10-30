@@ -421,7 +421,11 @@ def token(min_valid: int = 300, name: str | None = None) -> str:
                 fresh = _post_token(s["url"], {"grant_type": "refresh_token", "refresh_token": t["refresh"]},
                                     t.get("client_id") or s["client_id"], s["ssl_verify"])
                 fresh.setdefault("refresh_token", t["refresh"])
-                return _store(name, fresh, t.get("client_id") or s["client_id"], t.get("source") or "sign-in", s["url"])["access"]
+                stored = _store(name, fresh, t.get("client_id") or s["client_id"], t.get("source") or "sign-in", s["url"])
+                from . import server_mode
+
+                server_mode.token_refreshed(s["url"], stored["access"])  # server mode: re-check the user's SAS groups
+                return stored["access"]
             except netguard.Unreachable as exc:
                 # The network is away (VPN off, sleep): the sign-in is fine and is renewed once Viya answers again.
                 netguard.failure("sas", exc)

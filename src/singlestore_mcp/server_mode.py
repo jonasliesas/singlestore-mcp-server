@@ -21,7 +21,7 @@ import os
 from typing import Any
 
 _TRUE = ("1", "true", "yes", "on")
-_state: dict[str, Any] = {"secret_key": None, "sas_client_secret": None, "user": None}
+_state: dict[str, Any] = {"secret_key": None, "sas_client_secret": None, "user": None, "notebooks": None, "token_hook": None}
 
 
 def _flag(name: str, default: bool) -> bool:
@@ -36,7 +36,16 @@ def enabled() -> bool:
 
 
 def notebooks_enabled() -> bool:
-    return not enabled() or _flag("SINGLESTORE_MCP_NOTEBOOKS", False)
+    if not enabled():
+        return True
+    if _state["notebooks"] is not None:  # this user's own flag, from the hub (SAS notebook group)
+        return bool(_state["notebooks"])
+    return _flag("SINGLESTORE_MCP_NOTEBOOKS", False)
+
+
+def set_notebooks(allowed: bool | None) -> None:
+    """Server mode: notebooks on/off for this Studio's user (None: the SINGLESTORE_MCP_NOTEBOOKS switch)."""
+    _state["notebooks"] = allowed
 
 
 def assistant_enabled() -> bool:
@@ -63,6 +72,21 @@ def sas_client_secret(client_id: str) -> str | None:
     """The secret of SAS Logon client ``client_id``, when the hub handed one over (else a public client)."""
     pair = _state["sas_client_secret"]
     return pair[1] if pair and pair[0] == client_id else None
+
+
+def set_token_hook(hook: Any) -> None:
+    """Server mode: ``hook(viya_url, access_token)`` runs (in its own thread) after each SAS Viya token renewal -
+    the Studio re-checks the user's SAS groups with it."""
+    _state["token_hook"] = hook
+
+
+def token_refreshed(viya_url: str, access_token: str) -> None:
+    hook = _state["token_hook"]
+    if hook is None or not enabled():
+        return
+    import threading
+
+    threading.Thread(target=hook, args=(viya_url, access_token), name="token-hook", daemon=True).start()
 
 
 def set_user(user: str | None) -> None:

@@ -687,3 +687,147 @@ def test_memory_of_a_studio_counts_its_child_processes() -> None:
     finally:
         child.kill()
         child.wait()
+
+
+# ----------------------------------------------------------------------------- SAS groups (app / notebooks)
+
+USERS_GROUP, NOTEBOOK_GROUP = "SpeedyStoreStudioUsers", "SpeedyStoreStudioNotebooks"
+
+
+def group_hub(tmp_path: Path, logon: FakeSasLogon, **over: Any) -> Hub:
+    values = dict(users_group=USERS_GROUP, notebook_group=NOTEBOOK_GROUP)
+    values.update(over)
+    return make_hub(tmp_path, logon, **values)
+
+
+def seeds(hub: Hub) -> dict[str, Any]:
+    for st in hub.spawner.running():
+        hub.spawner.wait_ready(st)  # the (fake) start thread records the seed
+    return dict(hub.spawner.seeds)
+
+
+def denied(hub: Hub, logon: FakeSasLogon, user: str):
+    b = Browser(hub.cfg.public_url)
+    r = b.get("/login/start")
+    r = b.get(logon.sign_in(r.location, user))
+    assert r.status == 403 and "studio_session" not in b.cookies and hub.spawner.get(user) is None
+    return r
+
+
+def test_users_group_member_signs_in_and_others_are_refused(tmp_path: Path, logon: FakeSasLogon) -> None:
+    logon.memberships = {"alice": ["SASAdministrators", "Nordics", USERS_GROUP]}  # 3rd item: on the second page
+    hub = group_hub(tmp_path, logon)
+    try:
+        alice = sign_in(hub, logon, "alice")
+        assert ping(alice)["user"] == "alice"
+        a = hub.spawner.access["alice"]
+        assert a.app and a.app_via == f"group {USERS_GROUP}" and not a.notebooks and a.notebooks_via == "off on this server"
+        r = denied(hub, logon, "bob")
+        assert USERS_GROUP in r.text and "Ask the Studio admin" in r.text
+        e = next(e for e in hub.audit.tail() if e["event"] == "login_denied")
+        assert e["user"] == "bob" and USERS_GROUP in e["reason"]
+        page = alice.get("/admin")
+        assert f"yes (group {USERS_GROUP})" in page.text and "no (off on this server)" in page.text
+        assert logon.membership_requests >= 2  # paged
+    finally:
+        hub.close()
+
+
+def test_group_matches_by_name_too(tmp_path: Path, logon: FakeSasLogon) -> None:
+    logon.memberships = {"alice": [USERS_GROUP]}
+    hub = group_hub(tmp_path, logon, users_group="speedy storestudiousers")  # the fake's display name, any case
+    try:
+        assert ping(sign_in(hub, logon, "alice"))["user"] == "alice"
+    finally:
+        hub.close()
+
+
+def test_notebook_group_gives_notebooks_and_the_app(tmp_path: Path, logon: FakeSasLogon) -> None:
+    logon.memberships = {"alice": [USERS_GROUP], "bob": [NOTEBOOK_GROUP]}
+    hub = group_hub(tmp_path, logon, notebooks=True)  # STUDIO_NOTEBOOKS=1: the server-wide switch
+    try:
+        sign_in(hub, logon, "alice")
+        sign_in(hub, logon, "bob")
+        a, b = hub.spawner.access["alice"], hub.spawner.access["bob"]
+        assert a.app and not a.notebooks and a.notebooks_via == f"not in {NOTEBOOK_GROUP}"
+        assert b.app and b.app_via == f"group {NOTEBOOK_GROUP}" and b.notebooks
+        seeds_ = seeds(hub)
+        assert seeds_["alice"]["access"]["notebooks"] is False and seeds_["bob"]["access"]["notebooks"] is True
+        assert seeds_["bob"]["access"]["rules"]["notebook_group"] == NOTEBOOK_GROUP  # the Studio re-checks with these
+        assert hub.spawner._env("alice")["SINGLESTORE_MCP_NOTEBOOKS"] == "0"
+        assert hub.spawner._env("bob")["SINGLESTORE_MCP_NOTEBOOKS"] == "1"
+    finally:
+        hub.close()
+
+
+def test_notebook_group_alone_doesnt_switch_notebooks_on(tmp_path: Path, logon: FakeSasLogon) -> None:
+    logon.memberships = {"bob": [NOTEBOOK_GROUP]}
+    hub = group_hub(tmp_path, logon)  # STUDIO_NOTEBOOKS off (step 1)
+    try:
+        sign_in(hub, logon, "bob")
+        b = hub.spawner.access["bob"]
+        assert b.app and not b.notebooks and seeds(hub)["bob"]["access"]["notebooks"] is False
+    finally:
+        hub.close()
+
+
+def test_allowed_users_is_an_extra_list(tmp_path: Path, logon: FakeSasLogon) -> None:
+    logon.memberships = {"alice": [USERS_GROUP]}
+    hub = group_hub(tmp_path, logon, allowed_users=("bob",))
+    try:
+        sign_in(hub, logon, "bob")
+        assert hub.spawner.access["bob"].app_via == "STUDIO_ALLOWED_USERS"
+        assert hub.spawner.access["bob"].notebooks is False
+    finally:
+        hub.close()
+
+
+def test_identities_unavailable_refuses_new_sign_ins_but_keeps_sessions(tmp_path: Path, logon: FakeSasLogon) -> None:
+    logon.memberships = {"alice": [USERS_GROUP], "bob": [USERS_GROUP]}
+    hub = group_hub(tmp_path, logon)
+    try:
+        alice = sign_in(hub, logon, "alice")
+        ping(alice)
+        logon.identities_down = True
+        r = denied(hub, logon, "bob")
+        assert "check your SAS group membership" in r.text
+        assert any(e["event"] == "login_denied" and e["reason"] == "group check failed" for e in hub.audit.tail())
+        hub.studio_access(hub.spawner.get("alice"), {"check": "failed"})  # alice's Studio couldn't re-check either
+        assert ping(alice)["user"] == "alice" and hub.spawner.access["alice"].app
+        assert any(e["event"] == "access_check_failed" for e in hub.audit.tail())
+    finally:
+        hub.close()
+
+
+def test_removed_from_the_group_at_token_refresh(tmp_path: Path, logon: FakeSasLogon) -> None:
+    logon.memberships = {"alice": [USERS_GROUP, NOTEBOOK_GROUP]}
+    hub = group_hub(tmp_path, logon, notebooks=True)
+    try:
+        alice = sign_in(hub, logon, "alice")
+        ping(alice)
+        st = hub.spawner.get("alice")
+        # The Studio's report can narrow access, never widen it: notebooks off first...
+        hub.studio_access(st, {"app": True, "app_via": f"group {USERS_GROUP}", "notebooks": False, "notebooks_via": "x"})
+        assert hub.spawner.access["alice"].notebooks is False and hub.spawner.get("alice") is st
+        hub.studio_access(st, {"app": True, "app_via": "x", "notebooks": True, "notebooks_via": "x"})
+        assert hub.spawner.access["alice"].notebooks is False
+        # ...then out of every group: signed out, Studio stopped.
+        hub.studio_access(st, {"app": False, "app_via": f"not in {USERS_GROUP}", "notebooks": False, "notebooks_via": ""})
+        deadline = time.time() + 5
+        while hub.spawner.get("alice") is not None and time.time() < deadline:
+            time.sleep(0.05)
+        assert hub.spawner.get("alice") is None and alice.get("/studio/").location == "/login"
+        e = next(e for e in hub.audit.tail() if e["event"] == "access_revoked")
+        assert e["user"] == "alice" and USERS_GROUP in e["reason"]
+    finally:
+        hub.close()
+
+
+def test_access_rules_without_groups_are_as_before() -> None:
+    from singlestore_mcp.hub.access import Rules, decide
+
+    a = decide("alice", Rules(), [])
+    assert a.app and a.app_via == "everyone who can sign in" and not a.notebooks
+    assert decide("alice", Rules(notebooks=True), []).notebooks
+    assert not decide("bob", Rules(allowed_users=("alice",)), []).app
+    assert not decide("alice", Rules(users_group=USERS_GROUP), None).app  # check failed: refused

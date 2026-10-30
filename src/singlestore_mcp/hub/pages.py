@@ -89,24 +89,33 @@ def _mb(n: int | None) -> str:
     return "" if n is None else f"{n / 1048576:.0f} MB"
 
 
+def _access(r: dict[str, Any]) -> str:
+    """App / notebook access and what gave it (SAS group, allow-list)."""
+    if "app" not in r:
+        return "<td></td><td></td>"
+    app = ("yes" if r["app"] else "no") + (f" ({r.get('app_via')})" if r.get("app_via") else "")
+    nb = ("yes" if r["notebooks"] else "no") + (f" ({r.get('notebooks_via')})" if r.get("notebooks_via") else "")
+    return f"<td>{escape(app)}</td><td>{escape(nb)}</td>"
+
+
 def admin(rows: list[dict[str, Any]], sessions: list[dict[str, Any]], events: list[dict[str, Any]], csrf: str,
           limits: dict[str, Any]) -> str:
     studio_rows = "".join(
         f"<tr><td><code>{escape(r['user'])}</code></td><td>{escape(str(r.get('pid') or ''))}</td><td>{escape(r['state'])}</td>"
-        f"<td>{_ago(r.get('started'))}</td><td>{_ago(r.get('last_activity'))}</td><td>{_mb(r.get('rss'))}</td>"
+        f"<td>{_ago(r.get('started'))}</td><td>{_ago(r.get('last_activity'))}</td><td>{_mb(r.get('rss'))}</td>{_access(r)}"
         f'<td><form method="post" action="/admin/stop"><input type="hidden" name="csrf" value="{escape(csrf)}">'
         f'<input type="hidden" name="user" value="{escape(r["user"])}"><button class="btn small ghost" type="submit">Stop</button></form></td></tr>'
-        for r in rows) or '<tr><td colspan="7">No Studio is running.</td></tr>'
+        for r in rows) or '<tr><td colspan="9">No Studio is running.</td></tr>'
     session_rows = "".join(
         f"<tr><td><code>{escape(s['user'])}</code></td><td>{escape(s.get('name') or '')}</td><td>{escape(s.get('ip') or '')}</td>"
-        f"<td>{_ago(s.get('created'))}</td><td>{_ago(s.get('last_seen'))}</td></tr>" for s in sessions) \
-        or '<tr><td colspan="5">Nobody is signed in.</td></tr>'
+        f"<td>{_ago(s.get('created'))}</td><td>{_ago(s.get('last_seen'))}</td>{_access(s)}</tr>" for s in sessions) \
+        or '<tr><td colspan="7">Nobody is signed in.</td></tr>'
     event_rows = "".join(
         f"<tr><td>{escape(e.get('ts', ''))}</td><td>{escape(e.get('event', ''))}</td><td><code>{escape(str(e.get('user') or ''))}</code></td>"
         f"<td>{escape(', '.join(f'{k}={v}' for k, v in e.items() if k not in ('ts', 'event', 'user')))}</td></tr>" for e in events)
     lim = ", ".join(f"{k}: {v}" for k, v in limits.items())
     return page("Admin", f"""<div class="card">{_brand()}<h1>Admin</h1><p>{escape(lim)}</p>
 <div class="row"><a class="btn ghost" href="/account">Account</a><a class="btn ghost" href="/admin">Refresh</a></div>
-<h2>Studios</h2><table><tr><th>User</th><th>PID</th><th>State</th><th>Started</th><th>Last use</th><th>Memory</th><th></th></tr>{studio_rows}</table>
-<h2>Signed in</h2><table><tr><th>User</th><th>Name</th><th>Address</th><th>Signed in</th><th>Last request</th></tr>{session_rows}</table>
+<h2>Studios</h2><table><tr><th>User</th><th>PID</th><th>State</th><th>Started</th><th>Last use</th><th>Memory</th><th>Studio access</th><th>Notebooks</th><th></th></tr>{studio_rows}</table>
+<h2>Signed in</h2><table><tr><th>User</th><th>Name</th><th>Address</th><th>Signed in</th><th>Last request</th><th>Studio access</th><th>Notebooks</th></tr>{session_rows}</table>
 <h2>Recent events</h2><table><tr><th>Time (UTC)</th><th>Event</th><th>User</th><th>Details</th></tr>{event_rows}</table></div>""", wide=True)

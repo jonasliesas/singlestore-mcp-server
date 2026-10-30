@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .access import Access
 from .audit import Audit
 from .config import HubConfig
 
@@ -180,6 +181,8 @@ class Spawner:
         self.audit = audit
         self._studios: dict[str, Studio] = {}
         self._crashes: dict[str, deque[float]] = {}
+        self.access: dict[str, Access] = {}   # per user, from the hub's sign-in check (SAS groups)
+        self.on_access: Any = None            # hub callback(user, report): a Studio re-checked the user's groups
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._reaper: threading.Thread | None = None
@@ -209,7 +212,7 @@ class Spawner:
             "HOME": str(files), "USERPROFILE": str(files),
             "SINGLESTORE_MCP_SQL_DIR": str(files / "SQL"),
             "SINGLESTORE_STUDIO_BIND": "127.0.0.1", "SINGLESTORE_STUDIO_PORT": "0",
-            "SINGLESTORE_MCP_NOTEBOOKS": "1" if self.cfg.notebooks else "0",
+            "SINGLESTORE_MCP_NOTEBOOKS": "1" if self.notebooks_for(user) else "0",
             "SINGLESTORE_MCP_ASSISTANT": "1" if self.cfg.assistant else "0",
             "SINGLESTORE_MCP_METRICS": "1" if self.cfg.metrics else "0",
             "SINGLESTORE_MCP_SAS_IMPORT": "0",
@@ -226,6 +229,10 @@ class Spawner:
                     env[k] = v
         return env
 
+    def notebooks_for(self, user: str) -> bool:
+        a = self.access.get(user)
+        return a.notebooks if a is not None else self.cfg.notebooks
+
     def seed(self, user: str, tokens: dict[str, Any] | None) -> dict[str, Any]:
         """What a new or running Studio gets: the Viya connection with the user's sign-in and the default
         SingleStore connection (no password)."""
@@ -236,6 +243,11 @@ class Spawner:
         if tokens:
             viya["tokens"] = {k: tokens[k] for k in ("access_token", "refresh_token", "expires_in") if k in tokens}
         out: dict[str, Any] = {"viya": viya}
+        # The user's notebook flag (enforced by the Studio's notebook tools), and the group rules it re-checks
+        # after each Viya token renewal.
+        rules = self.cfg.rules
+        out["access"] = {"notebooks": self.notebooks_for(user), "viya_url": self.cfg.viya_url,
+                         "rules": rules.to_json() if rules.needs_groups else None}
         if self.cfg.default_s2.get("host"):
             out["singlestore"] = {**self.cfg.default_s2, "user": user}
         return out
@@ -326,8 +338,13 @@ class Spawner:
                 if line.startswith("STUDIO-READY "):
                     reader_result["port"] = int(line.split()[1])
                     break
-            for _ in st.proc.stdout:  # type: ignore[union-attr] - keep draining (never block the child)
-                pass
+            for raw in st.proc.stdout:  # type: ignore[union-attr] - keep draining (never block the child)
+                line = raw.decode("utf-8", "replace").strip()
+                if line.startswith("STUDIO-ACCESS ") and self.on_access is not None:
+                    try:
+                        self.on_access(st, json.loads(line[len("STUDIO-ACCESS "):]))
+                    except Exception:  # noqa: BLE001 - a bad report changes nothing
+                        pass
 
         threading.Thread(target=read_ready, name="studio-stdout", daemon=True).start()
         while time.time() < deadline and st.proc.poll() is None and "port" not in reader_result:

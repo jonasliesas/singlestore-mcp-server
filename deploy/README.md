@@ -35,10 +35,18 @@ browser ──TLS──> Ingress ──> hub (:8800) ── /studio/* ──> St
   sign-ins that open a browser on the server (Helios SSO, Entra ID) are refused; use a password or a pasted JWT.
 - **Idle stop:** a Studio with no use (the open pages' 30 s heartbeat doesn't count) for `STUDIO_IDLE_MINUTES` is
   stopped; its page says "Studio stopped" and starts it again on click. Sign-out stops it at once.
-- **Admin page** (`/admin`, users in `STUDIO_ADMINS`): who is signed in, running Studios with memory, stop one
+- **Access by SAS group:** members of `STUDIO_USERS_GROUP` (pilot: `SpeedyStoreStudioUsers`) may use Studio, members
+  of `STUDIO_NOTEBOOK_GROUP` (`SpeedyStoreStudioNotebooks`) also notebooks - once `STUDIO_NOTEBOOKS=1` (not in step 1).
+  The hub reads the user's groups at sign-in with the user's own token (`/identities/users/@currentUser/memberships`);
+  each Studio checks again whenever it renews the Viya token, so leaving the group signs the user out within the token
+  lifetime. The notebook flag is per user and enforced by Studio's notebook tools (not only hidden). Identities down:
+  new sign-ins are refused, running ones carry on. The Viya admin creates the groups (ADMIN-GUIDE §8).
+- **Admin page** (`/admin`, users in `STUDIO_ADMINS`): who is signed in, running Studios with memory and each user's Studio / notebook access (and which group gave it), stop one
   (also signs that user out), recent audit events. **Health:** `/healthz`.
 - **Audit log:** `/data/hub/audit.jsonl` + stderr: hub start/stop, login (user, address, mode), failed/denied
-  logins, logout, Studio start/stop (reason: idle / logout / admin / exited), admin actions, blocked CSRF. Never
+  logins (`login_denied` with the reason, e.g. not in the group), logout, Studio start/stop (reason: idle / logout /
+  admin / exited / hung / access removed), access changes and re-check failures, rate-limited sign-ins, links from
+  other sites, admin actions, blocked CSRF. Never
   passwords, codes, tokens, cookies or keys.
 
 ### Security model (pilot)
@@ -148,7 +156,9 @@ Claude Code for a later "Ask Claude" switch. Kubernetes manifests: [k8s/](k8s/).
 | `STUDIO_VIYA_VERIFY` | `1` | Check Viya's TLS certificate (`SSL_CERT_FILE` for an internal CA) |
 | `STUDIO_VIYA_COMPUTE_CONTEXT` | SAS Studio compute context | Compute context of the pre-loaded connection |
 | `STUDIO_ADMINS` | none | SAS user ids allowed on `/admin` |
-| `STUDIO_ALLOWED_USERS` | everyone who can sign in | SAS user ids allowed to use Studio |
+| `STUDIO_USERS_GROUP` | none | SAS group whose members may use Studio (pilot: `SpeedyStoreStudioUsers`) |
+| `STUDIO_NOTEBOOK_GROUP` | none | SAS group whose members may use notebooks and Studio (pilot: `SpeedyStoreStudioNotebooks`); notebooks also need `STUDIO_NOTEBOOKS=1` |
+| `STUDIO_ALLOWED_USERS` | everyone who can sign in | SAS user ids allowed to use Studio (with a group set: allowed besides the group's members) |
 | `STUDIO_MAX_USERS` | `20` | Studios running at once (more: "Studio is full") |
 | `STUDIO_IDLE_MINUTES` | `30` | Idle stop |
 | `STUDIO_SESSION_HOURS` | `10` | Sign-in lifetime |

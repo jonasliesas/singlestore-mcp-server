@@ -63,7 +63,9 @@ class HubConfig:
     proxy_timeout_s: int = 600            # longest a Studio call may take (the ingress waits 600 s too)
     login_rate: int = 20                  # sign-in starts / code exchanges per client address and minute
     admins: tuple[str, ...] = ()
-    allowed_users: tuple[str, ...] = ()  # empty: every SAS user who can sign in
+    allowed_users: tuple[str, ...] = ()  # empty: every SAS user who can sign in (with a group set: an extra list)
+    users_group: str = ""                 # SAS group whose members may use Studio (empty: no group check)
+    notebook_group: str = ""              # SAS group whose members may use notebooks (and Studio)
     trust_forwarded: bool = False        # take the client address from X-Forwarded-For (behind the ingress)
     notebooks: bool = False
     assistant: bool = False
@@ -95,6 +97,13 @@ class HubConfig:
 
     def is_admin(self, user: str) -> bool:
         return user.lower() in {a.lower() for a in self.admins}
+
+    @property
+    def rules(self):  # noqa: ANN201 - access.Rules (imported late: config stays import-light)
+        from .access import Rules
+
+        return Rules(users_group=self.users_group, notebook_group=self.notebook_group, allowed_users=self.allowed_users,
+                     notebooks=self.notebooks)
 
     def may_sign_in(self, user: str) -> bool:
         return not self.allowed_users or user.lower() in {a.lower() for a in self.allowed_users}
@@ -168,6 +177,8 @@ def load() -> HubConfig:
         login_rate=max(1, _int("STUDIO_LOGIN_RATE", 20)),
         admins=_csv("STUDIO_ADMINS"),
         allowed_users=_csv("STUDIO_ALLOWED_USERS"),
+        users_group=_env("STUDIO_USERS_GROUP"),
+        notebook_group=_env("STUDIO_NOTEBOOK_GROUP"),
         trust_forwarded=_flag("STUDIO_TRUST_FORWARDED", False),
         notebooks=_flag("STUDIO_NOTEBOOKS", False),
         assistant=_flag("STUDIO_ASSISTANT", False),

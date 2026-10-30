@@ -5,6 +5,10 @@ stands for the user signing in on SAS Logon's own page. Then, as SAS Logon does:
 - a client with a registered redirect URI gets a 302 to ``redirect_uri?code=…&state=…``;
 - the public ``vscode`` client (no redirect URI) gets a page that shows the code to paste.
 
+Group memberships (``memberships``: user -> group ids) are served at
+``/identities/users/@currentUser/memberships`` in pages of at most ``page_max`` items (Viya's collection format);
+``identities_down`` makes that call fail (503).
+
 Tokens are opaque test strings (``fake-access-…``), never real JWTs. Clients: ``vscode`` (public, no secret) and
 ``studio-hub`` (secret ``test-client-secret``, redirect URI set with ``register_redirect``).
 """
@@ -36,6 +40,10 @@ class FakeSasLogon(FakeViya):
         self.refresh: dict[str, str] = {}
         self.access_ttl = 3600
         self.token_requests: list[dict[str, str]] = []  # grant types and clients (no secrets kept)
+        self.memberships: dict[str, list[str]] = {}
+        self.page_max = 2
+        self.identities_down = False
+        self.membership_requests = 0
         self._n = itertools.count(1)
         self._logon_lock = threading.Lock()
         super().__init__()
@@ -118,6 +126,16 @@ class FakeSasLogon(FakeViya):
             tok = self.access.get(auth.removeprefix("Bearer ").strip())
             if tok is None or float(tok["exp"]) < time.time():  # type: ignore[arg-type]
                 return 401, {"error": "invalid_token"}, js
+            if method == "GET" and path == "/identities/users/@currentUser/memberships":
+                self.membership_requests += 1
+                if self.identities_down:
+                    return 503, {"errorCode": 0, "message": "identities is unavailable"}, js
+                groups = self.memberships.get(str(tok["user"]), [])
+                start, limit = int(q.get("start", 0)), min(int(q.get("limit", 20)), self.page_max)
+                page = groups[start:start + limit]
+                links = [{"rel": "next", "href": f"{path}?start={start + limit}&limit={limit}"}] if start + limit < len(groups) else []
+                return 200, {"items": [{"id": g, "name": g.replace("Speedy", "Speedy "), "type": "group"} for g in page],
+                             "count": len(groups), "start": start, "limit": limit, "links": links}, js
             if method == "GET" and path == "/identities/users/@currentUser":
                 user = str(tok["user"])
                 return 200, {"id": user, "name": self.users[user], "type": "user"}, js

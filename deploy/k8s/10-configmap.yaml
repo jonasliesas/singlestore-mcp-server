@@ -22,7 +22,11 @@ data:
   STUDIO_OAUTH_SCOPE: ""
   # SAS user ids (as SAS Logon / identities know them), comma-separated.
   STUDIO_ADMINS: "<sas-user-id>"
-  # Empty: every SAS user who can sign in to this Viya. Else a comma-separated list of SAS user ids.
+  # Who may use Studio / notebooks: SAS groups the Viya admin creates in SAS Environment Manager (ADMIN-GUIDE §8).
+  # Empty: every SAS user who can sign in. Notebooks also need STUDIO_NOTEBOOKS=1 (not in step 1).
+  STUDIO_USERS_GROUP: "SpeedyStoreStudioUsers"
+  STUDIO_NOTEBOOK_GROUP: "SpeedyStoreStudioNotebooks"
+  # Extra SAS user ids allowed besides the groups' members (comma-separated); without groups: the only list.
   STUDIO_ALLOWED_USERS: ""
   STUDIO_MAX_USERS: "20"
   STUDIO_IDLE_MINUTES: "30"

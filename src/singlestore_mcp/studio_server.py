@@ -41,6 +41,69 @@ def _csv(name: str) -> tuple[str, ...]:
     return tuple(x.strip() for x in os.environ.get(name, "").split(",") if x.strip())
 
 
+# The hub's group rules for this user (SAS groups for Studio / notebooks), re-checked after each Viya token renewal.
+_access: dict[str, Any] = {"rules": None, "viya_url": "", "name": "", "timer": None}
+
+
+def report_access(data: dict[str, Any]) -> None:
+    """Tell the hub (over stdout, which only the hub reads) what the last group check found."""
+    print("STUDIO-ACCESS " + json.dumps(data), flush=True)
+
+
+def recheck_access(viya_url: str, access_token: str) -> dict[str, Any] | None:
+    """After a token renewal: the user's groups with the new token; notebooks follow at once, the hub stops this
+    Studio if app access is gone. A failed check changes nothing (identities may be down for a moment)."""
+    from . import sas_viya, server_mode
+    from .hub import access
+
+    rules = _access["rules"]
+    if not rules or viya_url.rstrip("/") != str(_access["viya_url"]).rstrip("/"):
+        return None
+    verify = next((bool(c.get("ssl_verify", True)) for c in sas_viya.saved() if c.get("url", "").rstrip("/") == viya_url.rstrip("/")), True)
+
+    def get(path: str) -> tuple[int, Any]:
+        return sas_viya._http("GET", viya_url.rstrip("/") + path, verify=verify,
+                              headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"})
+
+    try:
+        groups = access.fetch_groups(get, server_mode.user() or "")
+    except Exception:  # noqa: BLE001 - identities down / network: keep the access the user has
+        report_access({"check": "failed"})
+        return None
+    result = access.decide(server_mode.user() or "", access.Rules.from_json(rules), groups)
+    server_mode.set_notebooks(result.notebooks)
+    report_access(result.to_json())
+    return result.to_json()
+
+
+def _renew_now_and_then(every_s: float) -> None:
+    """Renew the hub's Viya sign-in before it expires even without SAS work, so the group re-check runs at least
+    once per token lifetime."""
+    from . import sas_viya
+
+    def run() -> None:
+        while True:
+            time.sleep(every_s)
+            try:
+                sas_viya.token(min_valid=int(every_s) + 60, name=_access["name"] or None)
+            except Exception:  # noqa: BLE001 - signed out of SAS / offline: nothing to re-check with
+                pass
+
+    if _access["timer"] is None:
+        _access["timer"] = threading.Thread(target=run, name="access-renew", daemon=True)
+        _access["timer"].start()
+
+
+def apply_access(acc: dict[str, Any], viya_name: str = "") -> None:
+    from . import server_mode
+
+    server_mode.set_notebooks(bool(acc.get("notebooks")))
+    if acc.get("rules"):
+        _access.update(rules=acc["rules"], viya_url=acc.get("viya_url") or "", name=viya_name)
+        server_mode.set_token_hook(recheck_access)
+        _renew_now_and_then(float(os.environ.get("SINGLESTORE_STUDIO_ACCESS_CHECK_S", "600") or 600))
+
+
 def apply_seed(seed: dict[str, Any]) -> dict[str, Any]:
     """Put the hub's sign-in and defaults into this user's state: the SAS Viya connection with the user's token
     (from the hub's SAS Logon sign-in), and a default SingleStore connection (host/port/database, no password)
@@ -49,6 +112,9 @@ def apply_seed(seed: dict[str, Any]) -> dict[str, Any]:
 
     done: dict[str, Any] = {}
     viya = seed.get("viya") or {}
+    if isinstance(seed.get("access"), dict):  # the user's notebook flag + group rules (from the hub's sign-in check)
+        apply_access(seed["access"], str(viya.get("name") or ""))
+        done["notebooks"] = bool(seed["access"].get("notebooks"))
     if viya.get("url") and viya.get("name"):
         name, url = str(viya["name"]), str(viya["url"]).rstrip("/")
         values = {"name": name, "url": url, "client_id": viya.get("client_id") or "vscode",

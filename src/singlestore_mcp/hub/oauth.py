@@ -108,6 +108,11 @@ def refresh(cfg: HubConfig, refresh_token: str) -> dict[str, Any]:
     return tokens
 
 
+def get(cfg: HubConfig, path: str, access_token: str) -> tuple[int, Any]:
+    """GET ``path`` on the Viya with the user's own token (e.g. their group memberships)."""
+    return _http(cfg, "GET", f"{cfg.viya_url}{path}", headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"})
+
+
 def current_user(cfg: HubConfig, access_token: str) -> dict[str, str]:
     """Who the token belongs to, as Viya says: {"id": "norjni", "name": "Jonas …"}."""
     status, body = _http(cfg, "GET", f"{cfg.viya_url}/identities/users/@currentUser",

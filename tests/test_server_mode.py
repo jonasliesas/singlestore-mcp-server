@@ -204,3 +204,54 @@ def test_tls_files_must_be_the_users_own(server: dict[str, Any], tmp_path: Path,
     # Normal (laptop) mode is unchanged: any existing file.
     monkeypatch.delenv("SINGLESTORE_MCP_SERVER_MODE")
     assert connections._tls_fields({"ssl_ca": str(other / "ca.pem")})["ssl_ca"] == str(other / "ca.pem")
+
+
+def test_per_user_notebook_flag_is_enforced_by_the_notebook_tools(server: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    from singlestore_mcp import notebook_kernel
+
+    monkeypatch.setenv("SINGLESTORE_MCP_NOTEBOOKS", "1")  # the process switch on, but this user isn't allowed
+    try:
+        server_mode.set_notebooks(False)
+        assert not server_mode.notebooks_enabled() and not server_mode.features()["notebooks"]
+        with pytest.raises(PermissionError):
+            notebook_kernel.setup()
+        server_mode.set_notebooks(True)
+        assert server_mode.notebooks_enabled()
+    finally:
+        server_mode.set_notebooks(None)
+
+
+def test_studio_rechecks_groups_after_a_token_renewal(server: dict[str, Any], capsys: pytest.CaptureFixture[str]) -> None:
+    """studio_server.recheck_access: the user's groups with the new token, against the fake identities service."""
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from fake_saslogon import FakeSasLogon
+
+    from singlestore_mcp import studio_server
+
+    logon = FakeSasLogon()
+    try:
+        logon.memberships = {"alice": ["SpeedyStoreStudioUsers", "SpeedyStoreStudioNotebooks"]}
+        server_mode.set_user("alice")
+        studio_server._access.update(rules={"users_group": "SpeedyStoreStudioUsers", "notebook_group": "SpeedyStoreStudioNotebooks",
+                                            "allowed_users": [], "notebooks": True}, viya_url=logon.url)
+        token = logon._new_access("alice", "studio-hub")["access_token"]
+        assert studio_server.recheck_access(logon.url, token)["notebooks"] is True and server_mode.notebooks_enabled()
+        logon.memberships["alice"] = ["SpeedyStoreStudioUsers"]  # taken out of the notebook group
+        assert studio_server.recheck_access(logon.url, token)["notebooks"] is False and not server_mode.notebooks_enabled()
+        logon.memberships["alice"] = []  # and out of Studio
+        assert studio_server.recheck_access(logon.url, token)["app"] is False
+        lines = [x for x in capsys.readouterr().out.splitlines() if x.startswith("STUDIO-ACCESS ")]
+        assert len(lines) == 3 and json.loads(lines[-1].split(" ", 1)[1])["app"] is False
+        logon.identities_down = True  # can't check: nothing changes, the hub hears "failed"
+        server_mode.set_notebooks(True)
+        assert studio_server.recheck_access(logon.url, token) is None and server_mode.notebooks_enabled()
+        assert json.loads(capsys.readouterr().out.strip().split(" ", 1)[1]) == {"check": "failed"}
+        assert studio_server.recheck_access("https://other.example", token) is None  # another Viya's renewal: not ours
+        assert token not in capsys.readouterr().out
+    finally:
+        studio_server._access.update(rules=None, viya_url="")
+        server_mode.set_user(None)
+        server_mode.set_notebooks(None)
+        logon.close()

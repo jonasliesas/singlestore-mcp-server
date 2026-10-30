@@ -40,7 +40,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from . import oauth, pages
+from . import access, oauth, pages
 from .audit import Audit
 from .config import HubConfig
 from .sessions import PENDING_TTL_S, RateLimiter, Session, SessionStore
@@ -62,6 +62,7 @@ class Hub:
         self.audit = audit or Audit(cfg.hub_dir() / "audit.jsonl")
         self.sessions = SessionStore(cfg.session_hours * 3600)
         self.spawner = Spawner(cfg, self.audit)
+        self.spawner.on_access = self.studio_access
         self.login_limit = RateLimiter(cfg.login_rate, 60.0)
         self.httpd: ThreadingHTTPServer | None = None
         self._close_lock = threading.Lock()
@@ -104,15 +105,51 @@ class Hub:
             self._closed = True
 
     # ------------------------------------------------------------ sign-in
+    def check_access(self, user: str, access_token: str) -> access.Access:
+        """App / notebook access from the SAS groups (read with the user's own token), STUDIO_ALLOWED_USERS and
+        STUDIO_NOTEBOOKS. The identities service down: access refused (a new sign-in waits until it answers)."""
+        rules = self.cfg.rules
+        groups: list[dict[str, str]] | None = []
+        if rules.needs_groups:
+            try:
+                groups = access.fetch_groups(lambda path: oauth.get(self.cfg, path, access_token), user)
+            except (access.GroupCheckFailed, oauth.SignInError):
+                groups = None
+        return access.decide(user, rules, groups)
+
+    def studio_access(self, st: Any, report: dict[str, Any]) -> None:
+        """A Studio re-checked its user's groups after renewing the Viya token (studio_server.recheck_access).
+        Only ever narrows access: the hub's own sign-in check is what grants it."""
+        if report.get("check") == "failed":
+            self.audit.record("access_check_failed", user=st.user)  # running sessions stay; a new sign-in is refused
+            return
+        old = self.spawner.access.get(st.user)
+        if old is None or not old.app:
+            return
+        new = access.Access(app=bool(report.get("app")), app_via=str(report.get("app_via") or "")[:120],
+                            notebooks=bool(report.get("notebooks")) and old.notebooks,
+                            notebooks_via=str(report.get("notebooks_via") or "")[:120])
+        if (old.app, old.notebooks) == (new.app, new.notebooks):
+            return
+        self.spawner.access[st.user] = new
+        self.audit.record("access_changed", user=st.user, app=new.app, app_via=new.app_via, notebooks=new.notebooks,
+                          notebooks_via=new.notebooks_via)
+        if not new.app:
+            dropped = self.sessions.drop_user(st.user)
+            threading.Thread(target=self.spawner.stop, args=(st.user, "access removed"), daemon=True).start()
+            self.audit.record("access_revoked", user=st.user, reason=new.app_via, sessions=dropped)
+
     def finish_sign_in(self, tokens: dict[str, Any], ip: str) -> Session:
         who = oauth.current_user(self.cfg, tokens["access_token"])
-        if not self.cfg.may_sign_in(who["id"]):
-            self.audit.record("login_denied", user=who["id"], ip=ip, reason="not in STUDIO_ALLOWED_USERS")
-            raise oauth.SignInError(f"{who['id']} isn't allowed to use this Studio. Ask the Studio admin.")
+        acc = self.check_access(who["id"], tokens["access_token"])
+        if not acc.app:
+            self.audit.record("login_denied", user=who["id"], ip=ip, reason=acc.app_via)
+            raise oauth.SignInError(acc.reason)
+        self.spawner.access[who["id"]] = acc
         # StudioFull when max_users run already (an admin may start one more, to reach /admin)
         self.spawner.ensure(who["id"], tokens, ip=ip, admin=self.cfg.is_admin(who["id"]))
         session = self.sessions.create(who["id"], who["name"], ip)
-        self.audit.record("login", user=who["id"], ip=ip, mode=self.cfg.oauth_mode)
+        self.audit.record("login", user=who["id"], ip=ip, mode=self.cfg.oauth_mode, app_via=acc.app_via, notebooks=acc.notebooks)
         return session
 
 
@@ -389,11 +426,16 @@ def _handler(hub: Hub) -> type[BaseHTTPRequestHandler]:
                 if self._session() is None:
                     return self._redirect("/login")
                 return self._send(403, pages.message("Forbidden", "The admin page is for Studio admins.", ("Account", "/account"), True))
-            rows = [{"user": st.user, "pid": st.pid, "state": "running" if st.alive() and st.port else "starting" if not st.ready.is_set() else "stopped",
+            def acc(user: str) -> dict[str, Any]:
+                a = hub.spawner.access.get(user)
+                return {"app": a.app, "app_via": a.app_via, "notebooks": a.notebooks, "notebooks_via": a.notebooks_via} if a else {}
+
+            rows = [{**acc(st.user), "user": st.user, "pid": st.pid, "state": "running" if st.alive() and st.port else "starting" if not st.ready.is_set() else "stopped",
                      "started": st.started, "last_activity": st.last_activity, "rss": rss_bytes(st.pid)} for st in hub.spawner.running()]
-            sess = [{"user": x.user, "name": x.name, "ip": x.ip, "created": x.created, "last_seen": x.last_seen} for x in hub.sessions.all()]
+            sess = [{**acc(x.user), "user": x.user, "name": x.name, "ip": x.ip, "created": x.created, "last_seen": x.last_seen} for x in hub.sessions.all()]
             limits = {"users": f"{len(rows)} of {cfg.max_users}", "idle stop": f"{cfg.idle_minutes} min",
-                      "sign-in": cfg.oauth_mode, "notebooks": "on" if cfg.notebooks else "off", "Ask Claude": "on" if cfg.assistant else "off"}
+                      "sign-in": cfg.oauth_mode, "notebooks": "on" if cfg.notebooks else "off", "Ask Claude": "on" if cfg.assistant else "off",
+                      "users group": cfg.users_group or "none", "notebook group": cfg.notebook_group or "none"}
             return self._send(200, pages.admin(rows, sess, hub.audit.tail(50), s.csrf, limits))
 
         def _admin_stop(self) -> None:

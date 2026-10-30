@@ -16,6 +16,7 @@ What it needs, in short:
 | 5 | Network access to SingleStore (3306) and Viya (443) | K8s / network admin | yes |
 | 6 | Secrets (master key, client secret) | K8s admin | yes |
 | 7 | SingleStore users for the colleagues | SingleStore admin | yes (they may exist) |
+| 8 | Two SAS groups: who may use Studio, who may use notebooks | Viya admin | recommended (else everyone who can sign in) |
 
 ## 1. Namespace, registry, image
 
@@ -140,6 +141,32 @@ Studio connects to SingleStore **as each user** with their own database user and
 Connections, stored encrypted in their folder). Colleagues need a SingleStore user with the grants they should have;
 Studio adds no rights. The default connection in the ConfigMap only pre-fills host/port/database (user name = SAS id).
 
+## 8. SAS groups for access
+
+Who may use Studio is decided by two **SAS groups** that the Viya admin creates in **SAS Environment Manager**
+(Users > New custom group) - Studio doesn't create or change groups. Names agreed for the pilot:
+
+| Group (id) | Members may | Setting |
+|---|---|---|
+| `SpeedyStoreStudioUsers` | use Studio | `STUDIO_USERS_GROUP` |
+| `SpeedyStoreStudioNotebooks` | use notebooks (and so Studio) - once notebooks exist (step 2) and `STUDIO_NOTEBOOKS=1` | `STUDIO_NOTEBOOK_GROUP` |
+
+Add the colleagues to the groups **directly** (as members, not through another group): whether the identities
+service's membership list includes nested groups isn't documented publicly and hasn't been checked on Zeus yet.
+Membership can be delegated (e.g. to the Studio owner) in Environment Manager.
+
+How it works: at sign-in the hub asks Viya's identities service which groups the user is in -
+`GET /identities/users/@currentUser/memberships` (paged) with **the user's own token**, no service account. A group
+matches by its id or its name. Not a member: sign-in refused with a readable page and a `login_denied` audit line
+(reason "not in SpeedyStoreStudioUsers or SpeedyStoreStudioNotebooks"). Each Studio checks again whenever it renews the user's
+Viya token (at least once per token lifetime, `access_token_validity`, 1 h), so someone taken out of the group is
+signed out and their Studio stopped within that time (`access_revoked`); taken out of the notebook group, notebooks
+go off at once. If the identities service doesn't answer, **new** sign-ins are refused ("couldn't check your SAS group
+membership") but people already signed in carry on (`access_check_failed`). `STUDIO_ALLOWED_USERS` is an extra list
+of SAS user ids that may use Studio without being in a group. Both groups empty: everyone who can sign in (or
+`STUDIO_ALLOWED_USERS`), as before. The admin page shows per user whether they may use Studio and notebooks and which
+group (or list) gave it.
+
 ## Operating it
 
 - **Admin page:** `https://studio.<internal-domain>/admin` for the SAS user ids in `STUDIO_ADMINS` - who is signed in,
@@ -147,7 +174,10 @@ Studio adds no rights. The default connection in the ConfigMap only pre-fills ho
 - **Health:** `GET /healthz` (no sign-in) - used by the probes.
 - **Logs:** `kubectl logs` shows the audit lines (`audit {...}`); each user's Studio writes `studio.log` in their state
   folder. No passwords, tokens, codes or cookies are logged.
-- **Sizing:** ~150-300 MB per running Studio; idle ones stop after `STUDIO_IDLE_MINUTES`; at most `STUDIO_MAX_USERS`.
+- **Sizing:** measured ~145 MB per running Studio right after opening, plan ~200-300 MB in use (README, Sizing);
+  idle ones stop after `STUDIO_IDLE_MINUTES`; at most `STUDIO_MAX_USERS` (an admin may start one more to reach /admin).
+- **A crashed or hung Studio** is started again on the user's next request ("Your Studio is restarting"); one that
+  crashes 3 times in 5 minutes waits a few minutes. Its `studio.log` says why.
 - **Upgrade:** new image tag in the Deployment; the pod restarts and everyone signs in again (their folders stay).
 - **Remove a user's data:** delete `/data/users/<sas id>/` (e.g. `kubectl exec` into the pod).
 

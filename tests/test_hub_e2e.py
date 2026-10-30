@@ -168,3 +168,33 @@ def test_hub_close_stops_every_studio_process(users: dict[str, Browser], hub: Hu
     hub.close()
     assert all(p.poll() is not None for p in procs)
     assert time.time() - t0 < 25  # inside the pod's 30 s termination grace period
+
+
+def test_removed_from_the_sas_group_signs_out_at_the_next_token_renewal(tmp_path_factory: pytest.TempPathFactory,
+                                                                      logon: FakeSasLogon) -> None:
+    """Real Studio: the user's Viya token (40 s) is renewed on the next SAS call, the Studio re-checks the groups with
+    it, reports to the hub, and the hub signs the user out and stops the Studio."""
+    data = tmp_path_factory.mktemp("hubgroups")
+    cfg = HubConfig(viya_url=logon.url, data_dir=data, master_key=MASTER, oauth_mode="redirect", client_id="studio-hub",
+                    client_secret=TEST_CLIENT_SECRET, port=0, metrics=False, viya_name="Zeus",
+                    users_group="SpeedyStoreStudioUsers", notebook_group="SpeedyStoreStudioNotebooks")
+    h = Hub(cfg, Audit(data / "hub" / "audit.jsonl", echo=False))
+    port = h.serve(block=False)
+    cfg.public_url = f"http://127.0.0.1:{port}"
+    logon.register_redirect("studio-hub", cfg.redirect_uri)
+    logon.memberships["alice"] = ["SpeedyStoreStudioUsers"]
+    try:
+        alice = sign_in(h, logon, "alice")
+        data_ = call(alice, "sql_editor", {})
+        assert data_["features"]["notebooks"] is False  # STUDIO_NOTEBOOKS off: no notebooks for anyone
+        logon.memberships["alice"] = []  # the Viya admin takes alice out of the group
+        call(alice, "sas_viya_state")  # a SAS call renews the token -> the Studio re-checks
+        deadline = time.time() + 30
+        while h.spawner.get("alice") is not None and time.time() < deadline:
+            time.sleep(0.2)
+        assert h.spawner.get("alice") is None
+        assert alice.get("/studio/").location == "/login"
+        assert any(e["event"] == "access_revoked" and e.get("user") == "alice" for e in h.audit.tail())
+    finally:
+        h.close()
+        logon.memberships.pop("alice", None)
