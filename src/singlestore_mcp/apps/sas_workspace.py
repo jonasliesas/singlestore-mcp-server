@@ -644,9 +644,34 @@ def _run_tool(language: str, sql: str, library: str | None, options: dict[str, A
                        tab_id=source.get("tab_id"), table_rows=table_rows)
         data["kind"] = kind
         return data
+    if wrapped.get("derived"):
+        data["derived"] = DERIVED_NOTE
+        if data.get("pushdown"):
+            data["pushdown"]["notes"] = [DERIVED_NOTE, *data["pushdown"].get("notes", [])]
 
     def finish(run: sas_runs.Run) -> None:
         if record:
+DERIVED_NOTE = ("The SELECT has a subquery: it ran as SELECT * FROM (…) AS _s2q, so FedSQL sends it to SingleStore as one "
+                "statement and writes the rows into WORK itself (pushed down whole with the CREATE TABLE, SingleStore "
+                "would answer \"Unknown database 'WORK'\").")
+
+
+@apps.tool(resource_uri=EDITOR_URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def sas_fedsql_check(sql: str) -> CallToolResult:
+    """Before a FedSQL run (nothing runs): does the SELECT have a subquery FedSQL would push down with the CREATE
+    TABLE (fails on SingleStore libraries), and can the editor run it as a derived table instead? ``warn``: it
+    can't (an ORDER BY on expressions) - ``message`` says why and how to rewrite it."""
+    sub = sas_sql.fedsql_subquery(sql)
+    if not sub:
+        return tool_result("no subquery", {"subquery": False, "rewrite": False, "warn": False})
+    if sub.get("limit") or sub["rewrite"]:
+        text = "runs as it is" if sub.get("limit") else "runs as a derived table"
+        return tool_result(f"subquery: {text}", {"subquery": True, "rewrite": bool(sub["rewrite"]), "warn": False,
+                                                  "derived": sub["rewrite"]})
+    msg = f"{sub['reason']}. {sas_sql.SUBQUERY_HINT}"
+    return tool_result(msg, {"subquery": True, "rewrite": False, "warn": True, "message": msg})
+
+
             _record(sql, library, language, run.result, source, kind, ((run.ended or time.time()) - run.created) * 1000,
                     run.error, connection=getattr(run, "conn", None))
 

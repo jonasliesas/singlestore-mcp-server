@@ -293,13 +293,17 @@ def wrap(language: str, sql: str, *, library: str | None = None, options: dict[s
     if language == "fedsql":
         head = "proc fedsql _method;" if pushdown else "proc fedsql;"
         lines = [SESSION_RESET, head]
+        derived = None
         if select:
             lines.append(f'  drop table WORK."{table}" force;')
             lines.append(f'  create table WORK."{table}" as')
+            sub = fedsql_subquery(body)
+            if sub and sub["rewrite"]:
+                body, derived = sub["rewrite"], "subquery"
         lines.append(_indent(body) + ";")
         lines.append("quit;")
         return {"code": "\n".join(lines), "kind": "select" if select else "statement",
-                "result": ("WORK", table) if select else None, "capped": False}
+                "result": ("WORK", table) if select else None, "capped": False, "derived": derived}
     if language == "cas":
         query = (f"create table CASUSER.{_quote_fedsql(table)} {{options replace=true}} as {body}"
                  if select else body)
@@ -316,6 +320,175 @@ def wrap(language: str, sql: str, *, library: str | None = None, options: dict[s
 
 def _indent(sql: str) -> str:
     return "\n".join("  " + line if line.strip() else line for line in sql.splitlines())
+
+
+# ------------------------------------------------------------------ FedSQL: SELECT with a subquery
+# On a SingleStore library, PROC FEDSQL pushes ``CREATE TABLE WORK.x AS <select with a subquery>`` down whole –
+# the CREATE TABLE included – and SingleStore answers "Unknown database 'WORK'" (checked on Zeus 2026-10-30 for
+# scalar, IN, EXISTS subqueries in WHERE; ``proc fedsql; create table work.x as …`` fails the same way). The
+# same SELECT as a derived table, ``CREATE TABLE WORK.x AS SELECT * FROM (<select>) AS _s2q``, works: FedSQL
+# sends the whole SELECT (subquery included) to SingleStore as one statement and writes the rows into WORK
+# itself. SingleStore drops an ORDER BY inside a derived table (checked: rows came back unsorted), so a top-level
+# ORDER BY is repeated outside with the output column names – when it names output columns (or positions); an
+# ORDER BY on expressions can't be repeated, and then the SELECT isn't rewritten (the editor warns before the
+# run). A top-level LIMIT already keeps FedSQL from pushing the CREATE TABLE down (checked), so it isn't touched.
+
+DERIVED_ALIAS = "_s2q"
+_FED_IDENT = r'(?:[A-Za-z_][\w$]*|"(?:[^"]|"")+")'
+_ORDER_ITEM = re.compile(rf"^(?:{_FED_IDENT}\s*\.\s*)?({_FED_IDENT}|\d+)(\s+(?:asc|desc))?(\s+nulls\s+(?:first|last))?$", re.I | re.S)
+_OUT_ALIAS = re.compile(rf"(?:\bas\s+|[\s)])({_FED_IDENT})$", re.I | re.S)
+_OUT_COLUMN = re.compile(rf"^(?:{_FED_IDENT}\s*\.\s*)*({_FED_IDENT})$", re.S)
+
+
+def _mask(sql: str) -> str:
+    """``sql`` with the insides of quoted strings / names and comments blanked (same length), so keywords and
+    parentheses can be found by position."""
+    out = list(sql)
+    i, n = 0, len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch in ("'", '"'):
+            j = i + 1
+            while j < n:
+                if sql[j] == ch:
+                    if j + 1 < n and sql[j + 1] == ch:
+                        j += 2
+                        continue
+                    break
+                j += 1
+            for k in range(i + 1, min(j, n)):
+                out[k] = " " if ch == "'" else "x"
+            i = j + 1
+        elif sql.startswith("/*", i):
+            j = sql.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            for k in range(i, j):
+                out[k] = " "
+            i = j
+        elif sql.startswith("--", i):
+            j = sql.find("\n", i)
+            j = n if j < 0 else j
+            for k in range(i, j):
+                out[k] = " "
+            i = j
+        else:
+            i += 1
+    return "".join(out)
+
+
+def _depths(masked: str) -> list[int]:
+    d, out = 0, []
+    for ch in masked:
+        if ch == "(":
+            d += 1
+        out.append(d)
+        if ch == ")":
+            d = max(0, d - 1)
+    return out
+
+
+def _top(masked: str, depth: list[int], pattern: str) -> list[re.Match[str]]:
+    """Matches of ``pattern`` at parenthesis depth 0."""
+    return [m for m in re.finditer(pattern, masked, re.I) if depth[m.start()] == 0]
+
+
+def _split_top(text: str) -> list[str]:
+    masked = _mask(text)
+    depth = _depths(masked)
+    parts, start = [], 0
+    for i, ch in enumerate(masked):
+        if ch == "," and depth[i] == 0:
+            parts.append(text[start:i])
+            start = i + 1
+    parts.append(text[start:])
+    return [p.strip() for p in parts]
+
+
+def _ident_key(name: str) -> str:
+    return name[1:-1].replace('""', '"') if name.startswith('"') else name.upper()
+
+
+def _output_names(select_list: str) -> tuple[set[str], int, bool]:
+    """The output column names of a select list (aliases, column names), the number of items and whether it has
+    a ``*`` (then any column of the tables may be in it)."""
+    names: set[str] = set()
+    items = _split_top(select_list)
+    star = False
+    for item in items:
+        if item == "*" or item.endswith(".*"):
+            star = True
+            continue
+        m = _OUT_COLUMN.match(item)
+        if m:
+            names.add(_ident_key(m.group(1)))
+            continue
+        m = _OUT_ALIAS.search(item)
+        if m:
+            names.add(_ident_key(m.group(1)))
+    return names, len(items), star
+
+
+def fedsql_subquery(sql: str) -> dict[str, Any] | None:
+    """Is this a FedSQL SELECT with a subquery (in WHERE / HAVING / ON / the select list – not only derived tables
+    in FROM)? None when not. Else ``{rewrite, order_by, reason}``: ``rewrite`` the SELECT as a derived table (see
+    above) or None when it can't be (an ORDER BY on expressions), ``limit`` when a top-level LIMIT already keeps
+    FedSQL from pushing the CREATE TABLE down (nothing to do)."""
+    body = sql.strip()
+    while body.endswith(";"):
+        body = body[:-1].rstrip()
+    if first_word(body) != "select":
+        return None
+    masked = _mask(body)
+    depth = _depths(masked)
+    subs = [m for m in re.finditer(r"\(\s*select\b", masked, re.I)]
+    real = []
+    for m in subs:
+        before = masked[: m.start()].rstrip()
+        if re.search(r"(?i)\b(from|join)$", before):
+            continue  # a derived table: fine as it is
+        real.append(m)
+    if not real:
+        return None
+    if _top(masked, depth, r"\blimit\s+\d+") or _top(masked, depth, r"\bfetch\s+first\b"):
+        return {"rewrite": None, "limit": True, "order_by": None, "reason": None}
+    order = _top(masked, depth, r"\border\s+by\b")
+    outer_order = ""
+    if order:
+        m = order[-1]
+        clause = body[m.end():].strip()
+        names, count, star = _output_names(_select_list(body, masked, depth))
+        items = []
+        for item in _split_top(clause):
+            im = _ORDER_ITEM.match(item)
+            if not im:
+                return {"rewrite": None, "limit": False, "order_by": clause,
+                        "reason": f"ORDER BY {item} isn't a column of the result, so it can't be repeated outside "
+                                  "the derived table"}
+            col = im.group(1)
+            if col.isdigit():
+                if not star and int(col) > count:
+                    return {"rewrite": None, "limit": False, "order_by": clause, "reason": f"ORDER BY {col}: no such column"}
+            elif not star and _ident_key(col) not in names:
+                return {"rewrite": None, "limit": False, "order_by": clause,
+                        "reason": f"ORDER BY {col} isn't one of the selected columns"}
+            items.append(col + (im.group(2) or "") + (im.group(3) or ""))
+        outer_order = "\norder by " + ", ".join(re.sub(r"\s+", " ", x) for x in items)
+    rewrite = f"select * from (\n{_indent(body)}\n) as {DERIVED_ALIAS}{outer_order}"
+    return {"rewrite": rewrite, "limit": False, "order_by": body[order[-1].end():].strip() if order else None,
+            "reason": None}
+
+
+def _select_list(body: str, masked: str, depth: list[int]) -> str:
+    m = re.match(r"\s*select\s+(?:distinct\s+|all\s+)?", masked, re.I)
+    start = m.end() if m else 0
+    frm = next((x for x in _top(masked, depth, r"\bfrom\b") if x.start() >= start), None)
+    return body[start: frm.start() if frm else len(body)]
+
+
+SUBQUERY_HINT = ("FedSQL sends a SELECT with a subquery to SingleStore whole, CREATE TABLE included, which SingleStore "
+                 "refuses (\"Unknown database 'WORK'\"). Write the subquery as a derived table joined in FROM instead, "
+                 "e.g. … from S2.cars c join (select avg(msrp) as avg_msrp from S2.cars) a on c.msrp > a.avg_msrp, "
+                 "or order by the selected column names.")
 
 
 # A SAS error in a step (a DATA step reading a missing table, say) puts the Compute session in syntax check mode

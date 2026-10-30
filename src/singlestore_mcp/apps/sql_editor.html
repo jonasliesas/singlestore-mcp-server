@@ -1290,7 +1290,9 @@ async function run(sql = statementAtCursor(), database = state.database, lang = 
 
 // Stop: cancels the statement on the cluster (KILL QUERY on its own connection) or stops loading more rows.
 async function stopStream(id) {
+  const hintOk = state.hintOk === sql;
   if (!id) return;
+  if (!hintOk && (await subqueryHint(sql, lang, database))) return;
   try { await S2.callTool("sql_editor_stop", { stream_id: id }); }
   catch (e) { S2.toast(`Couldn't stop: ${cleanError(e).message}`, "err"); }
 }
@@ -1440,6 +1442,21 @@ async function callSas(tool, args) {
   state.sasRun = { id, info: null, started: Date.now(), engine: engineNow(args.language) };
   renderRunStatus();
   // While the SAS session starts in the background, answer early so the status line says what the run waits for.
+// FedSQL on a SingleStore library: a SELECT with a subquery is pushed down whole, CREATE TABLE included, and fails
+// ("Unknown database 'WORK'"). The server runs it as a derived table instead (sas_sql.fedsql_subquery); only when it
+// can't (an ORDER BY on expressions) the bar warns before the run, with the derived-table join rewrite.
+async function subqueryHint(sql, lang, database) {
+  if (lang !== "fedsql" || isPlainSas(sql)) return false;
+  const text = sql.replace(/'(?:[^']|'')*'/g, "''").replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
+  if (!/\(\s*select\b/i.test(text) || !readsSingleStore(sql, lang)) return false;
+  let res;
+  try { res = await S2.callTool("sas_fedsql_check", { sql }); } catch { return false; }
+  if (!res?.warn) return false;
+  state.hint = { message: res.message, suggest: null, kind: "subquery", sql, lang, database };
+  state.error = null; state.confirm = null;
+  renderResults();
+  return true;
+}
   const warming = sasSession.status?.state === "starting";
   let data = await S2.callTool(tool, { ...args, run_id: id, wait_ms: warming ? 1000 : SAS_WAIT_MS });
   while (data.running) {
@@ -1821,7 +1838,7 @@ function renderResults() {
   }
   if (state.hint) {
     const hn = state.hint;
-    statusEl.replaceChildren(h("span", { class: "s2-badge warn" }, hn.kind === "functions" ? "Check the functions" : "Check the language"), langBadge(hn.lang));
+    statusEl.replaceChildren(h("span", { class: "s2-badge warn" }, hn.kind === "functions" ? "Check the functions" : hn.kind === "subquery" ? "Check the query" : "Check the language"), langBadge(hn.lang));
     outEl.replaceChildren(h("div", { class: "sq-hint", role: "alertdialog" },
       h("span", {}, "⚠ ", hn.message),
       h("span", { class: "s2-spacer" }),
