@@ -250,8 +250,8 @@ in step 1, "Ask Claude" off by default (switchable later with an Anthropic / Fou
   - Option to check: "Python in SAS" cells via `PROC PYTHON` in the user's own Compute session, if Zeus has Python
     configured (isolated by Viya, nothing from the K8s admins).
   - Who gets notebooks: the `STUDIO_NOTEBOOK_GROUP` SAS group (see the hub's group access). Groups decided
-    2026-10-30: `SpeedyStoreStudioUsers` (app) and `SpeedyStoreStudioNotebooks` (notebooks); Zeus's admin creates
-    them in the deploy week, membership may be delegated to Jonas.
+    2026-10-30: `SpeedyStoreStudioUsers` (app) and `SpeedyStoreStudioNotebooks` (notebooks); Jonas creates them on
+    Zeus on 2026-11-02, so the local hub test can check real group membership.
   - Questions for Jonas: is there a PyPI mirror at SAS (Artifactory?) – until then `pypi`; size of the shared volume.
 - **Step 2 – the rest:** Ask Claude via an org key held by the hub (relay, per-user limits), shared metrics sampler
   instead of one per Studio, more than one hub replica (sessions out of memory), SingleStore per-user JWT logins.
