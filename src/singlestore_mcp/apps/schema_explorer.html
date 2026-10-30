@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Schema Explorer</title>
 <!--S2:HEAD-->
+<!--S2:VENDOR:s2-load-file.js-->
 <style>
   .se { display: grid; grid-template-columns: minmax(220px, 280px) minmax(0, 1fr); gap: 12px; height: 580px; }
   .se-pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
@@ -1168,6 +1169,8 @@ function renderDbOverview(db) {
         onclick: () => openAnalyze(db, null) }, "Analyze all tables…") : null,
       !meta?.system && meta?.tables ? h("button", { class: "s2-btn", title: "Rows and data per partition and leaf for every table (read-only)",
         onclick: () => loadSkew(db, null, true) }, state.dbSkew.has(db) ? "↻ Check skew" : "Check skew") : null,
+      !meta?.system ? h("button", { class: "s2-btn", title: `Load a CSV / delimited text file from this computer into a new or existing table of ${db}`,
+        onclick: () => S2LoadFile.open({ database: db, onDone: (j) => { loadTables(db, true); if (j.mode === "append") loadDetail(db, j.table, true); } }) }, "Load file into table…") : null,
       h("button", { class: "s2-btn", title: `Reload the tables of ${db}`, onclick: () => loadTables(db, true) }, "↻ Refresh database")));
   const an = [analyzePanel(db, null), dbSkewBox(db)];
   if (!t || t.status === "loading") return [head, an, h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Loading tables…")];
@@ -1228,6 +1231,8 @@ function renderTableDetail(db, table) {
       h("button", { class: "s2-btn", onclick: queryInGrid, title: "Ask Claude to open this table in the Query Grid" }, "Query in grid"),
       isTable && !SYSTEM.has(db) ? h("button", { class: "s2-btn", onclick: () => openAnalyze(db, table),
         title: "Refresh this table's optimizer statistics (ANALYZE TABLE; shows the plan first)" }, "Analyze…") : null,
+      isTable && !SYSTEM.has(db) ? h("button", { class: "s2-btn", title: "Add the rows of a CSV / delimited text file from this computer to this table",
+        onclick: () => S2LoadFile.open({ database: db, table, onDone: () => { loadTables(db, true); loadDetail(db, table, true); } }) }, "Load file into table…") : null,
       h("button", { class: "s2-btn ghost", title: "Reload", "aria-label": "Reload table", onclick: () => {
         state.previews.delete(key(db, table)); loadDetail(db, table, true);
         if (state.tab === "preview") loadPreview(db, table, true);

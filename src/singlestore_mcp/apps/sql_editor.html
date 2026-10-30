@@ -10,6 +10,7 @@
 <!--S2:VENDOR:s2-charts.js-->
 <!--S2:VENDOR:sas-complete.js-->
 <!--S2:VENDOR:sas-funcs.js-->
+<!--S2:VENDOR:s2-load-file.js-->
 <style>
   body { padding: 10px 12px; }
   /* Full height: header and panels take what they need, the editor body the rest (a header that wraps never
@@ -1176,6 +1177,12 @@ function renderSasTree() {
   fillTree(rows);
 }
 
+// Load file into table (vendor/s2-load-file.js): afterwards the tree re-reads the database.
+function loadFileInto(db, table) {
+  S2LoadFile.open({ database: db, table, onDone: () => { loadSchema(db, true); renderTree(); },
+    onOpenSql: S2.embedded() ? null : (sql, database) => { placeSql(sql); if (state.database !== database) chooseDatabase(database); } });
+}
+
 function renderTree() {
   treeSrcSlot.replaceChildren(treeSourceBar());
   if (state.treeSrc !== "s2") return renderSasTree();
@@ -1197,7 +1204,9 @@ function renderTree() {
       } },
       h("span", { class: `sq-caret${open ? " open" : ""}` }, "▶"),
       h("span", { class: "name" }, db),
-      s?.status === "loading" ? h("span", { class: "s2-spinner" }) : s?.status === "ok" ? h("span", { class: "meta" }, tables.length) : null));
+      s?.status === "loading" ? h("span", { class: "s2-spinner" }) : s?.status === "ok" ? h("span", { class: "meta" }, tables.length) : null,
+      SYSTEM.has(db) ? null : h("button", { class: "s2-btn ghost act", title: `Load a CSV / delimited text file from this computer into a table of ${db}`,
+        onclick: (e) => { e.stopPropagation(); loadFileInto(db, null); } }, "Load file…")));
     if (!open) continue;
     if (s?.status === "error") rows.push(h("div", { class: "sq-row tbl" }, h("span", { class: "s2-error", style: { padding: "2px 6px" } }, s.error.message)));
     for (const t of matches) {
@@ -1230,7 +1239,9 @@ function renderTree() {
           rows.push(h("div", { class: "sq-row col sq-pick" },
             h("button", { class: "s2-btn ghost", onclick: () => set(t.columns.map((c) => c.name)) }, "All"),
             h("button", { class: "s2-btn ghost", onclick: () => set([]) }, "None"),
-            h("span", { class: "meta" }, picked.size ? `${picked.size} ticked: SELECT (${picked.size}) above` : "Tick columns, then SELECT above")));
+            h("span", { class: "meta" }, picked.size ? `${picked.size} ticked: SELECT (${picked.size}) above` : "Tick columns, then SELECT above"),
+            t.view || SYSTEM.has(db) ? null : h("button", { class: "s2-btn ghost", title: `Load file into table…: add the rows of a CSV / delimited text file from this computer to ${t.name}`,
+              onclick: () => loadFileInto(db, t.name) }, "Load file…")));
         }
       }
     }
