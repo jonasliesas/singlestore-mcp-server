@@ -21,7 +21,8 @@ identity providers, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
     schema; results grid; Open/Save `.sql` files; procedure-aware statements.
   - **Notebook**: SQL, Python and text cells on a Jupyter kernel; SQL results
     become pandas DataFrames; charts; `%sql` / `%%sql` magics; `.ipynb` files
-    compatible with SingleStore Notebooks; several notebooks as tabs.
+    compatible with SingleStore Notebooks; several notebooks as tabs; "Python in SAS"
+    cells that run as PROC PYTHON in your SAS Compute session.
   - **Schema Explorer**, **Pipeline Monitor**, **Cluster Monitor** (CPU,
     memory, disk per node, running queries, cluster health, 7-day metrics
     history and backups) and a **Query Grid**.
@@ -198,7 +199,7 @@ narrow windows just "S2" / "Compute" / "CAS" with the full text as tooltip):
 - *After*: the result's status line, the SQL Editor's run history and the Notebook cell's status start with a chip
   **SingleStore · prod** / **SAS Compute · Zeus** / **CAS · Zeus**. PROC SQL / FedSQL / CAS on a SingleStore library
   add the pushdown outcome next to it: "→ pushed down to SingleStore: full / partial / none".
-- *Notebook*: each cell's header shows its engine: SingleStore (SQL), SAS Compute (SAS), Python (local).
+- *Notebook*: each cell's header shows its engine: SingleStore (SQL), SAS Compute (SAS, Python in SAS), Python (local).
 - *Query History*: every row ran on SingleStore; rows from SAS keep their Source (SAS EP / SAS CAS / SAS
   in-database) and say "ran on SingleStore, sent by CAS / SAS Compute / SAS (embedded process)".
 
@@ -763,6 +764,8 @@ pushes it only with `SQL_FUNCTIONS=ALL` on the library · ✗ not available ·
 - **SAS cells** run SAS code (DATA steps, PROCs, PROC SQL) on your SAS Viya,
   with the ODS output and the log (errors and warnings counted, the log opens
   when there are errors). See *SAS cells* below.
+- **Python in SAS cells** run Python on the SAS server, as `PROC PYTHON` in
+  the Workspace's SAS Compute session. See *Python in SAS cells* below.
 - **Text cells** are Markdown with embedded HTML, as in Jupyter (styled
   headers, images, alert boxes); scripts are stripped.
 - **Shift+Enter** runs and moves on, **Ctrl+Enter** runs, **Alt+Enter** runs
@@ -790,8 +793,9 @@ pushes it only with `SQL_FUNCTIONS=ALL` on the library · ✗ not available ·
   Closing a tab stops its kernel (unsaved tabs need a second click).
 - **Open** and **Save as** are a large dialog over the notebook, as in the SQL
   Editor; Escape or Close / Cancel closes it.
-- Saved as standard `.ipynb` files, with SQL cells as `%%sql` and SAS cells
-  as `%%sas` cells, so they
+- Saved as standard `.ipynb` files, with SQL cells as `%%sql`, SAS cells
+  as `%%sas` and Python in SAS cells as `%%sas_python` cells (plus
+  `"singlestore": {"kind": "sas_python"}` in the cell's metadata), so they
   open in Jupyter / VS Code and SingleStore Notebooks, and SingleStore's
   example notebooks open here.
 
@@ -847,6 +851,55 @@ pushes it only with `SQL_FUNCTIONS=ALL` on the library · ✗ not available ·
   `df_to_sas` exist for small, local results only.
 - Claude in the notebook knows about SAS cells and suggests them in ```sas
   blocks with an **Insert SAS cell** button.
+
+**Python in SAS cells (PROC PYTHON)**
+
+- **+ Python in SAS** adds one (badge *PY·SAS*, chip *SAS Compute · <connection>*).
+  The code is wrapped in `proc python; submit; … endsubmit; run;` and runs in
+  the Workspace's **SAS Compute session of the active SAS Viya connection** –
+  the same session, queue and background start as the SQL Editor's SAS runs.
+  Nothing runs on this computer and no local kernel is needed.
+- **State persists**: SAS keeps the Python interpreter between PROC PYTHON
+  steps of a session, so variables carry over from cell to cell, and WORK
+  tables are the session's (a table a cell writes with `SAS.df2sd` can be
+  queried from the SQL Editor's PROC SQL, and the other way round). The
+  notebook's local Python / SQL cells (`df`, `conn`) are a different process:
+  their variables aren't there. SAS cells (saspy) also have a session of their
+  own; to run SAS code in this session use `SAS.submit(…)`.
+- **First call**: the first cell of a session starts Python (~8 s on Zeus,
+  plus the SAS session itself when it isn't running yet); the cell says
+  *Starting Python in SAS (first call ~8 s)…*. After that cells start at once.
+- **Output**: what the code prints (stdout and stderr, with SAS's `>>>` echo,
+  NOTE lines and page titles removed, long lines joined again), a Python
+  exception as a readable traceback (`File "<cell>", line N` with the cell's
+  line), SAS's own ERROR / WARNING lines (e.g. from `SAS.submit` code), ODS
+  output (`SAS.show`, `SAS.pyplot`, PROC output from `SAS.submit`; written to an
+  ODS HTML5 file in WORK with inline images) and the full SAS log, collapsed.
+- **The `SAS` object** (PROC PYTHON's own; **SAS helpers** on the cell lists
+  them): `SAS.sd2df("lib.table")` (a SAS table as a pandas DataFrame, data set
+  options allowed), `SAS.df2sd(df, "work.table")`, `SAS.symget(name)` /
+  `SAS.symput(name, value)`, `SAS.submit("SAS code")`, `SAS.sasfnc(name, …)`,
+  `SAS.show(obj, title=…)`, `SAS.pyplot(plt)`, `SAS.renderImage(file)`,
+  `SAS.logMessage(text, "WARNING")`, `SAS.workpath`. Checked on Zeus with
+  `dir(SAS)`; Python 3.12 with pandas, numpy, swat, singlestoredb, pyarrow and
+  scikit-learn there.
+- **Keep the data on the server**: subset in SAS or SingleStore first (a
+  `WHERE` in `SAS.submit`, the S2 library, `SAS.sd2df("lib.t(where=(…))")`);
+  only the cell's output comes back to the page.
+- **Stop** cancels the Compute job (the session and its Python state stay); if
+  SAS doesn't stop it, the cell offers **Restart SAS session**. **Restart SAS
+  session** (notebook header) ends the connection's SAS sessions – the SQL
+  Editor's too – which **also clears the Python state** and WORK; the next cell
+  starts Python again.
+- Limits: the word `endsubmit` can't appear anywhere in the cell (SAS would
+  end the SUBMIT block there, even in a string or comment – the cell is refused
+  with a message); SAS macro triggers (`&`, `%`) are *not* resolved inside the
+  cell; common indentation is removed; a line can be at most 32,000 characters.
+- **Server mode** (SAS SpeedyStore Studio on a server, local kernels off): the
+  Notebook stays available with Python in SAS and Text cells only – each user's
+  code runs in their own SAS Compute session, which Viya isolates.
+- Claude in the notebook knows the cell kind and answers with ```sas_python
+  blocks (**Insert Python in SAS cell**).
 
 **Claude**
 

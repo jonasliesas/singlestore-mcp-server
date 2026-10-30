@@ -176,6 +176,19 @@ review polish round on branch `claude/polish`).
     Alerts, Pipelines, Query History, Security, Workload).
   - Tests: `tests/ui/test_polish_ui.py`, `test_contrast.py` (danger), `test_static.py` (render guard),
     `test_sas_prewarm.py` (`started`).
+- Notebook **"Python in SAS" cells** (branch `claude/python-in-sas`, 2026-10-30; README → Notebook → Python in SAS
+  cells): a new cell kind (`%%sas_python` + `metadata.singlestore.kind`) whose code runs as `PROC PYTHON` in the
+  Workspace's SAS Compute session of the active SAS Viya connection (`sas_python.py`; `notebook_sas_python` /
+  `notebook_sas_python_status`, the SQL Editor's `sas_runs` queue, pre-warmed session, `sas_stop`), so Python state
+  persists between cells and WORK is shared with the SQL Editor's SAS runs; "Restart SAS session" in the header clears
+  it. Output from the log: stdout without the `>>>` echo / NOTEs / page titles (`ls=max`, wrapped lines joined),
+  tracebacks with `<cell>` line numbers, SAS ERROR / WARNING lines, ODS output via an ODS HTML5 file in WORK (inline
+  SVG / images, read back through the Compute file API), the log collapsed; "Starting Python in SAS (first call ~8 s)…"
+  until Python runs in the session; `endsubmit` refused, indentation removed. "SAS helpers" on the cell lists the
+  `SAS` object's methods (checked with `dir(SAS)` on Zeus) and says to keep data on the server. Works without local
+  kernels: in server mode the Notebook stays in the rail with Python in SAS and Text cells only. Ask Claude knows the
+  kind (```sas_python blocks). Tests: `test_sas_python.py` (offline, logs recorded on Zeus in
+  `tests/data/proc_python_logs.json`), `test_sas_python_viya.py` (`--sas`), `ui/test_pysas_ui.py`.
 
 ## Backlog
 **Design review – what's left** (`../studio-design-review.md`; IDs from there)
@@ -203,6 +216,11 @@ review polish round on branch `claude/polish`).
   node log files shipped (Fluent Bit) into a table; then an Audit tab with filters. Today: guidance tab only.
 
 **SAS in the Workspace**
+- Python in SAS cells, what's left: they always use the *active* SAS Viya connection (no per-notebook pin like the
+  SQL Editor's tabs); notebook **SAS cells** still run through saspy in the kernel with their own session, so their
+  WORK isn't the Python in SAS cells' (`SAS.submit` is the way to run SAS code in that session) – moving SAS cells to
+  the Workspace session too would also make them work in server mode; a run isn't stopped when its notebook tab is
+  closed; ODS output is capped at 8 MB per cell.
 - Ask Claude in SAS tabs (done, not committed – see "Since 0.10.1"): ideas left – a read-only SAS tool for the
   assistant (columns of any SAS table / caslib, `validate` a PROC SQL statement) so it doesn't depend on the columns
   the editor already knows; the "in the Claude chat" mode only gets the tab's language in the question, not the guide.
@@ -319,7 +337,8 @@ in step 1, "Ask Claude" off by default (switchable later with an Anthropic / Fou
     gateway to its Kubernetes process proxy (a deployment change, Studio unchanged) + NetworkPolicy, read-only root and
     limits on the kernel pods; the hub then needs a Role to manage pods in its namespace.
   - "Python in SAS" cells via `PROC PYTHON` in the user's own Compute session (isolated by Viya, nothing from the K8s
-    admins). **Checked on Zeus 2026-10-30:** Python 3.12.12 (RHEL), pandas 2.3.3, numpy 2.5.4, swat 1.18.1,
+    admins) – **shipped 2026-10-30** ahead of 2a (see "Since 0.10.1"): the Notebook opens in server mode with Python in
+    SAS and Text cells only. **Checked on Zeus 2026-10-30:** Python 3.12.12 (RHEL), pandas 2.3.3, numpy 2.5.4, swat 1.18.1,
     singlestoredb 1.18.1, pyarrow 26.0.0, scikit-learn 1.9.1; first call ~8 s (Python start), then ~0 s; state is kept
     between PROC PYTHON steps of the same SAS session ("Resuming Python state"). Can ship before 2a.
   - Who gets notebooks: the `STUDIO_NOTEBOOK_GROUP` SAS group (see the hub's group access). Groups decided
