@@ -8,8 +8,12 @@ The process listens on 127.0.0.1 on a port it picks, under a random path token; 
 Its settings (token, the user's secrets key, the SAS Logon client secret, the fresh Viya tokens) go over its
 stdin, never into its environment or command line. Closing stdin stops it; the hub kills it if it doesn't go.
 
-Processes stop when idle (no request but the pages' heartbeats for ``idle_minutes``), at sign-out, from the
-admin page, or when the hub stops. At most ``max_users`` run at once.
+Processes stop when idle (no request but the pages' heartbeats for ``idle_minutes``, and none in flight), at
+sign-out, from the admin page, or when the hub stops. At most ``max_users`` run at once (an admin may start one more).
+
+A Studio that exits on its own (crash) or stops answering (hung: ``HUNG_PINGS`` health pings in a row fail, or a
+call times out and the ping fails too) is dropped and started again on the user's next request. One that keeps
+crashing (``CRASH_LIMIT`` times in ``CRASH_WINDOW_S``) isn't restarted for a while, so a broken setup doesn't spin.
 """
 
 from __future__ import annotations
@@ -24,6 +28,9 @@ import sys
 import threading
 import time
 import urllib.request
+from collections import deque
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -32,6 +39,10 @@ from .audit import Audit
 from .config import HubConfig
 
 PUBLIC_BASE = "/studio/"
+CRASH_LIMIT = 3          # crashes / hangs within CRASH_WINDOW_S before the hub stops restarting a Studio for a while
+CRASH_WINDOW_S = 300
+HUNG_PINGS = 3           # health pings in a row that may fail before a Studio counts as hung
+PING_TIMEOUT_S = 5.0
 
 
 class StudioFull(RuntimeError):
@@ -40,6 +51,10 @@ class StudioFull(RuntimeError):
 
 class StudioFailed(RuntimeError):
     """The Studio process didn't start (its log is in the user's state folder)."""
+
+
+class StudioCrashLoop(StudioFailed):
+    """The user's Studio stopped unexpectedly ``CRASH_LIMIT`` times lately: not restarted for a while."""
 
 
 def safe_name(user: str) -> str:
@@ -62,6 +77,9 @@ class Studio:
     ready: threading.Event = field(default_factory=threading.Event)
     error: str | None = None
     stopping: bool = False
+    restart: bool = False          # started again after a crash or hang (the pages say "restarting")
+    busy: int = 0                  # requests in flight (a long call isn't "idle")
+    ping_failures: int = 0
 
     @property
     def pid(self) -> int | None:
@@ -117,6 +135,7 @@ class Spawner:
         self.cfg = cfg
         self.audit = audit
         self._studios: dict[str, Studio] = {}
+        self._crashes: dict[str, deque[float]] = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._reaper: threading.Thread | None = None
@@ -181,8 +200,8 @@ class Spawner:
     def get(self, user: str) -> Studio | None:
         with self._lock:
             st = self._studios.get(user)
-        if st is not None and not st.alive() and st.ready.is_set():
-            self._forget(st, "exited")
+        if st is not None and not st.alive() and st.ready.is_set() and not st.error:
+            self.crashed(st, "exited")
             return None
         return st
 
@@ -190,19 +209,30 @@ class Spawner:
         with self._lock:
             return list(self._studios.values())
 
-    def ensure(self, user: str, tokens: dict[str, Any] | None = None, ip: str = "") -> Studio:
+    def ensure(self, user: str, tokens: dict[str, Any] | None = None, ip: str = "", admin: bool = False) -> Studio:
         """The user's Studio, started if needed (returns at once; wait with ``wait_ready``). A running one gets
-        the fresh sign-in (``tokens``) handed over."""
+        the fresh sign-in (``tokens``) handed over. ``admin``: may start one beyond ``max_users`` (to reach /admin
+        when Studio is full)."""
+        if self._stop.is_set():
+            raise StudioFailed("The Studio server is stopping. Try again in a minute.")
+        for dead in [x for x in self.running() if x.ready.is_set() and not x.alive() and not x.stopping and not x.error]:
+            self.crashed(dead, "exited")  # a crashed Studio doesn't hold a place
         with self._lock:
             st = self._studios.get(user)
             if st is not None and (st.alive() or not st.ready.is_set()) and not st.stopping:
                 fresh = st
             else:
-                if len(self._studios) >= self.cfg.max_users and user not in self._studios:
-                    self.audit.record("studio_full", user=user, ip=ip, running=len(self._studios))
+                crashes = self._recent_crashes(user)
+                if crashes >= CRASH_LIMIT:
+                    raise StudioCrashLoop(f"Your Studio stopped unexpectedly {crashes} times in the last "
+                                          f"{CRASH_WINDOW_S // 60} minutes, so it isn't started again right now. Try again "
+                                          "in a few minutes, or ask the Studio admin (studio.log in your folder says why).")
+                others = len([u for u in self._studios if u != user])
+                if others >= self.cfg.max_users + (1 if admin else 0):
+                    self.audit.record("studio_full", user=user, ip=ip, running=others)
                     raise StudioFull(f"SAS SpeedyStore Studio is full ({self.cfg.max_users} users). Try again later.")
                 fresh = None
-                st = Studio(user=user, token=secrets.token_urlsafe(32))
+                st = Studio(user=user, token=secrets.token_urlsafe(32), restart=crashes > 0)
                 self._studios[user] = st
         if fresh is not None:
             if tokens:
@@ -225,6 +255,11 @@ class Spawner:
             self.audit.record("studio_start_failed", user=st.user, reason=type(exc).__name__)
             return
         log.close()  # the child has its own handle
+        if st.stopping:  # stopped (sign-out, admin, hub stop) while it was being started
+            self._kill(st)
+            st.error = "Studio was stopped."
+            st.ready.set()
+            return
         cfg = {"token": st.token, "secret_key": self.cfg.user_key(st.user), "user": st.user, "public_base": PUBLIC_BASE,
                "seed": self.seed(st.user, tokens)}
         if self.cfg.client_secret:
@@ -256,12 +291,17 @@ class Spawner:
         port = reader_result.get("port", 0)
         if not port:
             st.error = "Studio didn't start in time." if st.proc.poll() is None else f"Studio stopped while starting (exit {st.proc.returncode})."
-            self.audit.record("studio_start_failed", user=st.user, reason=st.error)
-            self._kill(st)
+            if st.stopping:
+                st.error = "Studio was stopped."
+            else:
+                self.audit.record("studio_start_failed", user=st.user, reason=st.error)
+            self._kill(st, grace=1.0)
             st.ready.set()
             with self._lock:
                 if self._studios.get(st.user) is st:
                     self._studios.pop(st.user, None)
+                    if not st.stopping:
+                        self._crashes.setdefault(st.user, deque()).append(time.time())
             return
         st.port = port
         st.last_activity = time.time()
@@ -292,9 +332,39 @@ class Spawner:
     def touch(self, st: Studio) -> None:
         st.last_activity = time.time()
 
+    @contextmanager
+    def using(self, st: Studio) -> Iterator[Studio]:
+        """A request in flight to ``st``: the idle stop waits for it, and its end counts as use."""
+        with self._lock:
+            st.busy += 1
+        try:
+            yield st
+        finally:
+            with self._lock:
+                st.busy -= 1
+            st.last_activity = time.time()
+
+    def ping(self, st: Studio, timeout: float | None = None) -> bool:
+        """Does the Studio answer at all (its own /ping, not the user's work)?"""
+        if not st.port or not st.alive():
+            return False
+        import http.client
+
+        conn = http.client.HTTPConnection("127.0.0.1", st.port, timeout=timeout or PING_TIMEOUT_S)
+        try:
+            conn.request("GET", st.upstream("ping"), headers={"Host": f"127.0.0.1:{st.port}"})
+            res = conn.getresponse()
+            res.read()
+            return res.status == 200
+        except (OSError, http.client.HTTPException):
+            return False
+        finally:
+            conn.close()
+
     def stop(self, user: str, reason: str, by: str | None = None) -> bool:
         with self._lock:
             st = self._studios.pop(user, None)
+            self._crashes.pop(user, None)  # a deliberate stop starts the count again
         if st is None:
             return False
         st.stopping = True
@@ -303,15 +373,35 @@ class Spawner:
                           minutes=round((time.time() - st.started) / 60, 1))
         return True
 
-    def _forget(self, st: Studio, reason: str) -> None:
+    def crashed(self, st: Studio, reason: str) -> bool:
+        """Drop a Studio that exited on its own or hangs (killed first); the user's next request starts a new one."""
         with self._lock:
-            if self._studios.get(st.user) is not st:
-                return
+            if self._studios.get(st.user) is not st or st.stopping:
+                return False
             self._studios.pop(st.user, None)
-        self.audit.record("studio_stop", user=st.user, reason=reason, exit=st.proc.returncode if st.proc else None)
+            st.stopping = True
+            self._crashes.setdefault(st.user, deque()).append(time.time())
+        if st.alive():
+            self._kill(st, grace=1.0)  # hung: it won't react to its stdin closing in time anyway
+        self.audit.record("studio_stop", user=st.user, reason=reason, exit=st.proc.returncode if st.proc else None,
+                          minutes=round((time.time() - st.started) / 60, 1))
+        return True
+
+    def crashed_recently(self, user: str) -> bool:
+        """The user's last Studio ended by crashing or hanging (not by a stop) within ``CRASH_WINDOW_S``."""
+        with self._lock:
+            return self._recent_crashes(user) > 0
+
+    def _recent_crashes(self, user: str) -> int:
+        """(Under the lock.)"""
+        q = self._crashes.get(user)
+        now = time.time()
+        while q and now - q[0] > CRASH_WINDOW_S:
+            q.popleft()
+        return len(q) if q else 0
 
     @staticmethod
-    def _kill(st: Studio) -> None:
+    def _kill(st: Studio, grace: float = 8.0) -> None:
         proc = st.proc
         if proc is None:
             return
@@ -321,7 +411,7 @@ class Spawner:
         except OSError:
             pass
         try:
-            proc.wait(timeout=8)
+            proc.wait(timeout=grace)
         except subprocess.TimeoutExpired:
             proc.kill()
             try:
@@ -335,26 +425,73 @@ class Spawner:
         idle_s = self.cfg.idle_minutes * 60
         stopped = []
         for st in self.running():
-            if st.ready.is_set() and not st.alive():
-                self._forget(st, "exited")
-                stopped.append(st.user)
-            elif st.ready.is_set() and now - st.last_activity > idle_s:
+            if st.ready.is_set() and not st.alive() and not st.error:
+                if self.crashed(st, "exited"):
+                    stopped.append(st.user)
+            elif st.ready.is_set() and not st.busy and now - st.last_activity > idle_s:
                 if self.stop(st.user, "idle"):
                     stopped.append(st.user)
         return stopped
 
+    def check_health(self) -> list[str]:
+        """Ping every running Studio at once; one that failed ``HUNG_PINGS`` pings in a row is hung: drop it."""
+        ready = [st for st in self.running() if st.ready.is_set() and st.port and st.alive()]
+        answers: dict[int, bool] = {}
+
+        def probe(st: Studio) -> None:
+            answers[id(st)] = self.ping(st)
+
+        threads = [threading.Thread(target=probe, args=(st,), daemon=True) for st in ready]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(PING_TIMEOUT_S + 2)  # a ping that hangs past its own timeout counts as failed
+        hung = []
+        for st in ready:
+            if answers.get(id(st)):
+                st.ping_failures = 0
+                continue
+            st.ping_failures += 1
+            if st.ping_failures >= HUNG_PINGS and self.crashed(st, "hung"):
+                hung.append(st.user)
+        return hung
+
     def start_reaper(self, every_s: float = 30) -> None:
         def run() -> None:
             while not self._stop.wait(every_s):
-                try:
-                    self.reap_once()
-                except Exception:  # noqa: BLE001 - keep reaping
-                    pass
+                for step in (self.reap_once, self.check_health):
+                    try:
+                        step()
+                    except Exception:  # noqa: BLE001 - keep reaping
+                        pass
 
         self._reaper = threading.Thread(target=run, name="studio-reaper", daemon=True)
         self._reaper.start()
 
-    def stop_all(self, reason: str = "hub stopped") -> None:
+    def stop_all(self, reason: str = "hub stopped", grace: float = 10.0) -> None:
+        """Stop every Studio at once: all are asked (stdin closed) together and get ``grace`` seconds in all
+        before they are killed, so the hub stops within the pod's termination grace period (30 s)."""
         self._stop.set()
-        for st in self.running():
-            self.stop(st.user, reason)
+        with self._lock:
+            studios = list(self._studios.values())
+            self._studios.clear()
+        for st in studios:
+            st.stopping = True
+            try:
+                if st.proc is not None and st.proc.stdin:
+                    st.proc.stdin.close()
+            except OSError:
+                pass
+        deadline = time.time() + grace
+        for st in studios:
+            if st.proc is None:
+                continue
+            try:
+                st.proc.wait(timeout=max(0.0, deadline - time.time()))
+            except subprocess.TimeoutExpired:
+                st.proc.kill()
+                try:
+                    st.proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+            self.audit.record("studio_stop", user=st.user, reason=reason, minutes=round((time.time() - st.started) / 60, 1))

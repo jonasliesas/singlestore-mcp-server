@@ -60,6 +60,8 @@ class HubConfig:
     session_hours: int = 10
     max_users: int = 20
     start_timeout_s: int = 90
+    proxy_timeout_s: int = 600            # longest a Studio call may take (the ingress waits 600 s too)
+    login_rate: int = 20                  # sign-in starts / code exchanges per client address and minute
     admins: tuple[str, ...] = ()
     allowed_users: tuple[str, ...] = ()  # empty: every SAS user who can sign in
     trust_forwarded: bool = False        # take the client address from X-Forwarded-For (behind the ingress)
@@ -86,6 +88,10 @@ class HubConfig:
     def cookie_name(self) -> str:
         # __Host-: the browser only accepts it Secure, Path=/ and without Domain (no subdomain can set or read it).
         return "__Host-studio" if self.secure else "studio_session"
+
+    @property
+    def login_cookie_name(self) -> str:
+        return "__Host-studio_login" if self.secure else "studio_login"
 
     def is_admin(self, user: str) -> bool:
         return user.lower() in {a.lower() for a in self.admins}
@@ -158,6 +164,8 @@ def load() -> HubConfig:
         session_hours=max(1, _int("STUDIO_SESSION_HOURS", 10)),
         max_users=max(1, _int("STUDIO_MAX_USERS", 20)),
         start_timeout_s=max(10, _int("STUDIO_START_TIMEOUT", 90)),
+        proxy_timeout_s=max(10, _int("STUDIO_PROXY_TIMEOUT", 600)),
+        login_rate=max(1, _int("STUDIO_LOGIN_RATE", 20)),
         admins=_csv("STUDIO_ADMINS"),
         allowed_users=_csv("STUDIO_ALLOWED_USERS"),
         trust_forwarded=_flag("STUDIO_TRUST_FORWARDED", False),

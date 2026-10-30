@@ -12,6 +12,7 @@ import os
 import re
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -72,6 +73,10 @@ class FakeSpawner(Spawner):
             def _h(self) -> None:
                 n = int(self.headers.get("Content-Length") or 0)
                 body = self.rfile.read(n) if n else b""
+                if self.server.hang_s:  # type: ignore[attr-defined] - a hung Studio: nothing answers in time
+                    time.sleep(self.server.hang_s)  # type: ignore[attr-defined]
+                if self.path.endswith("/slow"):  # a long call (the Studio itself still answers pings)
+                    time.sleep(2.5)
                 if not self.path.startswith(f"/{token}/"):
                     data, status = b"not found", 404
                 else:
@@ -79,6 +84,7 @@ class FakeSpawner(Spawner):
                     data = json.dumps({"user": st.user, "path": self.path[len(token) + 2:], "method": self.command,
                                        "host": self.headers.get("Host"), "origin": self.headers.get("Origin"),
                                        "cookie": self.headers.get("Cookie"), "authorization": self.headers.get("Authorization"),
+                                       "headers": {k.lower(): v for k, v in self.headers.items()},
                                        "body": body.decode()}).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -91,6 +97,7 @@ class FakeSpawner(Spawner):
 
         srv = ThreadingHTTPServer(("127.0.0.1", 0), Echo)
         srv.daemon_threads = True
+        srv.hang_s = 0  # type: ignore[attr-defined]
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         st.proc = FakeProc(srv)  # type: ignore[assignment]
         st.port = srv.server_address[1]
@@ -213,6 +220,7 @@ def test_redirect_sign_in_sets_a_session_cookie(hub: Hub, logon: FakeSasLogon) -
 def test_secure_cookie_names_behind_https() -> None:
     cfg = HubConfig(viya_url="https://viya.example", master_key=MASTER, public_url="https://studio.example.com")
     assert cfg.secure and cfg.cookie_name == "__Host-studio"
+    assert cfg.login_cookie_name == "__Host-studio_login"  # the sign-in cookie too: no subdomain can plant one
     assert cfg.redirect_uri == "https://studio.example.com/oauth/callback"
 
 
@@ -383,3 +391,278 @@ def test_no_secrets_in_the_audit_log(hub: Hub, logon: FakeSasLogon) -> None:
     for secret in [*logon.access, *logon.refresh, TEST_CLIENT_SECRET, MASTER.decode(), hub.cfg.user_key("alice")]:
         assert secret not in text
     assert "login" in text and "logout" in text
+
+
+# ----------------------------------------------------------------------------- hardening
+
+def _raw(port: int, data: bytes, wait: float = 1.0) -> bytes:
+    """Send raw bytes on one connection and read what comes back until the server goes quiet."""
+    import socket
+
+    with socket.create_connection(("127.0.0.1", port), timeout=wait) as sock:
+        sock.sendall(data)
+        out = b""
+        try:
+            while chunk := sock.recv(65536):
+                out += chunk
+        except TimeoutError:
+            pass
+    return out
+
+
+def test_request_smuggling_is_refused(hub: Hub) -> None:
+    port = hub.httpd.server_address[1]
+    inner = b"GET /login HTTP/1.1\r\nHost: x\r\n\r\n"
+    # A chunked body isn't read by this server: refused, connection closed (the body is never a request).
+    out = _raw(port, b"POST /logout HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+               + f"{len(inner):x}\r\n".encode() + inner + b"\r\n0\r\n\r\n")
+    assert out.startswith(b"HTTP/1.1 400") and out.count(b"HTTP/1.1") == 1
+    out = _raw(port, b"POST /logout HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nContent-Length: 33\r\n\r\n" + inner)
+    assert out.startswith(b"HTTP/1.1 400") and out.count(b"HTTP/1.1") == 1
+    # A GET's body is read and dropped: the bytes in it are not answered as a second request.
+    out = _raw(port, b"GET /healthz HTTP/1.1\r\nHost: x\r\nContent-Length: " + str(len(inner)).encode() + b"\r\n\r\n" + inner)
+    assert out.startswith(b"HTTP/1.1 200") and out.count(b"HTTP/1.1") == 1 and b"Sign in" not in out
+
+
+def test_sign_in_is_rate_limited_per_address(tmp_path: Path, logon: FakeSasLogon) -> None:
+    hub = make_hub(tmp_path, logon, login_rate=3, trust_forwarded=True)
+    try:
+        b = Browser(hub.cfg.public_url)
+        # Only the last X-Forwarded-For hop (the one the ingress adds) counts: a made-up first hop doesn't help.
+        hops = [f"203.0.113.{n}, 10.9.8.7" for n in range(8)]
+        codes = [b.get("/login/start", headers={"X-Forwarded-For": h}).status for h in hops]
+        assert codes[:3] == [303, 303, 303] and set(codes[3:]) == {429}
+        r = b.get("/login/start", headers={"X-Forwarded-For": "10.9.8.7"})
+        assert r.status == 429 and int(r.headers["Retry-After"]) >= 1
+        # The code exchange counts too (it calls SAS Logon).
+        assert b.get("/oauth/callback?code=x&state=y", headers={"X-Forwarded-For": "10.9.8.7"}).status == 429
+        # Another address isn't affected; the refusals are noted once, not per request.
+        assert b.get("/login/start", headers={"X-Forwarded-For": "10.1.1.1"}).status == 303
+        limited = [e for e in hub.audit.tail() if e["event"] == "login_rate_limited"]
+        assert len(limited) == 1 and limited[0]["ip"] == "10.9.8.7"
+    finally:
+        hub.close()
+
+
+def test_hub_only_studio_routes_are_not_proxied(hub: Hub, logon: FakeSasLogon) -> None:
+    b = sign_in(hub, logon, "alice")
+    r = b.request("POST", "/studio/hub/seed", json.dumps({"viya": {"name": "x", "url": "https://evil.example"}}).encode(),
+                  {"Content-Type": "application/json"})
+    assert r.status == 404 and "user" not in r.json()  # the Studio never saw it
+    assert b.get("/studio/shutdown").status == 404
+    assert b.get("/studio/hub/seed").status == 404
+
+
+def test_a_link_from_another_site_opens_plain_studio(hub: Hub, logon: FakeSasLogon) -> None:
+    b = sign_in(hub, logon, "alice")
+    link = "/studio/?" + urllib.parse.urlencode({"tool": "stop_pipeline", "args": json.dumps({"name": "orders"})})
+    for site in ("cross-site", "same-site"):
+        r = b.get(link, headers={"Sec-Fetch-Site": site, "Sec-Fetch-Mode": "navigate"})
+        assert r.status == 303 and r.location == "/studio/?tool=sql_editor&args=%7B%7D", site
+    # ...and that plain Studio page opens (no redirect loop for a cross-site redirect chain).
+    r = b.get(r.location, headers={"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate"})
+    assert r.status == 200 and r.json()["path"] == "?tool=sql_editor&args=%7B%7D"
+    # Studio's own links and a typed address / bookmark keep their tool.
+    for site in ("same-origin", "none", None):
+        r = b.get(link, headers={"Sec-Fetch-Site": site} if site else {})
+        assert r.status == 200 and "stop_pipeline" in r.json()["path"], site
+    assert any(e["event"] == "cross_site_link" for e in hub.audit.tail())
+
+
+def test_hop_by_hop_and_identity_headers_stay_at_the_hub(hub: Hub, logon: FakeSasLogon) -> None:
+    b = sign_in(hub, logon, "alice")
+    r = b.get("/studio/session", headers={"Connection": "Upgrade", "Upgrade": "websocket", "Authorization": "Bearer x",
+                                          "Proxy-Authorization": "Basic x", "X-Forwarded-For": "1.2.3.4",
+                                          "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==", "Accept": "application/json"})
+    assert r.status == 200  # never a 101: no websocket through the hub
+    seen = r.json()["headers"]
+    for h in ("upgrade", "authorization", "proxy-authorization", "x-forwarded-for", "sec-websocket-key", "cookie"):
+        assert h not in seen, h
+    assert seen["accept"] == "application/json" and seen.get("connection", "").lower() != "upgrade"
+    assert "Set-Cookie" not in r.headers and r.headers.get("Upgrade") is None
+
+
+def _crash(hub: Hub, user: str, *, exited: bool = True) -> Studio:
+    """Make the user's (fake) Studio stop answering: exited (the process is gone) or just its port closed."""
+    st = hub.spawner.get(user)
+    if exited:
+        st.proc.close()
+    else:
+        st.proc.server.shutdown()
+        st.proc.server.server_close()
+    return st
+
+
+def test_a_crashed_studio_is_restarted_on_the_next_request(hub: Hub, logon: FakeSasLogon) -> None:
+    b = sign_in(hub, logon, "alice")
+    ping(b)
+    old = _crash(hub, "alice")
+    assert ping(b)["user"] == "alice"  # found dead before forwarding: started again, the call goes through
+    assert hub.spawner.starts == 2 and hub.spawner.get("alice") is not old
+    assert any(e["event"] == "studio_stop" and e.get("reason") == "exited" for e in hub.audit.tail())
+
+
+def test_a_studio_that_dies_during_a_call_says_restarting(hub: Hub, logon: FakeSasLogon) -> None:
+    b = sign_in(hub, logon, "alice")
+    ping(b)
+    _crash(hub, "alice", exited=False)  # the process looks alive but nothing answers on its port
+    r = b.call("sql_editor_state")
+    assert r.status == 503 and r.headers["X-Studio-Restarting"] == "1" and r.json()["restarting"] is True
+    assert "restarting" in r.json()["error"]
+    assert ping(b)["user"] == "alice" and hub.spawner.starts == 2  # already started again
+    # The Studio page itself gets a page that reloads by itself.
+    _crash(hub, "alice", exited=False)
+    r = b.get("/studio/?tool=sql_editor&args=%7B%7D")
+    assert r.status == 503 and 'http-equiv="refresh"' in r.text and "restarting" in r.text
+    assert "<script" not in r.text
+
+
+def test_a_heartbeat_brings_back_a_crashed_studio_but_not_a_stopped_one(hub: Hub, logon: FakeSasLogon) -> None:
+    b = sign_in(hub, logon, "alice")
+    ping(b)
+    _crash(hub, "alice")
+    hub.spawner.reap_once()  # the reaper noticed first
+    assert hub.spawner.get("alice") is None
+    r = b.get("/studio/ping")  # starts it again; the page keeps "reconnecting" while it starts
+    assert r.status == 200 or r.headers["X-Studio-Restarting"] == "1"
+    deadline = time.time() + 5
+    while b.get("/studio/ping").status != 200 and time.time() < deadline:
+        time.sleep(0.05)
+    assert hub.spawner.starts == 2 and b.get("/studio/ping").status == 200
+    hub.spawner.stop("alice", "admin")
+    r = b.get("/studio/ping")
+    assert r.status == 503 and r.json()["stopped"] is True and "X-Studio-Restarting" not in r.headers
+
+
+def test_a_studio_that_keeps_crashing_is_not_restarted_for_a_while(hub: Hub, logon: FakeSasLogon) -> None:
+    from singlestore_mcp.hub import spawner as sp
+
+    b = sign_in(hub, logon, "alice")
+    for _ in range(sp.CRASH_LIMIT):
+        ping(b)
+        _crash(hub, "alice")
+        hub.spawner.reap_once()
+    r = b.get("/studio/session")
+    assert r.status == 503 and "stopped unexpectedly 3 times" in r.text
+    assert hub.spawner.starts == sp.CRASH_LIMIT
+    # A deliberate stop (admin, sign-out) starts the count again.
+    hub.spawner.stop("alice", "admin")
+    assert ping(b)["user"] == "alice"
+
+
+def test_a_hung_studio_is_dropped_and_restarted(tmp_path: Path, logon: FakeSasLogon, monkeypatch: pytest.MonkeyPatch) -> None:
+    from singlestore_mcp.hub import spawner as sp
+
+    monkeypatch.setattr(sp, "PING_TIMEOUT_S", 0.3)
+    hub = make_hub(tmp_path, logon, proxy_timeout_s=1)
+    try:
+        b = sign_in(hub, logon, "alice")
+        ping(b)
+        # A long call while the Studio still answers its ping: 504, the Studio stays.
+        t0 = time.time()
+        r = b.get("/studio/slow")
+        assert r.status == 504 and time.time() - t0 < 2.4 and hub.spawner.starts == 1
+        # Nothing answers any more: after the call's timeout and a failed ping, it's dropped and started again.
+        hub.spawner.get("alice").proc.server.hang_s = 30
+        r = b.call("sql_editor_state")
+        assert r.status == 503 and r.headers["X-Studio-Restarting"] == "1"
+        assert ping(b)["user"] == "alice" and hub.spawner.starts == 2
+        assert any(e["event"] == "studio_stop" and e.get("reason") == "hung" for e in hub.audit.tail())
+    finally:
+        hub.close()
+
+
+def test_health_check_finds_a_hung_studio(hub: Hub, logon: FakeSasLogon, monkeypatch: pytest.MonkeyPatch) -> None:
+    from singlestore_mcp.hub import spawner as sp
+
+    monkeypatch.setattr(sp, "PING_TIMEOUT_S", 0.3)
+    alice, bob = sign_in(hub, logon, "alice"), sign_in(hub, logon, "bob")
+    ping(alice)
+    ping(bob)
+    hub.spawner.get("alice").proc.server.hang_s = 30
+    assert [hub.spawner.check_health() for _ in range(sp.HUNG_PINGS)] == [[]] * (sp.HUNG_PINGS - 1) + [["alice"]]
+    assert hub.spawner.get("alice") is None and hub.spawner.get("bob") is not None
+
+
+def test_idle_stop_waits_for_a_call_in_flight(hub: Hub, logon: FakeSasLogon) -> None:
+    b = sign_in(hub, logon, "alice")
+    ping(b)
+    st = hub.spawner.get("alice")
+    with hub.spawner.using(st):  # e.g. a 40-minute SAS job with no other request meanwhile
+        st.last_activity = time.time() - hub.cfg.idle_minutes * 60 - 5
+        assert hub.spawner.reap_once() == []
+    assert time.time() - st.last_activity < 5  # its end counts as use
+    assert hub.spawner.reap_once() == [] and hub.spawner.get("alice") is st
+
+
+def test_a_crashed_studio_does_not_hold_a_place(tmp_path: Path, logon: FakeSasLogon) -> None:
+    hub = make_hub(tmp_path, logon, max_users=1, admins=())
+    try:
+        ping(sign_in(hub, logon, "alice"))
+        _crash(hub, "alice")
+        assert ping(sign_in(hub, logon, "bob"))["user"] == "bob"
+    finally:
+        hub.close()
+
+
+def test_an_admin_can_sign_in_when_studio_is_full(tmp_path: Path, logon: FakeSasLogon) -> None:
+    hub = make_hub(tmp_path, logon, max_users=1)  # alice is the admin
+    try:
+        ping(sign_in(hub, logon, "bob"))
+        alice = sign_in(hub, logon, "alice")
+        assert alice.get("/admin").status == 200 and len(hub.spawner.running()) == 2
+    finally:
+        hub.close()
+
+
+def test_close_stops_every_studio_and_takes_no_new_ones(hub: Hub, logon: FakeSasLogon) -> None:
+    from singlestore_mcp.hub.spawner import StudioFailed
+
+    sign_in(hub, logon, "alice")
+    sign_in(hub, logon, "bob")
+    procs = [hub.spawner.wait_ready(hub.spawner.get(u)).proc for u in ("alice", "bob")]
+    hub.close()
+    hub.close()  # twice (signal handler + finally): fine
+    assert all(p.poll() is not None for p in procs) and hub.spawner.running() == []
+    stops = [e for e in hub.audit.tail() if e["event"] == "studio_stop"]
+    assert {e["user"] for e in stops} == {"alice", "bob"} and all(e["reason"] == "hub stopped" for e in stops)
+    with pytest.raises(StudioFailed):
+        hub.spawner.ensure("alice")
+
+
+def test_a_studio_stopped_while_starting_is_killed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from singlestore_mcp.hub import spawner as sp
+
+    class Proc:
+        pid, returncode, stdout = 4242, None, iter(())
+
+        def __init__(self, *a: Any, **kw: Any) -> None:
+            self.stdin = self
+
+        def close(self) -> None:
+            self.returncode = 0
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self, timeout: float | None = None) -> int | None:
+            return self.returncode
+
+    monkeypatch.setattr(sp.subprocess, "Popen", Proc)
+    cfg = HubConfig(viya_url="https://viya.example", master_key=MASTER, data_dir=tmp_path)
+    spawner = Spawner(cfg, Audit(tmp_path / "a.jsonl", echo=False))
+    st = Studio(user="alice", token="t")
+    st.stopping = True  # signed out (or the hub stopped) while the process was being created
+    spawner._start(st, None)
+    assert st.proc.returncode == 0 and st.ready.is_set() and st.error
+
+
+def test_rate_limiter_window() -> None:
+    from singlestore_mcp.hub.sessions import RateLimiter
+
+    rl = RateLimiter(2, window_s=10)
+    assert rl.allow("a", now=0) and rl.allow("a", now=1) and not rl.allow("a", now=2)
+    assert rl.first_refusal("a", now=2) and not rl.first_refusal("a", now=3)
+    assert rl.retry_after("a", now=2) >= 8
+    assert rl.allow("b", now=2)  # per address
+    assert rl.allow("a", now=10.5)  # the first hit left the window

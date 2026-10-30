@@ -13,6 +13,7 @@ from __future__ import annotations
 import secrets
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -114,3 +115,47 @@ class SessionStore:
         if p and time.time() - p.created > PENDING_TTL_S:
             return None
         return p
+
+
+class RateLimiter:
+    """At most ``limit`` events per ``window_s`` seconds per key (a client address): sign-in starts and code
+    exchanges, so nobody can flood SAS Logon through the hub or push other people's sign-ins out of ``pending``."""
+
+    def __init__(self, limit: int, window_s: float = 60.0) -> None:
+        self.limit, self.window_s = limit, window_s
+        self._hits: dict[str, deque[float]] = {}
+        self._noted: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, key: str, now: float | None = None) -> bool:
+        """Count one event for ``key``; False (not counted) when the key used up its limit in this window."""
+        now = time.time() if now is None else now
+        with self._lock:
+            if len(self._hits) > 10_000:  # many addresses: forget the ones that went quiet
+                for k in [k for k, q in self._hits.items() if not q or now - q[-1] > self.window_s]:
+                    self._hits.pop(k, None)
+            q = self._hits.setdefault(key, deque())
+            while q and now - q[0] > self.window_s:
+                q.popleft()
+            if len(q) >= self.limit:
+                return False
+            q.append(now)
+            return True
+
+    def first_refusal(self, key: str, now: float | None = None) -> bool:
+        """True once per window for a key that is being refused (to note it once, not for every request)."""
+        now = time.time() if now is None else now
+        with self._lock:
+            last = self._noted.get(key)
+            if last is not None and now - last < self.window_s:
+                return False
+            if len(self._noted) > 10_000:
+                self._noted.clear()
+            self._noted[key] = now
+            return True
+
+    def retry_after(self, key: str, now: float | None = None) -> int:
+        now = time.time() if now is None else now
+        with self._lock:
+            q = self._hits.get(key)
+            return max(1, int(self.window_s - (now - q[0])) + 1) if q else 1

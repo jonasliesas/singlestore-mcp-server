@@ -24,8 +24,10 @@ th{color:var(--muted);font-weight:600}code{font-size:12.5px}ol{color:var(--muted
 """
 
 
-def page(title: str, body: str, wide: bool = False) -> str:
-    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+def page(title: str, body: str, wide: bool = False, refresh_s: int | None = None) -> str:
+    # A meta refresh (not a script: the hub's CSP allows none) reloads the same address, e.g. while a Studio starts.
+    refresh = f'<meta http-equiv="refresh" content="{int(refresh_s)}">' if refresh_s else ""
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">{refresh}'
             f"<title>{escape(title)} · SAS SpeedyStore Studio</title><style>{_CSS}</style></head>"
             f'<body><main class="{"wide" if wide else ""}">{body}</main></body></html>')
 
@@ -55,6 +57,16 @@ def paste_code(authorize_url: str, csrf: str, error: str | None = None) -> str:
 def message(title: str, text: str, link: tuple[str, str] | None = None, error: bool = False) -> str:
     action = f'<p><a class="btn ghost" href="{escape(link[1])}">{escape(link[0])}</a></p>' if link else ""
     return page(title, f'<div class="card">{_brand()}<h1>{escape(title)}</h1><p class="{"err" if error else ""}">{escape(text)}</p>{action}</div>')
+
+
+def waiting(restart: bool, refresh_s: int = 3) -> str:
+    """While the user's Studio starts (or starts again after it crashed or hung): reloads itself."""
+    if restart:
+        title, text = "Your Studio is restarting", ("Your Studio stopped unexpectedly and is being started again. "
+                                                    "This page reloads by itself; your tabs and files are kept.")
+    else:
+        title, text = "Starting your Studio", "This takes a few seconds. This page reloads by itself."
+    return page(title, f'<div class="card">{_brand()}<h1>{escape(title)}</h1><p>{escape(text)}</p></div>', refresh_s=refresh_s)
 
 
 def account(name: str, user: str, csrf: str, is_admin: bool, running: bool) -> str:

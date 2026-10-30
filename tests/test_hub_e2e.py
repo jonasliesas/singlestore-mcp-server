@@ -44,6 +44,16 @@ def hub(tmp_path_factory: pytest.TempPathFactory, logon: FakeSasLogon):
     h.close()
 
 
+def open_page(b: Browser, path: str = "/studio/"):
+    """The Studio page; while the Studio starts the hub answers with a page that reloads itself: wait like it."""
+    deadline = time.time() + 90
+    while True:
+        r = b.follow(b.get(path))
+        if r.status != 503 or r.headers.get("X-Studio-Restarting") != "1" or time.time() > deadline:
+            return r
+        time.sleep(1)
+
+
 def call(b: Browser, name: str, arguments: dict | None = None) -> dict:
     r = b.call(name, arguments)
     assert r.status == 200, r.text[:300]
@@ -59,7 +69,7 @@ def users(hub: Hub, logon: FakeSasLogon) -> dict[str, Browser]:
 
 def test_studio_page_and_features(users: dict[str, Browser]) -> None:
     b = users["alice"]
-    r = b.follow(b.get("/studio/"))
+    r = open_page(b)
     assert r.status == 200 and "SAS SpeedyStore Studio" in r.text
     assert 'window.S2_SERVER = { account: "../account" }' in r.text
     tool = b.get("/studio/tool?name=sql_editor").json()
@@ -129,3 +139,32 @@ def test_sign_out_stops_only_that_users_studio(users: dict[str, Browser], hub: H
         time.sleep(0.2)
     assert proc.poll() is not None
     assert hub.spawner.get("alice") is not None and call(users["alice"], "sql_editor_state")["tab_id"]
+
+
+def test_a_killed_studio_comes_back_with_its_state(users: dict[str, Browser], hub: Hub) -> None:
+    alice = users["alice"]
+    tab = call(alice, "sql_editor_state")["tab_id"]
+    call(alice, "sql_editor_save_draft", {"sql": "select 'kept across a crash' as x", "tab_id": tab})
+    old = hub.spawner.get("alice")
+    old.proc.kill()  # a crash (out of memory, a bug): no clean stop
+    old.proc.wait(10)
+    deadline = time.time() + 90
+    while True:  # the page's own calls: "restarting" (503 + X-Studio-Restarting) until the new process answers
+        r = alice.call("sql_editor_state", {"tab_id": tab})
+        if r.status == 200 or time.time() > deadline:
+            break
+        assert r.status == 503 and r.headers.get("X-Studio-Restarting") == "1", r.text[:300]
+        time.sleep(0.5)
+    assert r.status == 200 and "kept across a crash" in json.dumps(r.json())
+    new = hub.spawner.get("alice")
+    assert new is not old and new.pid != old.pid and new.port
+    assert any(e["event"] == "studio_stop" and e.get("user") == "alice" and e.get("reason") == "exited" for e in hub.audit.tail())
+
+
+def test_hub_close_stops_every_studio_process(users: dict[str, Browser], hub: Hub) -> None:
+    procs = [st.proc for st in hub.spawner.running()]
+    assert procs
+    t0 = time.time()
+    hub.close()
+    assert all(p.poll() is not None for p in procs)
+    assert time.time() - t0 < 25  # inside the pod's 30 s termination grace period

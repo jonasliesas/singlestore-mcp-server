@@ -63,6 +63,7 @@ function presenter() {
 }
 const status = document.getElementById("status");
 const connEl = document.getElementById("conn");
+if (window.S2_SERVER) connEl.lastChild.textContent = "Reconnecting to your Studio…";  // behind the Studio hub
 let frame = null;
 
 // ---------------------------------------------------------------- splash
@@ -92,6 +93,9 @@ let wake = null;           // cuts the current wait between probes short
 let heartbeat = null;
 
 class SessionEnded extends Error {}
+// Behind the Studio hub: the user's Studio crashed or hung and is being started again. Wait for it as for a
+// restart (reconnecting), never "Session ended". Outside the hub no answer carries this header.
+const restarting = (res) => res?.headers?.get("X-Studio-Restarting") === "1";
 
 function setConn(next) {
   conn = next;
@@ -107,7 +111,7 @@ async function reconnectLoop() {
     let res = null;
     try { res = await fetch("ping", { cache: "no-store" }); } catch { /* still down */ }
     if (res?.ok) return back();
-    if (res) return end("refused");
+    if (res && !restarting(res)) return end("refused");
     // Probe first, then check the clock: after a laptop sleep the time jumps, but the server may be up.
     if (Date.now() - downSince >= session.reconnectMs) return end("gone");
     await new Promise((resolve) => { wake = resolve; setTimeout(resolve, delays[Math.min(i, delays.length - 1)]); });
@@ -157,6 +161,7 @@ async function confirmSession() {
   let res = null;
   try { res = await fetch("ping", { cache: "no-store" }); } catch { lost(); return conn !== "ended"; }
   if (res.ok) return true;
+  if (restarting(res)) { lost(); return true; }
   end("refused");
   return false;
 }
@@ -201,6 +206,7 @@ async function post(name, toolArgs) {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ name, arguments: toolArgs ?? {} }),
   });
+  if (restarting(res)) throw new TypeError("the Studio is restarting");  // like a dropped connection
   if (!res.ok) { const e = new Error(`HTTP ${res.status}`); e.status = res.status; throw e; }
   return res.json();
 }
@@ -245,6 +251,7 @@ async function get(path) {
     if (conn !== "ok" && !(await whenBack())) throw new SessionEnded();
     let res;
     try { res = await fetch(path, { cache: "no-store" }); } catch { lost(); continue; }
+    if (restarting(res)) { lost(); continue; }
     if ((res.status === 403 || res.status === 404) && !(await confirmSession())) throw new SessionEnded();
     return res;
   }
