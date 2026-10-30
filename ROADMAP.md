@@ -2,7 +2,8 @@
 
 Agreed with the owner; confirm scope and order before starting a round. Details of what was built are in the
 README and the git log; this file keeps what's next.
-Last updated 2026-10-27 (latest release 0.10.1; design round from `studio-design-review.md`; network-break recovery).
+Last updated 2026-10-30 (latest release 0.10.1; design round from `studio-design-review.md`; network-break recovery;
+review polish round on branch `claude/polish`).
 
 ## Released
 - **0.9.0** (2026-10-14) – Workload, SQL Editor tabs/history/SELECT builder, Security and Config views (read-only),
@@ -142,6 +143,29 @@ Last updated 2026-10-27 (latest release 0.10.1; design round from `studio-design
   "SingleStore Workspace" shortcut is replaced on the next install (pin it again if it was pinned); the shortcut's
   icon is the Studio mark (`scripts/studio.ico`, rendered by `scripts/make_studio_icon.py`). Program folder and MCP
   tool names unchanged.
+- Design review polish (branch `claude/polish`, 2026-10-30; IDs from `../studio-design-review.md`):
+  - **Empty states**: the SQL Editor's empty results pane offers example queries (B-2: "Top 10 cars by MSRP" when the
+    database has CARS, "Rows per table in <db>" from TABLE_STATISTICS, the same cars query as PROC SQL with a SAS Viya
+    connection; a click puts the SQL in and runs it; the keyboard hints folded into "Keyboard shortcuts"); Workload with
+    no workload explains it in three steps with From history as the primary button and a sample workload on CARS (L-4).
+  - **Result grids** (V-5): thousands separators in numeric columns (every digit kept; years / ids / codes ungrouped),
+    a "#" column in the SQL Editor's grid; Export CSV and a copied selection keep the raw values (`S2.cellNumber`,
+    `S2.rawCopy`); the Query Grid formats the same way.
+  - **Toasts** (I-2): errors stay until dismissed (role=alert, "Error:"), info hides after 3.5 s but waits while
+    hovered / focused, a ✕ on each, at most five, top centre while a dialog is open.
+  - **Colour plus text** (A-5): Config's "changed" chip, Security flag severity as ▲ / ●, "▲ Errors" on a failing
+    pipeline card.
+  - **Keyboard**: arrow keys / Home / End in every tab bar (I-4; the focus stays on the tab through the redraws);
+    the SQL Editor's tree has a roving tabindex, arrow keys, and shows a row's actions on focus (I-3).
+  - **Buttons**: one danger style (`.s2-btn.danger`, `--s2-danger`, V-2); Security's account buttons one size with
+    the rare ones under "More ▾", one "Change ▾" menu per table row (V-3, `S2.menuButton`).
+  - Schema Explorer stat cards wrap instead of cutting off, Created shows the date (time in the tooltip) (L-2).
+  - **One SAS session state** (C-3, bug 7): the badge says "starting… N s" while a view's library list starts the
+    session (`sasSessionWatch.busy`, `started` from sas_prewarm); Connections re-reads the sign-in when shown again.
+  - **Renders held while a button is pressed** in every view with timer re-renders (`S2.holdWhilePressed`: Cluster,
+    Alerts, Pipelines, Query History, Security, Workload).
+  - Tests: `tests/ui/test_polish_ui.py`, `test_contrast.py` (danger), `test_static.py` (render guard),
+    `test_sas_prewarm.py` (`started`).
 
 ## Backlog
 **Design review – what's left** (`../studio-design-review.md`; IDs from there)
@@ -152,14 +176,14 @@ Last updated 2026-10-27 (latest release 0.10.1; design round from `studio-design
   inside Claude Desktop it's remembered only where the app frame may use browser storage (the browser view always
   remembers it); masking is text-based, so a customer name used as a *database* or table name is only masked when it
   is also a connection or user name.
-- Open: B-2 (example-query empty state), B-3 (grouped rail, README view table), B-4 (jargon tooltips), V-1 (one
-  primary per region; Connections still has several), V-2 (danger style), V-3 (button sizes in Security), V-5
-  (number formatting / # column in the SQL result grid), V-6/V-7, V-9/V-10, L-2 (cut-off stat cards), L-3, L-4
-  (Workload empty state), L-5 (pipeline cards), L-9 (Trends 2×2 grid, nice duration ticks), L-10, C-2 (pushdown verdict
-  is now in the status bar; still opt-in "Show pushdown"; no "SAS EP" quick filter), C-3 (contradictory SAS session
-  messages, bug 7), C-7, C-8 (column comments as chips), C-9, C-10, I-2 (sticky error toasts), I-3 (tree actions on
-  focus), I-4 (arrow keys in tabs), I-5 (skeletons), I-7, I-8, A-1 (`--s2-text-3` under 4.5:1; comes from the host in
-  Claude), A-3 (input borders), A-5 (colour-only signals).
+- Open: B-3 (grouped rail, README view table), B-4 (jargon tooltips), V-1 (one primary per region; Connections still
+  has several), V-6/V-7, V-9/V-10, L-3, L-5 (pipeline cards), L-9 (Trends 2×2 grid, nice duration ticks), L-10, C-2
+  (pushdown verdict is now in the status bar; still opt-in "Show pushdown"; no "SAS EP" quick filter), C-7, C-8 (column
+  comments as chips), C-9, C-10, I-5 (skeletons), I-7, I-8, A-1 (`--s2-text-3` under 4.5:1; comes from the host in
+  Claude), A-3 (input borders).
+- Left from the polish round: I-4's `aria-controls` / tabpanel pairs (arrow keys done); I-3 only in the SQL Editor's
+  tree (the Schema Explorer's tree rows are buttons already); the file browser's Rename / Delete row actions still
+  show only on hover / focus; Workload's Run / Saved runs / Compare switch is a pressed-button group, not tabs.
 - Tests: Playwright's hit testing is off inside CSS-zoomed frames, so presenter-mode UI tests click with JS.
 
 **Security**
@@ -271,7 +295,5 @@ in step 1, "Ask Claude" off by default (switchable later with an Anthropic / Fou
   SAS cells in notebooks (saspy) have their own sessions and aren't covered.
 - Notebook on Windows: calls waiting in C (socket read, lock, long C loop) still can't be interrupted – Restart
   kernel is offered after 5 s.
-- Other views rebuild their whole page on refresh like the Cluster Monitor did; if a click is lost there too, use
-  the same "hold renders while a button is pressed" guard (`cluster_monitor.html`, `press`).
 - A Compute session can get stuck after some SAS errors (seen once in a test after a failed CAS `promote=`
   DATA step: later PROC SQL steps "stopped because of errors" without an ERROR line); Restart SAS session fixes it.
