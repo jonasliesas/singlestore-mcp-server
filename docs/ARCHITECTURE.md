@@ -199,20 +199,19 @@ survive token expiry.
 ```mermaid
 sequenceDiagram
   participant P as Notebook page
-  participant K as Kernel (saspy)
-  participant M as MCP server Python
+  participant M as MCP server (sas_runs / sas_cell)
   participant V as SAS Viya (Compute)
   participant D as SingleStore
-  P->>K: %%sas cell (via notebook_run, cell_type=sas)
-  K->>M: python -m singlestore_mcp.sas_viya token
-  M-->>K: Viya access token (renewed with the refresh token)
-  K->>V: saspy HTTP session (authtoken), first cell starts it
-  K->>V: LIBNAME S2 SSTORE … (nosource, password masked)
-  K->>V: submit DATA step / PROCs
-  V->>D: SAS/ACCESS to SingleStore reads/writes directly
-  V-->>K: LOG + ODS HTML
-  K-->>P: application/vnd.s2.sas+json → output + log
+  P->>M: notebook_sas_cell (run_id, wait_ms)
+  M->>M: queue: the connection's Compute session (shared with the SQL Editor and Python in SAS cells)
+  M->>V: job: session reset, ODS HTML5 file in WORK, the cell, guard, ODS close
+  V->>D: SAS/ACCESS to SingleStore (the automatic S2 library) reads/writes directly
+  V-->>M: log (+ listing); ODS file read back through the Compute file API
+  M-->>P: application/vnd.s2.sas+json → output + log (or "running": notebook_sas_python_status)
 ```
+
+The cell needs no local kernel (server mode too). WORK tables and macro variables are the session's, so the SQL
+Editor and Python in SAS cells see them; Stop and Restart SAS session work as for the SQL Editor's SAS runs.
 
 **Viya reads SingleStore directly.** SAS uses the `S2` library (SAS/ACCESS,
 engine `SSTORE`) and CAS uses a SingleStore-backed caslib. Data never goes
@@ -313,9 +312,10 @@ history, Advisor and Cluster Monitor leave them out.
     reused if this Viya accepts it.
   - The server talks to Viya with Python's built-in HTTP client. If a
     configured proxy refuses the host, it falls back to a direct connection.
-- **SAS cells:** `saspy` in HTTP mode with the token, on the chosen compute
-  context. Each session gets libref **S2** (SAS/ACCESS to SingleStore, engine
-  `SSTORE`) on the notebook's database.
+- **SAS cells:** run in the Workspace's SAS Compute session (`sas_cell.py`), with
+  its automatic libref **S2** (SAS/ACCESS to SingleStore, engine `SSTORE`) on the
+  active SingleStore connection's database. `sas_session()` in a Python cell is
+  still a saspy session of its own (HTTP mode with the token).
 - **Other SAS Python packages** in the notebook environment: `swat` (CAS) via
   `cas_session()`, DLPy (`sas-dlpy`) on top of it, `sasctl` via
   `sasctl_session()`, and `sasoptpy`. All use the same Viya token.

@@ -2,7 +2,7 @@
 
 Agreed with the owner; confirm scope and order before starting a round. Details of what was built are in the
 README and the git log; this file keeps what's next.
-Last updated 2026-10-30 (latest release 0.10.1; design round from `studio-design-review.md`; network-break recovery;
+Last updated 2026-10-31 (latest release 0.10.1; design round from `studio-design-review.md`; network-break recovery;
 review polish round on branch `claude/polish`).
 
 ## Released
@@ -202,6 +202,32 @@ review polish round on branch `claude/polish`).
   kernels: in server mode the Notebook stays in the rail with Python in SAS and Text cells only. Ask Claude knows the
   kind (```sas_python blocks). Tests: `test_sas_python.py` (offline, logs recorded on Zeus in
   `tests/data/proc_python_logs.json`), `test_sas_python_viya.py` (`--sas`), `ui/test_pysas_ui.py`.
+- SAS round (branch `claude/sas-round`, 2026-10-31; README → Schema Explorer / SQL Editor / Notebook):
+  - **Load into this session** (CAS): Schema Explorer CAS source and the SQL Editor's CAS tree – `table.loadTable` into
+    the Workspace's CAS session, session scope only (never promoted, same caslib and name, the caslib unchanged), size
+    from `table.fileInfo`, optional WHERE / columns, a second yes for a copy above `SINGLESTORE_MCP_CAS_LOAD_CONFIRM_MB`
+    (100) or of unknown size; **Unload** = `table.dropTable` of the session table (a global table is never dropped or
+    replaced); after a CAS session restart **Load again** for what was loaded (`cas_loads.py`, `vendor/s2-cas-load.js`).
+    Checked on Zeus with CARS: a **SpeedyStore caslib** (CSASDP) keeps the table live (`tableDetails`: TableLocation
+    SINGLESTORE, 0 bytes of CAS memory; a WHERE on the load is ignored, columns apply) – the UI says "Live – queries
+    run in SingleStore"; a **standard connector caslib** (SASDPSTD) copies it (TableLocation CAS, AllocatedMemory
+    130 KB; WHERE / columns apply) – "Copied into CAS memory".
+  - **FedSQL SELECT with a subquery** on a SingleStore library: runs as `select * from (<select>) as _s2q` in the
+    CREATE TABLE (checked on Zeus: FedSQL then sends the whole SELECT, subquery included, as one statement and writes WORK
+    itself; scalar / IN / EXISTS subqueries; the inner ORDER BY is dropped by SingleStore, so a top-level ORDER BY is
+    repeated outside with the output names); the Pushdown tab says so; when the ORDER BY can't be repeated (an
+    expression) the pre-run **Check the query** bar warns with the derived-table join rewrite (`sas_fedsql_check`). A
+    top-level LIMIT already avoids the failure (FedSQL then doesn't push the CREATE TABLE) and is left alone.
+    ODS OUTPUT of a plain FedSQL SELECT (`FEDSQL_Results`) also works but loses the formats; not used.
+  - **Notebook SAS cells in the Workspace's SAS session** (`sas_cell.py`, `notebook_sas_cell`): the SQL Editor's
+    session, queue, pre-warm, Stop and Restart SAS session, so WORK and macro variables are shared with Python in SAS
+    cells and the SQL Editor; quiet preamble (session reset, ODS HTML5 in WORK, inline images), a guard that closes an
+    open quote / step, the cell's own log only, error / warning counts, the S2 library's target named under the output;
+    no local kernel needed (server mode: SAS, Python in SAS and Text cells). Older notebooks (`%%sas` + saved kernel
+    output) open and run unchanged; saspy stays for Python cells that call `sas_session()`; `notebook_run`'s kernel SAS
+    path kept for older callers.
+  - Tests: `test_fedsql_subquery.py`, `test_cas_loads.py`, `test_sas_cell.py` (logs recorded on Zeus in
+    `tests/data/sas_cell_logs.json`), `test_sas_round_viya.py` (`--sas`), `ui/test_sas_round_ui.py`.
 
 ## Backlog
 **Design review – what's left** (`../studio-design-review.md`; IDs from there)
@@ -230,21 +256,19 @@ review polish round on branch `claude/polish`).
   node log files shipped (Fluent Bit) into a table; then an Audit tab with filters. Today: guidance tab only.
 
 **SAS in the Workspace**
-- Python in SAS cells, what's left: they always use the *active* SAS Viya connection (no per-notebook pin like the
-  SQL Editor's tabs); notebook **SAS cells** still run through saspy in the kernel with their own session, so their
-  WORK isn't the Python in SAS cells' (`SAS.submit` is the way to run SAS code in that session) – moving SAS cells to
-  the Workspace session too would also make them work in server mode; a run isn't stopped when its notebook tab is
-  closed; ODS output is capped at 8 MB per cell.
+- SAS and Python in SAS cells, what's left: they always use the *active* SAS Viya connection (no per-notebook pin
+  like the SQL Editor's tabs); S2 is the Workspace's automatic library (the active SingleStore connection's database),
+  not re-pointed to the notebook's database (it's shared with the SQL Editor; a second libref per notebook database
+  could be added); a run isn't stopped when its notebook tab is closed; ODS output is capped at 8 MB per cell; a SAS
+  cell that leaves a `%macro` definition open isn't rescued by the guard (Restart SAS session).
 - Ask Claude in SAS tabs (done, not committed – see "Since 0.10.1"): ideas left – a read-only SAS tool for the
   assistant (columns of any SAS table / caslib, `validate` a PROC SQL statement) so it doesn't depend on the columns
   the editor already knows; the "in the Claude chat" mode only gets the tab's language in the question, not the guide.
-- CAS: no way to load a caslib's source table into the Workspace's CAS session from the editor (FedSQL in CAS only
-  sees loaded tables; a PROC CASUTIL load in plain SAS code runs in Compute's own CAS session). A "Load into this
-  session" tree action (`table.loadTable`, session scope) would let SpeedyStore caslib tables be queried live.
-- FedSQL on a SingleStore library: a SELECT with a subquery in WHERE fails as the editor runs it (`CREATE TABLE
-  WORK."_S2R…" AS …` is pushed down whole → SingleStore "Unknown database 'WORK'"; plain `proc fedsql; create table
-  work.x as …` fails the same way, so it's FedSQL's). The assistant writes a derived-table join instead; the editor
-  could warn before the run, or fetch such a SELECT without the CREATE TABLE (to check with SAS).
+- CAS "Load into this session", what's left: the list of loads lives in the server process (a server restart forgets
+  the "Load again" offer; the CAS session itself also ends then); SpeedyStore caslibs ignore a WHERE on loadTable
+  (the dialog disables it – a WHERE-filtered *view* via `table.view` could do it if wanted); no size check for a load
+  from the standard connector (CAS doesn't say – a `COUNT(*)` through the SingleStore connection could estimate it);
+  Run all / batch FedSQL runs don't get the subquery pre-run check (single runs do; the server rewrites either way).
 - Function matrix: re-run `scripts/sas_functions.py --verify` after a Viya / SAS/ACCESS update; rows for
   DATEPART / TIMEPART / HOUR … need a datetime column in the test tables; SQL_FUNCTIONS=ALL rows are from the engine's
   map, not run (the S2 library is assigned without it).
@@ -389,7 +413,7 @@ in step 1, "Ask Claude" off by default (switchable later with an Anthropic / Fou
   packets mid-query) still waits for the TCP keepalive (~25 s) before it's retried; a SAS job POST on a kept-alive
   connection that went silent the same way waits for its HTTP timeout (60 s) – it's not re-sent. Entra (token) logins
   to SingleStore: a silent token renewal while offline reports "sign in again" until the network is back.
-  SAS cells in notebooks (saspy) have their own sessions and aren't covered.
+  Notebook SAS cells now run in the Workspace's SAS session, so they get the same recovery.
 - Notebook on Windows: calls waiting in C (socket read, lock, long C loop) still can't be interrupted – Restart
   kernel is offered after 5 s.
 - A Compute session can get stuck after some SAS errors (seen once in a test after a failed CAS `promote=`

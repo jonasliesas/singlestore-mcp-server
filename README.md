@@ -614,14 +614,24 @@ to SingleStore (the driver trace shows a plain table read; a GROUP BY with
 `ORDER BY` / `LIMIT` isn't pushed either), so `select * from S2."cars_big" limit 5`
 reads all 20 M rows into SAS and took the test's Compute session down; PROC SQL's
 `(obs=5)` does go down as `LIMIT` – , `DROP TABLE … FORCE`
-instead of `{options replace=true}` (CAS only), and on a SingleStore library no
-subquery in `WHERE` (`x > (select avg(x) …)` / `in (select …)`: FedSQL pushes the
-editor's whole `CREATE TABLE WORK… AS` to SingleStore → *Unknown database
-'WORK'*; a join with a derived table works and is pushed down). FedSQL in CAS: only SELECT /
+instead of `{options replace=true}` (CAS only). On a SingleStore library a SELECT
+with a **subquery** in `WHERE` / `HAVING` (`x > (select avg(x) …)`, `in (select …)`,
+`exists (…)`) fails in plain PROC FEDSQL as `CREATE TABLE … AS`: FedSQL pushes the
+whole statement, CREATE TABLE included, to SingleStore → *Unknown database 'WORK'*.
+The editor runs such a SELECT as a derived table instead – `create table WORK._S2R…
+as select * from (<your select>) as _s2q` – which FedSQL sends to SingleStore whole
+(subquery included, one statement in the driver trace) and writes into WORK itself
+(checked on Zeus for scalar, IN and EXISTS subqueries); a top-level `ORDER BY` is
+repeated outside (SingleStore drops it inside a derived table), and the Pushdown
+tab says so. When the `ORDER BY` can't be repeated (an expression, a column that
+isn't selected) the **Check the query** bar says so before the run, with the
+derived-table join to write instead. A top-level `LIMIT` already keeps FedSQL from
+pushing the CREATE TABLE down, so that runs as written. FedSQL in CAS: only SELECT /
 CREATE TABLE AS / DROP TABLE, no CTEs, `ORDER BY` only with `LIMIT` (the result
 is a CAS table), only tables loaded in CAS (a SingleStore caslib's unloaded source
-table "does not exist"; a session-scope load from plain SAS code lands in another
-CAS session), `create table CASUSER.x {options replace=true} as …`.
+table "does not exist": use **Load into this session** on it in the tree; a
+session-scope load from plain SAS code lands in Compute's own CAS session, not the
+editor's), `create table CASUSER.x {options replace=true} as …`.
 
 Measured with 20 realistic questions per language (`top 10 makes by average
 MSRP`, `join with a WORK table`, `count per month`, `create a table in WORK /
@@ -761,9 +771,9 @@ pushes it only with `SQL_FUNCTIONS=ALL` on the library · ✗ not available ·
   *result →*). Several statements per cell are fine; writes ask first.
 - **Python cells** run on an IPython (Jupyter) kernel with pandas (`pd`),
   matplotlib (inline charts) and `conn` (a SingleStore connection).
-- **SAS cells** run SAS code (DATA steps, PROCs, PROC SQL) on your SAS Viya,
-  with the ODS output and the log (errors and warnings counted, the log opens
-  when there are errors). See *SAS cells* below.
+- **SAS cells** run SAS code (DATA steps, PROCs, PROC SQL) in the
+  Workspace's SAS Compute session, with the ODS output and the log (errors and
+  warnings counted, the log opens when there are errors). See *SAS cells* below.
 - **Python in SAS cells** run Python on the SAS server, as `PROC PYTHON` in
   the Workspace's SAS Compute session. See *Python in SAS cells* below.
 - **Text cells** are Markdown with embedded HTML, as in Jupyter (styled
@@ -827,17 +837,26 @@ pushes it only with `SQL_FUNCTIONS=ALL` on the library · ✗ not available ·
   opens in the browser and shows a code to paste once; after that the sign-in
   renews itself. If you already signed in with the SAS Viya MCP server or the
   SAS Viya CLI, **Test** reuses that sign-in for a connection to the same Viya.
-- SAS cells use the **active** SAS Viya connection. A new kernel picks up the
-  connection that is active when it starts; restart the kernel after **Use**
-  on another one.
-- **+ SAS** adds a SAS cell. The code runs in a SAS Compute session on Viya
-  (one per notebook, started on the first SAS cell, which takes about half a
-  minute; restart the kernel for a fresh one).
-- **SingleStore from SAS**: each session gets the library **S2** on the
-  notebook's SingleStore database (SAS/ACCESS to SingleStore, engine
-  `SSTORE`), so a DATA step can `set s2.mytable;` or write `data s2.newtable;`.
-  The password isn't echoed to the SAS log. This needs a password connection
-  (not JWT / SSO); the libref name can be changed in the settings.
+- **+ SAS** adds a SAS cell (badge *SAS*, chip *SAS Compute · <connection>*).
+  It runs in the Workspace's **SAS Compute session of the active SAS Viya
+  connection** – the same session, queue, background start, **Stop** and
+  **Restart SAS session** as the SQL Editor's SAS runs and the Python in SAS
+  cells. So **WORK tables and macro variables are shared** with them: a DATA step
+  in a SAS cell writes `work.x`, the SQL Editor's PROC SQL and a Python in SAS
+  cell (`SAS.sd2df("work.x")`, `SAS.symget("n")`) read it. No local kernel is
+  needed, so SAS cells also work in server mode. Each run resets syntax check
+  mode, so a cell after a failed one runs normally; an open quote or step at the
+  end of a cell is closed before the next one.
+- **SingleStore from SAS**: the session's **automatic library** (`S2` by
+  default; Connections → SAS Viya) points at the active SingleStore connection's
+  database (SAS/ACCESS to SingleStore, engine `SSTORE`), so a DATA step can
+  `set s2.mytable;` or write `data s2.newtable;`; the line under the cell's output
+  says where S2 points (and when that isn't the notebook's database: S2 is
+  shared with the SQL Editor, so it isn't re-pointed per notebook). The password
+  isn't echoed to the SAS log. This needs a password connection (not JWT / SSO).
+- Notebooks saved before open as they were (`%%sas` cells with their saved
+  output) and run in the Workspace's session from now on. Before, SAS cells ran
+  through saspy in the notebook's kernel with a Compute session of their own.
 - **Let Viya read SingleStore directly.** SAS reads and writes SingleStore
   itself through **S2** (and SAS/ACCESS pushes `WHERE` clauses and PROC SQL
   down to SingleStore); CAS reads it through a SingleStore-backed caslib (SAS
@@ -845,9 +864,10 @@ pushes it only with `SQL_FUNCTIONS=ALL` on the library · ✗ not available ·
   into the notebook's Python and upload it to Viya: that round trip through
   your machine is slow and unnecessary. Claude in the notebook follows the
   same rule.
-- **From Python**: `sas_session()` is the saspy session, `cas_session()` a
-  swat CAS connection (use it with DLPy) and `sasctl_session()` a sasctl
-  session, all signed in with the same Viya sign-in. `sas_to_df` and
+- **From Python**: `sas_session()` is a saspy session (its own Compute
+  session, not the SAS cells' – use a Python in SAS cell to share WORK),
+  `cas_session()` a swat CAS connection (use it with DLPy) and `sasctl_session()`
+  a sasctl session, all signed in with the same Viya sign-in. `sas_to_df` and
   `df_to_sas` exist for small, local results only.
 - Claude in the notebook knows about SAS cells and suggests them in ```sas
   blocks with an **Insert SAS cell** button.
@@ -864,8 +884,8 @@ pushes it only with `SQL_FUNCTIONS=ALL` on the library · ✗ not available ·
   tables are the session's (a table a cell writes with `SAS.df2sd` can be
   queried from the SQL Editor's PROC SQL, and the other way round). The
   notebook's local Python / SQL cells (`df`, `conn`) are a different process:
-  their variables aren't there. SAS cells (saspy) also have a session of their
-  own; to run SAS code in this session use `SAS.submit(…)`.
+  their variables aren't there. SAS cells run in this same session (WORK and
+  macro variables shared); `SAS.submit(…)` runs SAS code from Python.
 - **First call**: the first cell of a session starts Python (~8 s on Zeus,
   plus the SAS session itself when it isn't running yet); the cell says
   *Starting Python in SAS (first call ~8 s)…*. After that cells start at once.
@@ -896,7 +916,7 @@ pushes it only with `SQL_FUNCTIONS=ALL` on the library · ✗ not available ·
   with a message); SAS macro triggers (`&`, `%`) are *not* resolved inside the
   cell; common indentation is removed; a line can be at most 32,000 characters.
 - **Server mode** (SAS SpeedyStore Studio on a server, local kernels off): the
-  Notebook stays available with Python in SAS and Text cells only – each user's
+  Notebook stays available with SAS, Python in SAS and Text cells – each user's
   code runs in their own SAS Compute session, which Viya isolates.
 - Claude in the notebook knows the cell kind and answers with ```sas_python
   blocks (**Insert Python in SAS cell**).
@@ -1116,13 +1136,37 @@ pipeline's batch history and error log.
   run).
 - **Query in SQL Editor** opens the first 100 rows in the SQL Editor, running as
   PROC SQL (libraries) or FedSQL in CAS (caslibs) in that library.
+- **Load into this session…** on a caslib table that isn't loaded (Schema
+  Explorer, CAS source; **Load…** on the row in the SQL Editor's CAS tree):
+  `table.loadTable` into the Workspace's own CAS session of that SAS Viya
+  connection, **session scope only** – never promoted, the output in the same
+  caslib under the same name, the caslib itself unchanged – so FedSQL in CAS can
+  query it. The dialog shows the source's size from `table.fileInfo` where CAS
+  can tell (SpeedyStore and path caslibs say rows and bytes; the standard
+  connector doesn't), an optional `WHERE` and column list, and what the load
+  will do. Checked on Zeus (CARS, `table.tableDetails` after the load):
+  - **SpeedyStore caslibs (SS)**: *Live – queries run in SingleStore*. The table
+    stays in SingleStore (`TableLocation` SINGLESTORE, no blocks, 0 bytes of CAS
+    memory). A `WHERE` on the load is ignored there (all rows stay visible – put
+    it in the query), a column list is applied.
+  - **Standard connector caslibs (S2)** and all others: *Copied into CAS memory*
+    (`TableLocation` CAS, memory ≈ the data size); `WHERE` and columns apply.
+  A copy above `SINGLESTORE_MCP_CAS_LOAD_CONFIRM_MB` (default 100) or of unknown
+  size needs **Load it anyway**. A table loaded globally (promoted by someone) is
+  never reloaded or dropped from here. **Unload** drops this session's table
+  (`table.dropTable`; the source is unchanged). After the CAS session restarted
+  (Restart SAS session, Viya's idle timeout, a network break) the tree offers
+  **Load again** for the tables loaded before.
 - Backend (app-only tools): `sas_sources`, `sas_libraries`, `sas_tables`,
   `sas_columns`, `cas_caslibs`, `cas_tables`, `cas_columns`,
-  `sas_library_code`, `cas_caslib_code`, `sas9_libraries` (each takes an
+  `sas_library_code`, `cas_caslib_code`, `sas9_libraries`, `cas_load_info`,
+  `cas_load_table`, `cas_unload_table`, `cas_session_loads`,
+  `cas_reload_tables` (each takes an
   optional `connection`: a saved SAS Viya connection, default the active one).
   The SQL Editor's runs: `sas_query` / `sas_execute` (background run with
   `run_id`, `wait_ms`, `connection`, `table_rows`), `sas_run_status`,
-  `sas_stop`, `sas_rows` (paging), `sas_session_reset(connection)`.
+  `sas_stop`, `sas_rows` (paging), `sas_session_reset(connection)`,
+  `sas_fedsql_check` (the subquery check before a FedSQL run).
 
 **Schema Explorer: SAS 9 libraries (SAS/CONNECT)**
 
