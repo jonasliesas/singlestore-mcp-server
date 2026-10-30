@@ -62,10 +62,11 @@ spec:
             capabilities:
               drop: ["ALL"]
           resources:
-            # Starting point for ~20 users: ~150-300 MB per running Studio + the hub. Measure in the pilot.
+            # Measured (deploy/README.md, Sizing): hub ~40 MB + ~145 MB per running Studio right after opening;
+            # plan ~200-300 MB per Studio in use. 20 users (STUDIO_MAX_USERS): request 3Gi, limit 8Gi.
             requests:
               cpu: "1"
-              memory: 2Gi
+              memory: 3Gi
             limits:
               cpu: "4"
               memory: 8Gi

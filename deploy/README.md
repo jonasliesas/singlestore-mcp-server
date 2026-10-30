@@ -51,11 +51,47 @@ browser ──TLS──> Ingress ──> hub (:8800) ── /studio/* ──> St
   cookie (no login CSRF); one try per code.
 - CSRF: every POST must carry the hub's own `Origin` (or `Sec-Fetch-Site: same-origin`); the hub's own forms also
   carry a per-session token. Cookies and `Authorization` are never forwarded to a Studio, and a Studio can't set cookies.
+  A link from another site (`Sec-Fetch-Site: cross-site`) opens plain Studio: it can't choose the tool and arguments
+  that the Studio page runs when it opens. The Studio's hub-only routes (`hub/seed`) can't be reached through `/studio/`.
+- Proxy: only a short list of request headers goes to a Studio (no hop-by-hop headers, no websocket upgrade); requests
+  with `Transfer-Encoding` or two `Content-Length` headers are refused and a GET's body is read (no request smuggling
+  behind the ingress); 2 MB body limit; 120 s per read from the browser.
+- Sign-in rate limit: `STUDIO_LOGIN_RATE` sign-in starts / code exchanges per client address and minute (429 after).
+  Behind the ingress the client address is the **last** `X-Forwarded-For` hop (the one the ingress adds).
+- TLS file paths of a user's SingleStore connection (CA, client certificate/key) must be in that user's own folder.
 - Headers: CSP (`frame-ancestors 'none'`, no scripts on hub pages), `X-Frame-Options: DENY`, `nosniff`,
   `Referrer-Policy: same-origin`, HSTS behind HTTPS.
 - **Known limit:** all Studios run as the same OS user in one container. Isolation between users is the app's
   (routing, own folders, own encryption keys), not the OS's. That is acceptable in step 1 because no user code runs
   on the server (notebooks and Ask Claude are off); step 2 (notebooks) needs one pod or OS user per Studio.
+
+### When a Studio crashes or hangs
+
+The hub pings every Studio every 30 s. A Studio that exited on its own, or that misses 3 pings in a row (or a call
+times out after `STUDIO_PROXY_TIMEOUT` and its ping fails too), is dropped and started again at once: the open page
+shows "Reconnecting to your Studio…" and carries on (a call that was running when it crashed says it may or may not
+have finished); a page load shows "Your Studio is restarting", which reloads itself. Tabs, connections and files are
+on disk, so nothing is lost but unsaved work in that process. A Studio that crashes 3 times in 5 minutes isn't
+restarted for a while (the page says so; its `studio.log` says why). The idle stop never stops a Studio with a call
+in flight. Stopping the hub (`SIGTERM`, Ctrl+C) stops all Studios at once within ~10 s.
+
+## Sizing (measured)
+
+Measured 2026-10-30 on Windows 11 / Python 3.12 with real Studio processes against the fake SAS Logon (no cluster):
+each user signed in and opened Studio (Workspace page, opening call, editor state, Connections), 5 s settle time.
+Working set (RSS):
+
+| Users | Hub process | Each Studio | All Studios |
+|---|---|---|---|
+| 1 | ~36 MB | ~145 MB | ~145 MB |
+| 3 | ~36 MB | ~145 MB | ~435 MB |
+| 5 | ~36 MB | ~145 MB | ~730 MB |
+
+The hub stays flat; memory grows ~145 MB per running Studio (on Linux without the Windows venv launcher ~9 MB less).
+These are idle-after-open numbers: query results, the Cluster Monitor sampler (`STUDIO_METRICS`) and long sessions add
+to them, so plan **~200-300 MB per running Studio**. For `STUDIO_MAX_USERS=20`: request 3 GiB, limit 8 GiB (the
+values in `k8s/40-deployment.yaml`); raise the limit before raising `STUDIO_MAX_USERS`. Studios stopped by the idle
+stop take nothing. The admin page shows each Studio's memory. Re-measure in the pilot on the cluster.
 
 ## Run it locally (Windows, this repo)
 
@@ -121,6 +157,8 @@ Claude Code for a later "Ask Claude" switch. Kubernetes manifests: [k8s/](k8s/).
 | `STUDIO_METRICS` | `1` | Cluster Monitor history sampler in each Studio (N users = N samplers; turn off if that's too much) |
 | `STUDIO_TRUST_FORWARDED` | `0` (`1` in the image) | Take the client address for the audit log from `X-Forwarded-For` |
 | `STUDIO_START_TIMEOUT` | `90` | Seconds a Studio may take to start |
+| `STUDIO_PROXY_TIMEOUT` | `600` | Seconds one Studio call may take (keep the ingress's `proxy-read-timeout` the same) |
+| `STUDIO_LOGIN_RATE` | `20` | Sign-in starts / code exchanges per client address and minute |
 
 ## Tests
 
