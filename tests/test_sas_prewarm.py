@@ -105,10 +105,14 @@ def test_prewarm_starts_the_session_once(fake) -> None:
     first = sas_prewarm.prewarm()
     again = sas_prewarm.prewarm()  # the Workspace and a view asked at the same time
     assert first["state"] == again["state"] == "starting" and first["connection"] == "Zeus"
+    # While starting, the status says since when (the views' badge shows "starting… 12 s").
+    started = sas_prewarm.status()["started"]
+    assert abs(time.time() - started) < 30
     c.gate.set()
     st = sas_prewarm.wait()
     assert st["state"] == "ready" and c.created == 1 and k.created == 1
     assert "compute_ms" in st and "ms" in st
+    assert "started" not in sas_prewarm.status()
     # Asked again soon after: nothing to do (no call to Viya, no second session).
     assert sas_prewarm.prewarm()["state"] == "ready"
     assert sas_prewarm.wait()["state"] == "ready" and c.created == 1 and c.auto_checks == 0

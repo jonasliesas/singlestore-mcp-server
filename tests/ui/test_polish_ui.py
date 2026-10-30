@@ -296,3 +296,32 @@ def test_schema_stat_cards_not_cut_off(ui, app_url) -> None:
     assert ":" not in v and re.search(r"\d:\d\d", title), (v, title)
     cut = se.evaluate("[...document.querySelectorAll('.se-stat .v')].filter((x) => x.scrollWidth > x.clientWidth + 1).map((x) => x.textContent)")
     assert not cut, cut
+
+
+# ----------------------------------------------------------------------------- C-3 one SAS session state
+
+_WATCH = """async () => {
+  const seen = [];
+  const w = S2.sasSessionWatch(() => ({ start: false }), (st) => seen.push(S2.sasSessionBadge(st)?.textContent ?? ''));
+  await w.refresh();
+  const before = seen.at(-1);
+  w.busy(true);                      // the view's library list starts the session
+  await new Promise((r) => setTimeout(r, 2300));
+  const during = seen.at(-1);
+  w.busy(false);
+  await new Promise((r) => setTimeout(r, 1500));
+  return [before, during, seen.at(-1)];
+}"""
+
+
+def test_sas_session_badge_one_state(ui, app_url) -> None:
+    """While a view's own call starts the SAS session (listing the libraries), the badge says "starting… N s" (the
+    seconds tick) instead of "starts with the first run" next to the tree's "Starting the SAS session…"."""
+    page, errors = ui
+    sql = _sql_tab(page, app_url)
+    assert sql.evaluate("S2.sasSessionBadge({ state: 'starting', started: Date.now() / 1000 - 12 }).textContent") == "SAS session: starting… 12 s"
+    before, during, after = sql.evaluate(_WATCH)
+    if not before.startswith("SAS session: starts with the first run"):
+        pytest.skip(f"the test server's SAS session isn't idle: {before!r}")
+    assert re.fullmatch(r"SAS session: starting… [12] s", during), during
+    assert after == before, (before, after)

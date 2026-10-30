@@ -116,7 +116,8 @@ function renderSas() {
         h("div", { class: "cx-name" }, c.name,
           c.active ? h("span", { class: "cx-tag on" }, "Active") : null,
           h("span", { class: `cx-tag${c.signed_in ? " on" : ""}`, style: c.signed_in ? {} : { color: "var(--s2-warn)" },
-            title: !c.signed_in && c.foreign_available ? "Test reuses a SAS Viya MCP server / SAS Viya CLI sign-in to this Viya, if there is one" : "" }, who ?? "not signed in"),
+            title: !c.signed_in && c.foreign_available ? "The first SAS call (or Test) reuses a SAS Viya MCP server / SAS Viya CLI sign-in to this Viya, if there is one" : "" },
+            who ?? (c.foreign_available ? "not signed in here yet (can reuse the SAS Viya MCP server's sign-in)" : "not signed in")),
           c.signed_in ? h("span", { class: "cx-tag" }, sasTokenText(c)) : null),
         h("div", { class: "cx-where", title: c.url }, `${c.url} · ${c.compute_context} · CAS ${c.cas_server} · libref ${c.libref}${c.auto_libname === false ? " (not automatic)" : ""}${c.prewarm === false ? " · no pre-start" : ""}${c.startup_code?.trim() ? " · startup code" : ""}${c.sas9_server && c.sas9_signon?.trim() ? ` · SAS 9 ${c.sas9_server}` : ""}`),
         signing ? h("div", { class: "cx-row", style: { marginTop: "6px" } }, signing.input,
@@ -269,6 +270,9 @@ function announceSas(name) {
   S2.updateModelContext(`The active SAS Viya connection is now "${name ?? "(none)"}".`);
 }
 window.addEventListener("s2:sas-connection-changed", () => loadSas());
+// Shown again: the sign-in may have changed meanwhile (C-3: another view's first SAS call reused the SAS Viya MCP
+// server's sign-in while this view still said "not signed in"). sas_connections_state doesn't call Viya.
+window.addEventListener("s2:visible", () => { if (!sas.busy && !sas.signing) loadSas(); });
 
 function where(c) {
   if (c.url) return c.url;

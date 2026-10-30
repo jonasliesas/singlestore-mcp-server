@@ -603,7 +603,8 @@ async function loadSasLibs(src = state.source, force = false) {
   loadViya();
   if (sx.loading[src] || (sx.libs[src] && !force)) return;
   sx.loading[src] = true; sx.error[src] = null;
-  sasSession.refresh();
+  // Listing the libraries starts the SAS session if it isn't running yet: the badge says so too (C-3).
+  if (src === "sas") sasSession.busy(true); else sasSession.refresh();
   render();
   try {
     if (src === "sas9") {
@@ -614,7 +615,7 @@ async function loadSasLibs(src = state.source, force = false) {
     } else sx.libs[src] = src === "cas" ? (await call("cas_caslibs", {})).caslibs : (await call("sas_libraries", { refresh: force })).libraries;
   } catch (e) { sx.error[src] = e; }
   sx.loading[src] = false;
-  sasSession.refresh();
+  if (src === "sas") sasSession.busy(false); else sasSession.refresh();
   render();
 }
 const sasLibMeta = (src, lib) => (sx.libs[src] ?? []).find((l) => l.name === lib) ?? null;

@@ -361,8 +361,9 @@ async function loadSasLibraries(force = false, lang = state.language) {
   loadViya(); loadSasFuncs();
   const cas = lang === "cas";
   if (cas ? (sas.casLoading || (sas.caslibs && !force)) : (sas.libsLoading || (sas.libs && !force))) return;
-  sasSession.refresh();
   if (cas) { sas.casLoading = true; sas.casError = null; } else { sas.libsLoading = true; sas.libsError = null; }
+  // The library list starts the SAS session if it isn't running yet: the header badge says so (C-3).
+  if (!cas) sasSession.busy(true); else sasSession.refresh();
   renderTree(); renderHeader();
   try {
     if (cas) sas.caslibs = (await S2.callTool("cas_caslibs", withConn())).caslibs;
@@ -376,7 +377,7 @@ async function loadSasLibraries(force = false, lang = state.language) {
   } finally {
     if (cas) sas.casLoading = false; else sas.libsLoading = false;
   }
-  sasSession.refresh();
+  if (!cas) sasSession.busy(false); else sasSession.refresh();
   renderTree(); renderHeader(); refreshCompletion();
 }
 function libMeta(lib, lang = state.language) {

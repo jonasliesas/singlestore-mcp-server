@@ -85,7 +85,7 @@ def status(conn: str | None = None) -> dict[str, Any]:
     on, why = enabled(name) if name else (False, None)
     out: dict[str, Any] = {"connection": name, "enabled": on, "compute_session": bool(compute.sid),
                            "cas_session": bool(cas.sid)}
-    for k in ("ms", "compute_ms", "cas_ms", "finished", "checked", "note", "cas_note"):
+    for k in ("ms", "compute_ms", "cas_ms", "finished", "checked", "note", "cas_note", "started"):
         if st.get(k) is not None:
             out[k] = st[k]
     if warming and st.get("state") == "starting":
@@ -96,6 +96,7 @@ def status(conn: str | None = None) -> dict[str, Any]:
     elif compute.sid:
         out["state"] = "ready"
         out.pop("note", None)
+        out.pop("started", None)
         if compute.startup and compute.startup.get("errors"):
             out["startup_errors"] = compute.startup["errors"]
     elif warming:

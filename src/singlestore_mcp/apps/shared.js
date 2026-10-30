@@ -124,7 +124,11 @@ S2.openView = (view, args = {}) => window.parent.postMessage({ type: "s2-open-vi
 window.addEventListener("message", (ev) => {
   if (ev.source !== window.parent || !S2.embedded()) return;
   const msg = ev.data;
-  if (msg?.type === "s2-visibility") embeddedHidden = Boolean(msg.hidden);
+  if (msg?.type === "s2-visibility") {
+    const was = embeddedHidden;
+    embeddedHidden = Boolean(msg.hidden);
+    if (was && !embeddedHidden) window.dispatchEvent(new CustomEvent("s2:visible"));
+  }
   else if (msg?.type === "s2-set-sql") window.dispatchEvent(new CustomEvent("s2:set-sql", { detail: msg }));
   else if (msg?.type === "s2-connection-changed") window.dispatchEvent(new CustomEvent("s2:connection-changed", { detail: msg }));
   else if (msg?.type === "s2-sas-connection-changed") window.dispatchEvent(new CustomEvent("s2:sas-connection-changed", { detail: msg }));
@@ -133,6 +137,9 @@ window.addEventListener("message", (ev) => {
   // The cluster / SAS Viya answer again after a network break (the Workspace's connection-health line).
   else if (msg?.type === "s2-reconnected") window.dispatchEvent(new CustomEvent("s2:reconnected", { detail: msg }));
 });
+
+// "s2:visible": the view is shown again (Workspace view switch, or the browser tab), e.g. to re-read cheap state.
+document.addEventListener("visibilitychange", () => { if (!document.hidden && !embeddedHidden) window.dispatchEvent(new CustomEvent("s2:visible")); });
 
 // A file or folder was renamed or deleted in a file browser: {from, to (null when deleted), folder, version,
 // old_version (a renamed SAS Viya file's new and old version)}, where from / to are what an editor keeps as its
@@ -793,8 +800,11 @@ const SAS_SESSION = {
 };
 S2.sasSessionBadge = function (st) {
   if (!st?.state) return null;
-  const [kind, text] = SAS_SESSION[st.state] ?? ["plain", st.state];
+  let [kind, text] = SAS_SESSION[st.state] ?? ["plain", st.state];
   const secs = (ms) => `${Math.round(ms / 1000)} s`;
+  // Starting: how long it has taken so far (a cold Compute session takes ~20 s), from the server's start time or,
+  // when a view's own call starts the session, from when that call began.
+  if (st.state === "starting" && st.started) text = `starting… ${Math.max(0, Math.round(Date.now() / 1000 - st.started))} s`;
   const title = st.state === "ready"
     ? `The SAS session${st.connection ? ` on ${st.connection}` : ""} is running${st.ms ? ` (started in the background in ${secs(st.ms)})` : ""}`
       + `${st.startup_errors ? `; the startup code had ${st.startup_errors} error(s)` : ""}.`
@@ -802,18 +812,37 @@ S2.sasSessionBadge = function (st) {
     : st.note || (st.state === "idle" || st.state === "off" ? "No SAS session yet: the first SAS run starts one." : "");
   return S2.h("span", { class: `s2-badge ${kind} s2-sas-session`, "data-state": st.state, title }, `SAS session: ${text}`);
 };
+// ``watch.busy(on)``: the view's own call is starting the session (loading the SAS libraries): the badge says
+// "starting…" too, not "starts with the first run" next to the tree's "Starting the SAS session…" (C-3: one state
+// for both). While starting, the badge's seconds tick every second.
 S2.sasSessionWatch = function (getArgs, onChange) {
-  let timer = null, seq = 0;
+  let timer = null, tick = null, seq = 0, busySince = null, server = null;
   const watch = { status: null };
+  const shown = () => {
+    if (busySince && (!server || ["idle", "off", "starting"].includes(server.state)))
+      return { ...(server ?? {}), state: "starting", started: server?.state === "starting" && server.started ? server.started : busySince };
+    return server;
+  };
+  const show = () => {
+    watch.status = shown();
+    onChange(watch.status);
+    clearInterval(tick); tick = null;
+    if (watch.status?.state === "starting") tick = setInterval(() => { if (!S2.isHidden()) onChange(watch.status); }, 1000);
+  };
   watch.refresh = async function () {
     clearTimeout(timer); timer = null;
     const mine = ++seq;
     let st = null;
     try { st = await S2.callTool("sas_prewarm", getArgs()); } catch { st = null; }
     if (mine !== seq) return;
-    watch.status = st;
-    onChange(st);
-    if (st?.state === "starting") timer = setTimeout(() => watch.refresh(), 2500);
+    server = st;
+    show();
+    if (watch.status?.state === "starting") timer = setTimeout(() => watch.refresh(), 2500);
+  };
+  watch.busy = function (on) {
+    busySince = on ? (busySince ?? Date.now() / 1000) : null;
+    show();
+    watch.refresh();
   };
   return watch;
 };
