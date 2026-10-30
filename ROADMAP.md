@@ -226,8 +226,9 @@ in step 1, "Ask Claude" off by default (switchable later with an Anthropic / Fou
   fallback –, one Studio process per user with the user's Viya token pre-loaded, proxy behind `/studio/`, cookies +
   CSRF, idle stop, max users, admin page, audit log, `/healthz`); `deploy/Dockerfile`; `deploy/k8s/` manifests;
   tests with a fake SAS Logon (`test_hub.py`, `test_hub_e2e.py`, `test_server_mode.py`).
-- **Next in step 1:** Jonas signs in against Zeus locally (`scripts/studio-hub-local.ps1`) and with a colleague; the
-  Viya admin registers the client (ADMIN-GUIDE §2); image build + deploy by the K8s admin; measure memory per user.
+- **Next in step 1:** Jonas signs in against Zeus locally (`scripts/studio-hub-local.ps1`, from 2026-11-02) and with a
+  colleague; measure memory per user. **Deploy on Zeus the week of 2026-11-09** with Zeus's admin (away the week of
+  11-02; he controls everything there: OAuth client, groups, Kubernetes, registry) – ADMIN-GUIDE as his checklist.
 - **Step 2 – notebooks** (decided by Jonas 2026-10-30: show the full version from the start, harden later). No pod
   per user: Studio stays in the shared pod (it only runs our code); the **kernels** run behind a **Jupyter Enterprise
   Gateway**, and `notebook_kernel.py` gets a "remote" mode (HTTP/WebSocket, one access key per kernel, so a Studio only
