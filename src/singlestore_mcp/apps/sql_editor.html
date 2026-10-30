@@ -135,6 +135,9 @@
   .sq-msg.note .s2-btn { font-style: normal; margin-left: 6px; }
   .sq-out .s2-table-wrap { border: 0; border-radius: 0; overflow: visible; }
   .sq-placeholder { padding: 18px; color: var(--s2-text-2); font-size: var(--s2-fs-xs); line-height: 1.6; }
+  .sq-examples { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 14px 18px 0; font-size: var(--s2-fs-xs); }
+  .sq-keys summary { cursor: pointer; color: var(--s2-text-2); width: fit-content; }
+  .sq-keys[open] summary { margin-bottom: 4px; }
   .sq-placeholder kbd { font-family: var(--s2-mono); background: var(--s2-bg-2); border: 1px solid var(--s2-border-2); border-radius: 3px; padding: 0 4px; }
   .sq-confirm { margin: 10px; padding: 10px 12px; border-radius: var(--s2-radius-sm); background: var(--s2-warn-bg); color: var(--s2-text); font-size: var(--s2-fs-xs); }
   .sq-confirm strong { color: var(--s2-warn); }
@@ -978,6 +981,7 @@ async function loadSchema(db, force = false) {
   }
   renderTree();
   refreshCompletion();
+  if (db === state.database) refreshEmpty();
 }
 
 function chooseDatabase(db) {
@@ -987,6 +991,11 @@ function chooseDatabase(db) {
   renderTree();
   refreshCompletion();
   scheduleDraftSave();
+  refreshEmpty();
+}
+// The empty results pane's examples follow the database and its tables.
+function refreshEmpty() {
+  if (!state.result && !state.running && !state.error && !state.confirm && !state.batch && !state.hint && !state.langAsk) renderResults();
 }
 
 // SELECT with the columns listed one per line (quoted only when needed).
@@ -1675,6 +1684,50 @@ function toCsv(columns, rows) {
   return [columns.map(cell).join(","), ...rows.map((r) => columns.map((c) => cell(r[c])).join(","))].join("\r\n");
 }
 
+// The empty results pane: a few example queries to click (B-2). They follow the tab's database: the cars table when
+// there is one, the database's tables by rows (TABLE_STATISTICS; TABLE_ROWS isn't filled in SingleStore), and the same
+// cars query in PROC SQL on sashelp.cars when a SAS Viya connection is active. A click puts the SQL in the editor and runs it.
+function exampleQueries() {
+  if (isSas()) return [];
+  const db = state.database;
+  const out = [];
+  const tables = db ? state.schemas.get(db)?.data?.tables ?? [] : [];
+  const cars = tables.find((t) => t.name.toLowerCase() === "cars");
+  const col = (t, n) => t?.columns?.find((c) => c.name.toLowerCase() === n)?.name;
+  if (cars && col(cars, "make") && col(cars, "model") && col(cars, "msrp")) {
+    const [make, model, msrp] = ["make", "model", "msrp"].map((n) => ident(col(cars, n)));
+    out.push({ label: "Top 10 cars by MSRP", sql: `SELECT ${make}, ${model}, ${msrp}\nFROM ${ident(cars.name)}\nORDER BY ${msrp} DESC\nLIMIT 10;` });
+  } else if (tables.length) {
+    const t = tables.find((x) => !x.view) ?? tables[0];
+    out.push({ label: `First 10 rows of ${t.name}`, sql: `SELECT *\nFROM ${ident(t.name)}\nLIMIT 10;` });
+  }
+  if (db) {
+    out.push({ label: `Rows per table in ${db}`,
+      sql: "SELECT TABLE_NAME, IF(MAX(PARTITION_TYPE) = 'Reference', MAX(ROWS), SUM(ROWS)) AS row_count\nFROM information_schema.TABLE_STATISTICS\n"
+        + `WHERE DATABASE_NAME = '${db.replace(/'/g, "''")}'\nGROUP BY TABLE_NAME\nORDER BY row_count DESC\nLIMIT 20;` });
+  }
+  if (S2.connections().viya && !editorText().trim()) {
+    out.push({ label: "Same cars query as PROC SQL", lang: "procsql", title: "Switches this tab to PROC SQL (runs in SAS Compute) and reads sashelp.cars",
+      sql: "select make, model, msrp\nfrom sashelp.cars\nwhere msrp > 90000\norder by msrp desc;" });
+  }
+  return out;
+}
+const editorText = () => { try { return view.state.doc.toString(); } catch { return ""; } };
+function exampleChips() {
+  const ex = exampleQueries();
+  if (!ex.length) return null;
+  return h("div", { class: "sq-examples", role: "group", "aria-label": "Example queries" },
+    h("span", { class: "s2-muted" }, "Try an example:"),
+    ex.map((x) => h("button", { class: "s2-btn sq-example", title: x.title ?? x.sql, "data-lang": x.lang ?? "singlestore",
+      onclick: () => {
+        if (state.running) return;
+        if (x.lang) setLanguage(x.lang, { quiet: true });
+        placeSql(x.sql);
+        view.focus();
+        run();
+      } }, x.label)));
+}
+
 function renderResults() {
   const r = state.result;
   outEl.scrollTop = 0;
@@ -1779,7 +1832,7 @@ function renderResults() {
   }
   if (!r) {
     statusEl.replaceChildren(h("span", { class: "s2-faint" }, "No results yet"));
-    outEl.replaceChildren(h("div", { class: "sq-placeholder" },
+    outEl.replaceChildren(exampleChips() ?? "", h("details", { class: "sq-placeholder sq-keys" }, h("summary", {}, "Keyboard shortcuts"),
       "Press ", h("kbd", {}, "Ctrl"), "+", h("kbd", {}, "Enter"), " (", h("kbd", {}, "⌘"), "+", h("kbd", {}, "Enter"), " on Mac) to run the statement at the cursor, or the selected text; ",
       h("kbd", {}, "Ctrl"), "+", h("kbd", {}, "Shift"), "+", h("kbd", {}, "Enter"), " runs every statement in the editor (Run all). ",
       "Autocomplete suggests keywords, SingleStore functions, databases, tables and columns as you type; ", h("kbd", {}, "Ctrl"), "+", h("kbd", {}, "Space"), " opens it on demand. ",

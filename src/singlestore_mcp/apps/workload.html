@@ -74,6 +74,10 @@
   .wl-ask-opts select { font-size: 11px; padding: 1px 4px; height: auto; width: auto; }
   .wl-claude .count { background: var(--s2-primary); color: var(--s2-on-primary); border-radius: 999px; font-size: 10px; padding: 0 6px; font-weight: 600; margin-left: 4px; }
   .wl-sqlcell { max-width: 420px; font-family: var(--s2-mono, ui-monospace, Consolas, monospace); font-size: 11px; color: var(--s2-text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .wl-empty { padding: 16px 18px; max-width: 760px; }
+  .wl-steps { list-style: none; margin: 0 0 14px; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; }
+  .wl-steps li { display: flex; gap: 8px; align-items: flex-start; font-size: var(--s2-fs-xs); padding: 8px; border: 1px solid var(--s2-border-2); border-radius: var(--s2-radius-sm); background: var(--s2-bg-2); }
+  .wl-step-n { flex: none; width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-weight: 600; background: var(--s2-primary); color: var(--s2-on-primary); }
 </style>
 </head>
 <body>
@@ -335,9 +339,51 @@ function renderSaveBar() {
 const runLabel = () => S2.runContent("s2", S2.connections().s2, state.dirty ? "Save and run" : "Run");
 S2.onConnections(() => renderSaveBar());
 
+// No workload yet (L-4): what a workload is in three steps, "From history" as the main way in, and a sample workload
+// (read-only SELECTs on a CARS table) to try. Nothing is saved until the user clicks Save.
+function emptyState() {
+  const step = (n, title, text) => h("li", {}, h("span", { class: "wl-step-n", "aria-hidden": "true" }, String(n)), h("div", {}, h("strong", {}, title), h("div", { class: "s2-muted" }, text)));
+  return h("section", { class: "s2-card wl-card wl-empty", "aria-label": "No workload yet" },
+    h("h2", {}, "No workload yet"),
+    h("p", { class: "s2-muted", style: { margin: "0 0 10px" } }, "A workload replays a set of SQL statements at set rates, so you can measure the cluster before and after a change."),
+    h("ol", { class: "wl-steps" },
+      step(1, "Define", "Pick the statements and how often each runs – or take the heaviest queries from the query history."),
+      step(2, "Run a baseline", "Run it for a minute and watch latency (p50 / p95) and throughput."),
+      step(3, "Change and compare", "Add a sort key, an index or a new shard key, run again, and compare the two runs.")),
+    h("div", { class: "s2-toolbar" },
+      h("button", { class: "s2-btn primary", title: "A new workload from the heaviest read-only queries of the last 24 hours", onclick: (e) => fromHistory(e.currentTarget) }, "From history"),
+      h("button", { class: "s2-btn", title: "Three read-only SELECTs on the CARS table, to try a run", onclick: (e) => sampleWorkload(e.currentTarget) }, "Try a sample workload"),
+      h("button", { class: "s2-btn ghost", onclick: () => newWorkload() }, "Start empty")));
+}
+async function sampleWorkload(btn) {
+  btn.disabled = true;
+  try {
+    if (!state.databases.length) state.databases = ((await S2.callTool("schema_explorer_databases", {})).databases ?? []).filter((d) => !d.system).map((d) => d.name);
+    const dbs = state.databases;
+    const order = [...dbs.filter((x) => x.toUpperCase() === "SASDP"), ...dbs.filter((x) => x.toUpperCase() !== "SASDP")].slice(0, 3);
+    for (const db of order) {
+      const tables = (await S2.callTool("schema_explorer_tables", { database: db })).tables ?? [];
+      const cars = tables.find((t) => t.name.toLowerCase() === "cars" && t.type === "BASE TABLE");
+      if (!cars) continue;
+      const t = /^[A-Za-z_][A-Za-z0-9_]*$/.test(cars.name) ? cars.name : "`" + cars.name.replace(/`/g, "``") + "`";
+      newWorkload([
+        { ...NEW_STMT(1), name: "Top 10 by MSRP", sql: `SELECT Make, Model, MSRP FROM ${t} ORDER BY MSRP DESC LIMIT 10`, per_minute: 60 },
+        { ...NEW_STMT(2), name: "Cars per make", sql: `SELECT Make, COUNT(*) AS cars, AVG(MSRP) AS avg_msrp FROM ${t} GROUP BY Make ORDER BY cars DESC`, per_minute: 30 },
+        { ...NEW_STMT(3), name: "One make", sql: `SELECT Model, Type, MSRP FROM ${t} WHERE Make = 'Audi' ORDER BY MSRP`, per_minute: 60 },
+      ]);
+      Object.assign(state.draft, { name: "Sample: cars", database: db, description: "Three read-only SELECTs on CARS (sample)" });
+      render();
+      S2.toast(`A sample workload on ${db}.${cars.name}: Save, then Run`, "ok");
+      return;
+    }
+    S2.toast(`No CARS table found${order.length ? ` in ${order.join(", ")}` : ""}: start with From history or Start empty instead`, "err");
+  } catch (e) { S2.toast(e.message, "err"); }
+  finally { btn.disabled = false; }
+}
+
 function definition() {
   const d = state.draft;
-  if (!d) return h("div", { class: "s2-card wl-card" }, h("div", { class: "s2-empty" }, "No workload yet. Click New, or take the heaviest queries From history."));
+  if (!d) return emptyState();
   const running = state.data?.running;
   return h("section", { class: "s2-card wl-card", "aria-label": "Workload definition" },
     h("h2", {}, state.original ? `Workload: ${state.original}` : "New workload", state.dirty ? h("span", { class: "s2-badge warn plain" }, "unsaved") : null),
