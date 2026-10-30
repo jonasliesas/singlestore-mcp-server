@@ -1017,7 +1017,7 @@ function confirmDiscard(then) {
   filePanel.hidden = false;
   filePanel.classList.remove("dialog");
   filePanel.replaceChildren(h("div", { class: "row" }, h("span", { class: "warn" }, `Discard unsaved changes in ${state.file.name ?? "this notebook"}?`),
-    h("button", { class: "s2-btn", onclick: () => { hideFiles(); then(); } }, "Discard"),
+    h("button", { class: "s2-btn danger", onclick: () => { hideFiles(); then(); } }, "Discard"),
     h("button", { class: "s2-btn ghost", onclick: hideFiles }, "Cancel")));
 }
 // Inside the workspace, a notebook opens in a new tab unless this one is still

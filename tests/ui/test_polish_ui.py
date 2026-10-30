@@ -226,3 +226,73 @@ def test_sql_tree_keyboard(ui, app_url) -> None:
     page.keyboard.press("ArrowDown")
     assert wait_js(sql, f"document.activeElement === {row}", 5)
     assert not banners(page), banners(page)
+
+
+# ----------------------------------------------------------------------------- V-2 danger, V-3 Security sizes, L-2 stat cards
+
+_STYLE = "(el) => { const s = getComputedStyle(el); return [s.color, s.borderTopColor, s.fontSize]; }"
+_TOKEN = """(name) => { const d = document.createElement('div'); d.style.color = `var(${name})`; document.body.append(d);
+  const c = getComputedStyle(d).color; d.remove(); return c; }"""
+
+
+def test_one_danger_style(ui, app_url) -> None:
+    """Destructive buttons share one style: red text (--s2-danger) on the neutral border, also where they were ghost
+    buttons (Connections' Delete, Alerts' Clear all)."""
+    page, errors = ui
+    page.goto(app_url("connections_window"), wait_until="domcontentloaded")
+    cx = app_frame(page, 30)
+    assert wait_js(cx, "[...document.querySelectorAll('button')].some((b) => b.textContent === 'Delete')", 30), text(cx)[:400]
+    red, border = cx.evaluate(_TOKEN, "--s2-danger"), cx.evaluate(_TOKEN, "--s2-border")
+    dels = cx.locator("button", has_text=re.compile(r"^Delete$"))
+    for i in range(dels.count()):
+        color, edge, _ = dels.nth(i).evaluate(_STYLE)
+        assert (color, edge) == (red, border), (i, color, edge, red, border)
+    page.goto(app_url("alerts"), wait_until="domcontentloaded")
+    al = app_frame(page, 30)
+    assert wait_js(al, "[...document.querySelectorAll('button')].some((b) => b.textContent === 'Clear all')", 30), text(al)[:400]
+    color, edge, _ = al.locator("button", has_text=re.compile(r"^Clear all$")).evaluate(_STYLE)
+    assert (color, edge) == (al.evaluate(_TOKEN, "--s2-danger"), al.evaluate(_TOKEN, "--s2-border"))
+
+
+def test_security_one_button_size(ui, app_url) -> None:
+    """Security: a user's account buttons are the same size as the buttons under them, the rare settings are under
+    More ▾ (a menu: arrow keys, Escape back to the button); tables have one Change ▾ per row."""
+    page, errors = ui
+    page.goto(app_url("security", {"tab": "users"}), wait_until="domcontentloaded")
+    f = app_frame(page, 30)
+    f.get_by_role("button", name="+ New user").wait_for(timeout=60_000)  # capabilities known: change buttons shown
+    f.locator("tr.row").first.click()
+    acct = f.locator(".sc-btnrow")
+    acct.wait_for(timeout=30_000)
+    sizes = {b.evaluate(_STYLE)[2] for b in acct.locator(":scope > button").all()}
+    below = f.get_by_role("button", name="Grant privileges…").first.evaluate(_STYLE)[2]
+    assert sizes == {below}, (sizes, below)
+    more = acct.get_by_role("button", name="More")
+    more.click()
+    items = f.get_by_role("menuitem")
+    assert items.count() == 2 and "Failed-login lockout…" in items.all_inner_texts()
+    assert f.evaluate("document.activeElement.getAttribute('role')") == "menuitem"
+    page.keyboard.press("ArrowDown")
+    assert re.search(r"TLS", f.evaluate("document.activeElement.textContent"))
+    page.keyboard.press("Escape")
+    assert wait_js(f, "document.querySelector('.s2-menu').hidden && document.activeElement.getAttribute('aria-haspopup') === 'menu'", 5)
+
+    f.get_by_role("tab", name=re.compile(r"^Roles")).click()
+    assert wait_js(f, "document.querySelectorAll('.sc-table tbody tr').length > 0", 40), text(f)[:400]
+    per_row = f.evaluate("[...document.querySelectorAll('.sc-table tbody tr')].filter((r) => r.querySelector('[aria-haspopup=menu]'))"
+                         ".map((r) => r.querySelectorAll(':scope > td > .s2-menu-wrap > button, :scope > td > .sc-acts > button').length)")
+    assert per_row and set(per_row) == {1}, per_row
+    assert not banners(page), banners(page)
+
+
+def test_schema_stat_cards_not_cut_off(ui, app_url) -> None:
+    """Schema Explorer's stat cards: the created date without the time (the time is in the tooltip), no value cut off."""
+    page, errors = ui
+    page.goto(app_url("schema_explorer", {"database": DB, "table": "CARS"}), wait_until="domcontentloaded")
+    se = app_frame(page, 30)
+    assert wait_js(se, "[...document.querySelectorAll('.se-stat .k')].some((k) => k.textContent === 'Created')", 40), text(se)[:400]
+    v, title = se.evaluate("(() => { const s = [...document.querySelectorAll('.se-stat')].find((x) => x.querySelector('.k').textContent === 'Created');"
+                           " return [s.querySelector('.v').textContent, s.title]; })()")
+    assert ":" not in v and re.search(r"\d:\d\d", title), (v, title)
+    cut = se.evaluate("[...document.querySelectorAll('.se-stat .v')].filter((x) => x.scrollWidth > x.clientWidth + 1).map((x) => x.textContent)")
+    assert not cut, cut

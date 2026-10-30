@@ -44,10 +44,11 @@
   .se-head h2 .se-dbpart { color: var(--s2-text-2); font-weight: 400; }
   .se-titlebox { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1 1 260px; }
   .se-badges { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
-  .se-stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 6px; margin-bottom: 8px; }
+  .se-stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 6px; margin-bottom: 8px; }
   .se-stat { background: var(--s2-bg-2); border-radius: var(--s2-radius-sm); padding: 5px 9px; min-width: 0; }
   .se-stat .k { font-size: 11px; color: var(--s2-text-3); text-transform: uppercase; letter-spacing: .04em; }
-  .se-stat .v { font-weight: var(--font-weight-semibold, 600); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* L-2: a long value wraps to a second line instead of being cut off ("too small to matter"). */
+  .se-stat .v { font-weight: var(--font-weight-semibold, 600); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; line-height: 1.3; }
   .se-keys { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; font-size: var(--s2-fs-xs); }
   .se-key { display: flex; gap: 8px; align-items: baseline; }
   .se-key .k { color: var(--s2-text-2); width: 72px; flex: none; }
@@ -1235,7 +1236,8 @@ function renderTableDetail(db, table) {
     isTable && stat("Size", info.size_bytes == null ? "–" : fmt.bytes(info.size_bytes),
       `On disk (compressed columnstore segments): ${info.disk_bytes == null ? "–" : fmt.bytes(info.disk_bytes)}\nIn memory: ${info.memory_bytes == null ? "–" : fmt.bytes(info.memory_bytes)}`),
     stat("Columns", fmt.number(columns.length)),
-    stat("Created", fmt.dateTime(info.created), info.created ?? ""),
+    // The date on the card, the time in the tooltip (L-2: "Sep 30, 2026, 1:…" was cut off).
+    stat("Created", fmt.date(info.created), info.created ? fmt.dateTime(info.created) : ""),
     info.altered && stat("Altered", fmt.relTime(info.altered), fmt.dateTime(info.altered)),
     info.owner && stat("Owner", info.owner));
   const keysEl = isTable && keys ? h("div", { class: "se-keys" },

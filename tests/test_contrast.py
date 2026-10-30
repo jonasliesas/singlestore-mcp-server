@@ -89,3 +89,12 @@ def test_views_use_the_tokens() -> None:
         html = (APPS_DIR / page).read_text(encoding="utf-8")
         for old in ("#c2410c", "#7c3aed", "#0f766e", "#0378cd", "#5b7290", "--s2-accent"):
             assert old not in html, f"{page} still uses {old}"
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_danger_button(theme: str) -> None:
+    """.s2-btn.danger (V-2): red text on the page and on its hover wash (8 % of the red over the page)."""
+    fg = _token("s2-danger")[theme]
+    for bg in BG[theme]:
+        assert ratio(fg, bg) >= 4.5, f"danger {theme}: {fg} on {bg} = {ratio(fg, bg):.2f}"
+        assert ratio(fg, mix(fg, bg, 0.08)) >= 4.5, f"danger hover {theme}: {ratio(fg, mix(fg, bg, 0.08)):.2f}"

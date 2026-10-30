@@ -556,7 +556,7 @@ function render() {
       h("button", { class: "s2-btn", onclick: () => newWorkload() }, "New"),
       h("button", { class: "s2-btn", title: "A new workload from the heaviest read-only queries of the last 24 hours", onclick: (e) => fromHistory(e.currentTarget) }, "From history"),
       state.draft && state.original ? h("button", { class: "s2-btn ghost", title: "Copy this workload", onclick: () => { const d = clone(state.draft); newWorkload(d.statements); Object.assign(state.draft, { ...d, name: `${d.name} copy` }); render(); } }, "Duplicate") : null,
-      state.original ? h("button", { class: "s2-btn ghost danger", onclick: remove }, "Delete") : null,
+      state.original ? h("button", { class: "s2-btn danger", onclick: remove }, "Delete") : null,
       state.data.running && state.data.running.workload !== state.sel ? h("span", { class: "s2-badge info" }, `Running: ${state.data.running.workload}`) : null),
     pendingAddBanner(),
     definition(),

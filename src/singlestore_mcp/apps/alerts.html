@@ -170,7 +170,7 @@ function render() {
           h("span", { class: "s2-spacer" }),
           h("button", { class: "s2-btn", disabled: state.busy || !d.unacknowledged, onclick: () => act("alerts_ack", { all: true }, (r) => `${r.acknowledged} acknowledged`) }, "Acknowledge all"),
           h("button", { class: "s2-btn ghost", disabled: state.busy || !d.total, onclick: () => act("alerts_clear", { acknowledged_only: true }, (r) => `${r.cleared} cleared`) }, "Clear acknowledged"),
-          h("button", { class: "s2-btn ghost danger", disabled: state.busy || !d.total, onclick: confirmClear }, "Clear all")),
+          h("button", { class: "s2-btn danger", disabled: state.busy || !d.total, onclick: confirmClear }, "Clear all")),
         list.length ? h("div", { class: "al-list" }, list.slice(0, 200).map(alertItem))
           : h("div", { class: "s2-empty" }, state.show === "open" ? "No unacknowledged alerts." : state.show === "active" ? "Nothing is active right now." : "No alerts yet.")),
       rulesPanel()));

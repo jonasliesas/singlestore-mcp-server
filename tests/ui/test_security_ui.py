@@ -78,6 +78,7 @@ def test_security_change_preview_confirm(ui: Any, app_url: Any, cluster: McpSess
     # 2. Drop it: needs the typed name; a wrong name keeps Run off.
     row = f.locator("tr", has=f.locator("td.mono", has_text=names["role"])).first
     assert wait_js(f, f"document.body.innerText.includes({names['role']!r})", 30), "the new role isn't listed after refresh"
+    row.get_by_role("button", name="Change").click()  # one "Change ▾" menu per row (V-3)
     row.locator('[data-act="drop_role"]').click()
     _preview(f, f"DROP ROLE '{names['role']}';")
     typed = p.get_by_label("Type the name to confirm")
@@ -127,7 +128,7 @@ def _visible_sql(page: Any, timeout: float = 30) -> Any:
         for fr in page.frames:
             try:
                 if fr.evaluate("document.title") == "SQL Editor" and fr.frame_element().get_attribute("hidden") is None \
-                        and fr.evaluate("document.body.innerText.includes('opens a new tab')"):
+                        and fr.evaluate("(document.querySelector('.sq-keys')?.textContent ?? '').includes('opens a new tab')"):
                     return fr
             except Exception:  # noqa: BLE001 - detached while switching tabs
                 continue
@@ -297,8 +298,9 @@ def test_security_password_lock_tls_and_columns(ui: Any, app_url: Any, cluster: 
         p.get_by_role("button", name="Close").click()
 
         # 3. Require TLS: preview only, then into a script (nothing runs).
-        f.get_by_role("button", name="Require TLS (SSL)…").wait_for(timeout=30_000)
-        f.get_by_role("button", name="Require TLS (SSL)…").click()
+        f.get_by_role("button", name="More").wait_for(timeout=30_000)  # the rarely used settings are under More (V-3)
+        f.get_by_role("button", name="More").click()
+        f.get_by_role("menuitem", name="Require TLS (SSL)…").click()
         _preview(f, f"ALTER USER '{user}'@'%' REQUIRE SSL;")
         assert "error 2455" in p.inner_text()
         p.get_by_role("button", name="Cancel").click()

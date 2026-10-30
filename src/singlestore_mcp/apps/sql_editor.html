@@ -2387,7 +2387,7 @@ function confirmDiscard(then, label = "Discard and open") {
   filePanel.hidden = false;
   filePanel.classList.remove("dialog");
   filePanel.replaceChildren(h("div", { class: "row" }, h("span", { class: "warn" }, `Discard unsaved changes in ${file.name ?? "the editor"}?`),
-    h("button", { class: "s2-btn", onclick: then }, label),
+    h("button", { class: "s2-btn danger", onclick: then }, label),
     h("button", { class: "s2-btn ghost", onclick: hideFilePanel }, "Back")));
 }
 
@@ -2570,7 +2570,7 @@ const histFilter = h("input", { class: "s2-input", type: "search", placeholder: 
 function renderHistory() {
   if (histPanel.hidden) return;
 
-  const clearBtn = h("button", { class: "s2-btn ghost", disabled: !state.historyCount, onclick: async () => {
+  const clearBtn = h("button", { class: "s2-btn danger", disabled: !state.historyCount, onclick: async () => {
     if (!(await S2.confirmInline(clearBtn, `Remove all ${state.historyCount} statements from the history?`, "Clear history"))) return;
     try { await S2.callTool("sql_editor_history_clear", {}); } catch (err) { S2.toast(`Couldn't clear: ${cleanError(err).message}`, "err"); }
     loadHistory();

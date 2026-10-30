@@ -133,7 +133,7 @@ function renderSas() {
         h("button", { class: "s2-btn", disabled: !!sas.busy, title: "Check the sign-in and the compute context (starts no SAS session)", onclick: () => testSas(c.name) }, spin("test", c.name), "Test"),
         c.signed_in ? h("button", { class: "s2-btn ghost", disabled: !!sas.busy, onclick: () => signOutSas(c.name) }, "Sign out") : null,
         h("button", { class: "s2-btn ghost", disabled: !!sas.busy, onclick: () => editSas(c) }, "Edit"),
-        h("button", { class: "s2-btn ghost", disabled: !!sas.busy, title: "Delete this connection and its sign-in", onclick: (e) => removeSas(c, e.currentTarget) }, "Delete"),
+        h("button", { class: "s2-btn danger", disabled: !!sas.busy, title: "Delete this connection and its sign-in", onclick: (e) => removeSas(c, e.currentTarget) }, "Delete"),
       ].filter(Boolean)));
   }) : [h("div", { class: "s2-empty" }, "No SAS Viya connections yet. Add one with + New Viya connection.")]));
   sasFootEl.textContent = `SAS Viya sign-ins (tokens) are stored per connection in: ${d.password_store}. The list itself (no tokens) is in ~/.singlestore-mcp/sas.json.`;
@@ -322,7 +322,7 @@ function render() {
         h("button", { class: "s2-btn", disabled: st.busy, onclick: () => testSaved(c.name) },
           st.busy === `test:${c.name}` ? h("span", { class: "s2-spinner" }) : null, "Test"),
         c.builtin ? null : h("button", { class: "s2-btn ghost", onclick: () => edit(c) }, "Edit"),
-        c.builtin ? null : h("button", { class: "s2-btn ghost", title: "Delete this connection and its saved password", onclick: (e) => remove(c, e.currentTarget) }, "Delete"),
+        c.builtin ? null : h("button", { class: "s2-btn danger", title: "Delete this connection and its saved password", onclick: (e) => remove(c, e.currentTarget) }, "Delete"),
       ].filter(Boolean)));
   }) : [h("div", { class: "s2-empty" }, "No connections yet. Add one with + New connection.")]));
   footEl.replaceChildren(...[

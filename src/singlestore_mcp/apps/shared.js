@@ -386,6 +386,10 @@ S2.fmt = {
     const d = new Date(v);
     return Number.isNaN(d.getTime()) ? null : d;
   },
+  date(v) {
+    const d = S2.fmt.toDate(v);
+    return d ? d.toLocaleDateString(undefined, { dateStyle: "medium" }) : "–";
+  },
   dateTime(v) {
     const d = S2.fmt.toDate(v);
     return d ? d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "–";
@@ -425,6 +429,56 @@ S2.toast = function (message, kind = "") {
   while (host.children.length > 5) host.firstElementChild.remove();
   arm();
   return close;
+};
+
+// A menu button ("Change ▾"): the items (buttons; null / false skipped) open in a small list under it. Up / Down move
+// between them, Escape or a click elsewhere closes it (Escape puts the focus back on the button). Returns null when
+// there are no items. The list is position: fixed, so a table's scroll box doesn't cut it off.
+S2.menuButton = function (label, items, { title, cls = "", align = "right" } = {}) {
+  items = items.flat(Infinity).filter(Boolean);
+  if (!items.length) return null;
+  const menu = S2.h("div", { class: "s2-menu", role: "menu", "aria-label": title ?? label, hidden: true });
+  const btn = S2.h("button", { class: `s2-btn ${cls}`.trim(), "aria-haspopup": "menu", "aria-expanded": "false", title,
+    onclick: (e) => { e.stopPropagation(); menu.hidden ? open() : close(); },
+    onkeydown: (e) => { if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); open(e.key === "ArrowUp" ? -1 : 0); } } }, label, " ▾");
+  for (const it of items) {
+    it.setAttribute("role", "menuitem");
+    it.classList.add("s2-menu-item");
+    it.classList.remove("ghost");
+    it.addEventListener("click", () => close(false));
+    menu.append(it);
+  }
+  const live = () => [...menu.children].filter((x) => !x.disabled);
+  menu.addEventListener("keydown", (e) => {
+    const els = live(), i = els.indexOf(document.activeElement);
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); els[(i + (e.key === "ArrowDown" ? 1 : -1) + els.length) % els.length]?.focus(); }
+    else if (e.key === "Home" || e.key === "End") { e.preventDefault(); els[e.key === "Home" ? 0 : els.length - 1]?.focus(); }
+    else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(true); }
+    else if (e.key === "Tab") close(false);
+  });
+  const outside = (e) => { if (!wrap.contains(e.target)) close(false); };
+  function open(at = 0) {
+    if (!menu.hidden) { live().at(at)?.focus(); return; }
+    menu.hidden = false;
+    btn.setAttribute("aria-expanded", "true");
+    // CSS zoom (presenter mode) scales the rectangle but also the fixed position: undo it once.
+    const zoom = parseFloat(getComputedStyle(document.body).zoom) || 1;
+    const r = btn.getBoundingClientRect(), m = menu.getBoundingClientRect();
+    const below = r.bottom + m.height + 4 <= window.innerHeight || r.top < m.height;
+    menu.style.top = `${(below ? r.bottom + 2 : r.top - m.height - 2) / zoom}px`;
+    menu.style.left = `${Math.max(4, align === "right" ? r.right - m.width : r.left) / zoom}px`;
+    document.addEventListener("pointerdown", outside, true);
+    live().at(at)?.focus();
+  }
+  function close(focusBack) {
+    if (menu.hidden) return;
+    menu.hidden = true;
+    btn.setAttribute("aria-expanded", "false");
+    document.removeEventListener("pointerdown", outside, true);
+    if (focusBack) btn.focus();
+  }
+  const wrap = S2.h("span", { class: "s2-menu-wrap" }, btn, menu);
+  return wrap;
 };
 
 // Inline confirmation (window.confirm is blocked in sandboxed iframes).

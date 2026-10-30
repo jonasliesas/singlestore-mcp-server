@@ -68,6 +68,7 @@
   .sc-auto { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
   /* v2: change panel (preview + confirmation) */
   .sc-acts { display: inline-flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+  .sc-btnrow { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
   .sc-acts .s2-btn, .sc-mini { padding: 0 7px; font-size: 11px; }
   .sc-chg { border: 1px solid var(--s2-info); border-radius: var(--s2-radius-sm, 6px); background: var(--s2-bg); padding: 12px 14px; margin: 4px 0 12px; }
   .sc-chg.danger { border-color: var(--s2-err); }
@@ -416,14 +417,16 @@ function accountBlock(d) {
         : "No failed-login lockout"),
       me && state.cap?.tls != null ? h("span", { class: `s2-small ${state.cap.tls ? "s2-faint" : ""}`, style: state.cap.tls ? null : { color: "var(--s2-warn)" } },
         state.cap.tls ? "· this app's connection uses TLS" : "· this app's connection does NOT use TLS") : null),
-    h("div", { class: "sc-acts", style: { marginTop: "6px" } },
+    // V-3: the account buttons have the same size as the ones below; the rarely used settings are under "More".
+    h("div", { class: "sc-btnrow", style: { marginTop: "6px" } },
       jwt ? null : actBtn(me ? "Change my password…" : "Change password…", { action: "change_password", ...who }),
       isLocked ? actBtn("Unlock…", { action: "unlock_user", ...who }, { cls: "primary" })
         : actBtn("Lock…", { action: "lock_user", ...who }, { cls: "danger" }),
-      actBtn("Failed-login lockout…", { action: "set_login_policy", ...who,
-        failed_login_attempts: d.failed_login_attempts ?? "", password_lock_time: d.password_lock_time ?? "" }),
-      d.require_ssl ? actBtn("Allow non-TLS logins…", { action: "set_require", ...who, require: "NONE" })
-        : actBtn("Require TLS (SSL)…", { action: "set_require", ...who, require: "SSL" })),
+      canChange() ? S2.menuButton("More", [
+        actBtn("Failed-login lockout…", { action: "set_login_policy", ...who,
+          failed_login_attempts: d.failed_login_attempts ?? "", password_lock_time: d.password_lock_time ?? "" }),
+        d.require_ssl ? actBtn("Allow non-TLS logins…", { action: "set_require", ...who, require: "NONE" })
+          : actBtn("Require TLS (SSL)…", { action: "set_require", ...who, require: "SSL" })], { title: "Lockout and TLS settings", align: "left" }) : null),
   ];
 }
 
@@ -488,11 +491,11 @@ function rolesTab() {
         h("td", { class: "wrap" }, g.roles.map((r) => h("span", { class: "sc-tag role" }, r))),
         h("td", { class: "wrap" }, g.roles.flatMap((r) => (roleBy[r]?.privileges ?? []).map((p) =>
           h("div", { class: "sc-privs" }, `${p.object}: ${p.privileges.join(", ")}`)))),
-        canChange() ? h("td", {}, h("span", { class: "sc-acts" },
+        canChange() ? h("td", {}, S2.menuButton("Change", [
           actBtn("Grant role…", { action: "grant_role", group: g.group }),
           g.roles.map((r) => actBtn(`Revoke ${r}…`, { action: "revoke_role", group: g.group, role: r })),
           actBtn("Add user…", { action: "grant_group", group: g.group }),
-          actBtn("Drop…", { action: "drop_group", group: g.group }, { cls: "danger" }))) : null))))) : h("div", { class: "s2-empty" }, "No groups match."),
+          actBtn("Drop…", { action: "drop_group", group: g.group }, { cls: "danger" })], { title: `Change group ${g.group}` })) : null))))) : h("div", { class: "s2-empty" }, "No groups match."),
     h("div", { class: "sc-section" }, h("h2", {}, `Roles (${roles.length})`)),
     h("div", { class: "s2-table-wrap sc-wrap" }, h("table", { class: "s2-table sc-table" },
       h("thead", {}, h("tr", {}, ["Role", "Granted to groups", "Privileges", canChange() ? "Change" : null].filter(Boolean).map((c) => h("th", {}, c)))),
@@ -502,10 +505,10 @@ function rolesTab() {
         h("td", { class: "wrap" }, r.privileges.map((p) => h("div", { class: "sc-privs" }, `${p.object}: ${p.privileges.join(", ")} `,
           canChange() ? actBtn("Revoke…", { action: "revoke", grantee_type: "role", role: r.role, privileges: p.privileges,
             ...levelOf(p.object, p.object === "*.*" ? "global" : p.object.endsWith(".*") ? "database" : "table") }, { cls: "ghost sc-mini" }) : null))),
-        canChange() ? h("td", {}, h("span", { class: "sc-acts" },
+        canChange() ? h("td", {}, S2.menuButton("Change", [
           actBtn("Grant privileges…", { action: "grant", grantee_type: "role", role: r.role, level: "database" }),
           actBtn("Revoke all…", { action: "revoke_all", grantee_type: "role", role: r.role }, { cls: "danger" }),
-          actBtn("Drop…", { action: "drop_role", role: r.role }, { cls: "danger" }))) : null))))),
+          actBtn("Drop…", { action: "drop_role", role: r.role }, { cls: "danger" })], { title: `Change role ${r.role}` })) : null))))),
   ];
 }
 
@@ -614,9 +617,9 @@ function poolsTab() {
           h("td", {}, reported ? spark(d.history ?? [], p.pool) : h("span", { class: "s2-faint s2-small" }, "n/a")),
           h("td", { title: p.default_for.join(", ") }, p.default_for.length ? `${p.default_for.length} user${p.default_for.length === 1 ? "" : "s"}` : h("span", { class: "s2-faint" }, "–")),
           canChange() ? h("td", {}, BUILTIN_POOLS.has(p.pool) ? h("span", { class: "s2-faint s2-small", title: "Built-in pools can't be changed or dropped" }, "built in")
-            : h("span", { class: "sc-acts" }, actBtn("Edit…", { action: "alter_pool", pool: p.pool, settings: {} }),
+            : S2.menuButton("Change", [actBtn("Edit…", { action: "alter_pool", pool: p.pool, settings: {} }),
               actBtn("Grant usage…", { action: "grant_pool", pool: p.pool, grantee_type: "user" }),
-              actBtn("Drop…", { action: "drop_pool", pool: p.pool }, { cls: "danger" }))) : null);
+              actBtn("Drop…", { action: "drop_pool", pool: p.pool }, { cls: "danger" })], { title: `Change resource pool ${p.pool}` })) : null);
       })))),
     h("div", { class: "sc-section" }, h("h2", {}, `Queued now (${d.queue.length})`),
       h("span", { class: "s2-faint s2-small" }, "WORKLOAD_MANAGEMENT_QUEUE. A resource is lacking when required > limit − used (limit and used as of when the query was submitted). Small queries are never queued.")),

@@ -27,7 +27,7 @@ def _visible_sql(page: Any, timeout: float = 30) -> Any:
             try:
                 if f.evaluate("document.title") != "SQL Editor" or f.frame_element().get_attribute("hidden") is not None:
                     continue
-                if f.evaluate("document.body.innerText.includes('opens a new tab')"):
+                if f.evaluate("(document.querySelector('.sq-keys')?.textContent ?? '').includes('opens a new tab')"):
                     return f
             except Exception:  # noqa: BLE001 - detached while switching tabs
                 continue
