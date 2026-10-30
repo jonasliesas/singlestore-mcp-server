@@ -828,6 +828,33 @@ def test_access_rules_without_groups_are_as_before() -> None:
 
     a = decide("alice", Rules(), [])
     assert a.app and a.app_via == "everyone who can sign in" and not a.notebooks
-    assert decide("alice", Rules(notebooks=True), []).notebooks
+    assert not decide("alice", Rules(notebooks=True), []).notebooks  # local notebooks never for "everyone"
+    assert decide("alice", Rules(notebooks=True, allowed_users=("alice",)), []).notebooks
     assert not decide("bob", Rules(allowed_users=("alice",)), []).app
     assert not decide("alice", Rules(users_group=USERS_GROUP), None).app  # check failed: refused
+
+
+def test_admin_page_warns_about_local_notebooks(tmp_path: Path, logon: FakeSasLogon) -> None:
+    hub = make_hub(tmp_path, logon, notebooks=True)
+    try:
+        page = sign_in(hub, logon, "alice").get("/admin")
+        assert "no isolation between users&#x27; kernels" in page.text and "step 2a" in page.text
+        assert "notebooks: local" in page.text
+    finally:
+        hub.close()
+    hub = make_hub(tmp_path / "off", logon)
+    try:
+        assert "no isolation" not in sign_in(hub, logon, "alice").get("/admin").text
+    finally:
+        hub.close()
+
+
+def test_studio_notebooks_is_off_or_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    from singlestore_mcp.hub import config
+
+    for raw, on in (("", False), ("off", False), ("0", False), ("local", True), ("LOCAL", True), ("1", True)):
+        monkeypatch.setenv("STUDIO_NOTEBOOKS", raw)
+        assert config._notebooks_mode() is on, raw
+    monkeypatch.setenv("STUDIO_NOTEBOOKS", "gateway")  # step 2a, not built yet: a clear stop, not a silent off
+    with pytest.raises(SystemExit):
+        config._notebooks_mode()

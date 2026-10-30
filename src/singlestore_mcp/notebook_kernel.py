@@ -105,12 +105,22 @@ def _check_enabled() -> None:
     from . import server_mode
 
     if not server_mode.notebooks_enabled():
-        raise PermissionError(server_mode.NOTEBOOKS_OFF)
+        raise server_mode.FeatureOff(server_mode.NOTEBOOKS_OFF)
+
+
+def _shared_environment() -> bool:
+    """Server mode: the notebook environment is the server's, shared by every user (STUDIO_NOTEBOOK_PYTHON)."""
+    from . import server_mode
+
+    return server_mode.enabled()
 
 
 def setup() -> dict[str, Any]:
     """Create the notebook environment, or add missing packages, in the background (idempotent)."""
     _check_enabled()
+    if _shared_environment() and not kernel_python():
+        raise LookupError("The notebook Python environment isn't installed on this server (the Studio admin sets "
+                          "STUDIO_NOTEBOOK_PYTHON).")
     with _setup_lock:
         if _setup["state"] == "installing" or (kernel_python() and not _missing_packages()):
             return environment_status()
@@ -127,6 +137,11 @@ _REQUIREMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?((
 def install_packages(specs: list[str]) -> dict[str, Any]:
     """Install packages into the notebook environment in the background (progress via environment_status)."""
     _check_enabled()
+    if _shared_environment():
+        from . import server_mode
+
+        raise server_mode.FeatureOff("On this server the notebook environment is shared by every user: packages are "
+                              "installed by the Studio admin (in the image), not from a notebook.")
     specs =[x.strip() for x in specs if x.strip()]
     if not specs:
         raise ValueError("Name at least one package.")
@@ -236,6 +251,8 @@ def _kernel_env(python: Path) -> dict[str, str]:
     for key in [k for k in env if k.startswith("SINGLESTORE_MCP_SAS_")]:
         env.pop(key)
     env.update(sas_viya.kernel_env())
+    if _shared_environment():
+        _server_kernel_env(env, active)
     scripts = python.parent
     env_root = scripts.parent
     env["PATH"] = str(scripts) + os.pathsep + env.get("PATH", "")
@@ -250,6 +267,30 @@ def _kernel_env(python: Path) -> dict[str, str]:
     # (proxies / TLS inspection); plain HTTPS downloads work everywhere.
     env.setdefault("HF_HUB_DISABLE_XET", "1")
     return env
+
+
+# Never into a kernel on the server: the user's code runs there.
+_SERVER_SECRET_ENV = ("SINGLESTORE_MCP_SECRET_KEY", "SINGLESTORE_STUDIO_TOKEN", "ANTHROPIC_API_KEY")
+_SERVER_SECRET_PREFIXES = ("ANTHROPIC_FOUNDRY_", "STUDIO_")
+
+
+def _server_kernel_env(env: dict[str, str], active: Any) -> None:
+    """Server mode (STUDIO_NOTEBOOKS=local): fresh tokens come from this Studio's own token service (the user's own
+    connections only; the secrets file's key stays in the Studio), and nothing of the server's goes in."""
+    from . import kernel_tokens
+
+    for key in [k for k in env if k in _SERVER_SECRET_ENV or k.startswith(_SERVER_SECRET_PREFIXES)]:
+        env.pop(key)
+    env[kernel_tokens.ENV] = kernel_tokens.start()
+    if env.get("SINGLESTORE_MCP_TOKEN_CMD") and active is not None:
+        env["SINGLESTORE_MCP_TOKEN_CMD"] = json.dumps(kernel_tokens.command("s2", active.name))
+    if env.get("SINGLESTORE_MCP_SAS_TOKEN_CMD"):
+        env["SINGLESTORE_MCP_SAS_TOKEN_CMD"] = json.dumps(kernel_tokens.command("sas", env.get("SINGLESTORE_MCP_SAS_CONNECTION", "")))
+
+
+def _kernel_cwd() -> str | None:
+    """Where a kernel starts: on the server the user's own folder (My files); on a laptop as before."""
+    return str(Path.home()) if _shared_environment() else None
 
 
 class _Run:
@@ -274,6 +315,7 @@ class _Kernel:
         self.proc = subprocess.Popen(
             [str(python), str(_BRIDGE)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", creationflags=_NO_WINDOW, env=_kernel_env(python),
+            cwd=_kernel_cwd(),
         )
         self.stderr: list[str] = []
         threading.Thread(target=self._read, daemon=True).start()

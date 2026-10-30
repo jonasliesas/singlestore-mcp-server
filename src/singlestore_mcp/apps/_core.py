@@ -34,13 +34,14 @@ from mcp.server.apps import Apps, ResourceCsp, ResourcePermissions
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
 
+from .. import server_mode
 from ..netguard import Unreachable
 from . import splash
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 
 # Failures the caller can act on: bad arguments, missing objects, SQL errors, a network that's away.
-_EXPECTED_ERRORS = (ValueError, LookupError, s2.Error, Unreachable)
+_EXPECTED_ERRORS = (ValueError, LookupError, s2.Error, Unreachable, server_mode.FeatureOff)
 
 
 def surface_errors(fn: _F) -> _F:

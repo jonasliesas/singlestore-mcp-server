@@ -255,3 +255,62 @@ def test_studio_rechecks_groups_after_a_token_renewal(server: dict[str, Any], ca
         server_mode.set_user(None)
         server_mode.set_notebooks(None)
         logon.close()
+
+
+def test_local_notebook_kernels_get_the_users_tokens_and_folder_only(server: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+                                                                    tmp_path: Path) -> None:
+    """STUDIO_NOTEBOOKS=local: a kernel's token commands ask this Studio's token service (the secrets file's key stays
+    in the Studio), nothing of the server's goes into the kernel, and it starts in the user's own folder."""
+    import subprocess
+    import sys
+
+    from singlestore_mcp import kernel_tokens, notebook_kernel, sas_viya
+
+    monkeypatch.setenv("SINGLESTORE_MCP_SECRET_KEY", "must-not-reach-a-kernel")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-reach-a-kernel")
+    sas_viya.save_connection({"name": "Zeus", "url": "https://zeus.example", "client_id": "vscode"})
+    sas_viya.activate("Zeus")
+    sas_viya._store("Zeus", {"access_token": "fake-access-for-test", "refresh_token": "", "expires_in": 3600},
+                    "vscode", "test", "https://zeus.example")
+    try:
+        server_mode.set_notebooks(True)
+        env = notebook_kernel._kernel_env(Path(sys.executable))
+        assert "SINGLESTORE_MCP_SECRET_KEY" not in env and "ANTHROPIC_API_KEY" not in env
+        assert server["key"].decode() not in json.dumps(env)
+        cmd = json.loads(env["SINGLESTORE_MCP_SAS_TOKEN_CMD"])
+        assert cmd[-3:] == ["singlestore_mcp.kernel_tokens", "sas", "Zeus"]
+        # The command, as a kernel runs it (its own process, the kernel's environment).
+        out = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=60)
+        assert out.returncode == 0 and out.stdout.strip() == "fake-access-for-test"
+        bad = subprocess.run(cmd[:-1] + ["NoSuchConnection"], env=env, capture_output=True, text=True, timeout=60)
+        assert bad.returncode == 1 and bad.stdout == ""
+        # The token service answers only under its secret.
+        base = env[kernel_tokens.ENV]
+        guess = base.rsplit("/", 1)[0] + "/not-the-secret/sas/Zeus"
+        with pytest.raises(urllib.error.HTTPError):
+            urllib.request.build_opener(urllib.request.ProxyHandler({})).open(guess, timeout=10)
+        assert notebook_kernel._kernel_cwd() == str(server["files"])
+        with pytest.raises(PermissionError, match="shared"):
+            notebook_kernel.install_packages(["requests"])
+        monkeypatch.delenv("SINGLESTORE_MCP_NOTEBOOK_PYTHON", raising=False)
+        with pytest.raises(LookupError, match="STUDIO_NOTEBOOK_PYTHON"):
+            notebook_kernel.setup()
+        server_mode.set_notebooks(False)  # STUDIO_NOTEBOOKS=off, or not in the notebook group
+        with pytest.raises(PermissionError):
+            notebook_kernel.start("nb1")
+    finally:
+        server_mode.set_notebooks(None)
+        kernel_tokens.stop()
+
+
+def test_laptop_kernels_are_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    from singlestore_mcp import notebook_kernel
+
+    monkeypatch.delenv("SINGLESTORE_MCP_SERVER_MODE", raising=False)
+    assert notebook_kernel._kernel_cwd() is None and not notebook_kernel._shared_environment()
+    env = notebook_kernel._kernel_env(Path(sys.executable))
+    assert "SINGLESTORE_MCP_KERNEL_TOKENS" not in env
+    if env.get("SINGLESTORE_MCP_SAS_TOKEN_CMD"):
+        assert "singlestore_mcp.sas_viya" in env["SINGLESTORE_MCP_SAS_TOKEN_CMD"]

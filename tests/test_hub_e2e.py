@@ -198,3 +198,73 @@ def test_removed_from_the_sas_group_signs_out_at_the_next_token_renewal(tmp_path
     finally:
         h.close()
         logon.memberships.pop("alice", None)
+
+
+def _notebook_python() -> Path | None:
+    """A notebook environment on this machine (the desktop one), or SINGLESTORE_MCP_NOTEBOOK_PYTHON."""
+    import os
+
+    configured = os.environ.get("SINGLESTORE_MCP_NOTEBOOK_PYTHON")
+    if configured and Path(configured).exists():
+        return Path(configured)
+    env = Path.home() / ".singlestore-mcp" / "notebook-env"
+    exe = env / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    return exe if exe.exists() and (env / ".s2-ready").exists() else None
+
+
+def _run_cell(b: Browser, nb: str, source: str) -> str:
+    run_id = call(b, "notebook_run", {"notebook_id": nb, "cell_type": "python", "source": source})["run_id"]
+    deadline = time.time() + 120
+    while True:
+        res = call(b, "notebook_poll", {"run_id": run_id})
+        if res["done"] or time.time() > deadline:
+            break
+        time.sleep(0.3)
+    assert res["done"] and res["status"] == "ok", res
+    return "".join(o.get("text", "") for o in res["outputs"] if o.get("output_type") == "stream")
+
+
+@pytest.mark.notebook
+def test_local_notebooks_for_the_notebook_group_only(tmp_path_factory: pytest.TempPathFactory, logon: FakeSasLogon) -> None:
+    """STUDIO_NOTEBOOKS=local: a member of SpeedyStoreStudioNotebooks runs cells in a kernel of their own Studio, in
+    their own folder, with their own SAS token; a member of SpeedyStoreStudioUsers only is refused by the tools."""
+    from singlestore_mcp.hub.spawner import rss_bytes
+
+    python = _notebook_python()
+    if python is None:
+        pytest.skip("no notebook environment on this machine (set SINGLESTORE_MCP_NOTEBOOK_PYTHON)")
+    data = tmp_path_factory.mktemp("hubnotebooks")
+    cfg = HubConfig(viya_url=logon.url, data_dir=data, master_key=MASTER, oauth_mode="redirect", client_id="studio-hub",
+                    client_secret=TEST_CLIENT_SECRET, port=0, metrics=False, viya_name="Zeus", notebooks=True,
+                    notebook_python=str(python), users_group="SpeedyStoreStudioUsers",
+                    notebook_group="SpeedyStoreStudioNotebooks")
+    h = Hub(cfg, Audit(data / "hub" / "audit.jsonl", echo=False))
+    port = h.serve(block=False)
+    cfg.public_url = f"http://127.0.0.1:{port}"
+    logon.register_redirect("studio-hub", cfg.redirect_uri)
+    logon.memberships.update(alice=["SpeedyStoreStudioNotebooks"], bob=["SpeedyStoreStudioUsers"])
+    try:
+        alice, bob = sign_in(h, logon, "alice"), sign_in(h, logon, "bob")
+        assert call(alice, "sql_editor", {})["features"]["notebooks"] is True
+        assert call(bob, "sql_editor", {})["features"]["notebooks"] is False
+        before = rss_bytes(h.spawner.get("alice").pid)
+        out = _run_cell(alice, "nb-e2e", "import os, json, subprocess\n"
+                                         "cmd = json.loads(os.environ['SINGLESTORE_MCP_SAS_TOKEN_CMD'])\n"
+                                         "tok = subprocess.run(cmd, capture_output=True, text=True).stdout.strip()\n"
+                                         "print(os.getcwd()); print(tok.startswith('fake-access-'))\n"
+                                         "print('STUDIO_MASTER_KEY' in os.environ, 'SINGLESTORE_MCP_SECRET_KEY' in os.environ)")
+        cwd, own_token, leaked = out.strip().splitlines()
+        assert Path(cwd).resolve() == (data / "users" / "alice" / "files").resolve()
+        assert own_token == "True" and leaked == "False False"
+        time.sleep(3)
+        with_kernel = rss_bytes(h.spawner.get("alice").pid)  # the whole tree: Studio + bridge + kernel
+        assert with_kernel > before + 30 * 1048576
+        print(f"\nmemory: alice's Studio {before / 1048576:.0f} MB, with one idle kernel {with_kernel / 1048576:.0f} MB")
+        r = bob.call("notebook_run", {"notebook_id": "nb-bob", "cell_type": "python", "source": "print(1)"})
+        assert r.status == 200 and r.json().get("isError") and "Notebooks are off" in json.dumps(r.json())
+        page = alice.get("/admin")  # alice isn't an admin here: the warning is checked on the hub's own page below
+        assert page.status == 403
+    finally:
+        h.close()
+        for u in ("alice", "bob"):
+            logon.memberships.pop(u, None)

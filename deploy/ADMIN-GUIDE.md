@@ -149,7 +149,7 @@ Who may use Studio is decided by two **SAS groups** that the Viya admin creates 
 | Group (id) | Members may | Setting |
 |---|---|---|
 | `SpeedyStoreStudioUsers` | use Studio | `STUDIO_USERS_GROUP` |
-| `SpeedyStoreStudioNotebooks` | use notebooks (and so Studio) - once notebooks exist (step 2) and `STUDIO_NOTEBOOKS=1` | `STUDIO_NOTEBOOK_GROUP` |
+| `SpeedyStoreStudioNotebooks` | use notebooks (and so Studio), with `STUDIO_NOTEBOOKS=local` | `STUDIO_NOTEBOOK_GROUP` |
 
 Add the colleagues to the groups **directly** (as members, not through another group): whether the identities
 service's membership list includes nested groups isn't documented publicly and hasn't been checked on Zeus yet.
@@ -181,9 +181,19 @@ group (or list) gave it.
 - **Upgrade:** new image tag in the Deployment; the pod restarts and everyone signs in again (their folders stay).
 - **Remove a user's data:** delete `/data/users/<sas id>/` (e.g. `kubectl exec` into the pod).
 
+## Notebooks: `STUDIO_NOTEBOOKS=local` (test version)
+
+For the first deploy notebooks stay on for Jonas and one colleague: `STUDIO_NOTEBOOKS: "local"` in the ConfigMap and
+both in `SpeedyStoreStudioNotebooks`. Each notebook user's Studio process runs their kernels in the pod, with the
+image's read-only notebook environment (`/opt/notebook-env`), in the user's own folder, with the user's own tokens.
+**Local notebooks: no isolation between users' kernels - test use with a few trusted users only; the kernel gateway (step 2a) replaces this.** The kernels run Python code as the pod's single OS user: one notebook user's code could read other users'
+folders and running kernels' environments. Keep the notebook group to a few trusted people; plan ~210 MB per open
+kernel (README, Sizing). Kernels reach the network like Studio does (the NetworkPolicy's egress applies). Set
+`STUDIO_NOTEBOOKS: "off"` to switch them off for everyone (no image change).
+
 ## Not in step 1
 
-- Notebooks (Python kernels run user code: need one pod / OS user per Studio, egress limits, a PyPI mirror).
+- Isolated notebooks: the kernel gateway (step 2a: one pod / OS user per kernel, egress limits, a PyPI mirror).
 - Ask Claude (needs Claude Code in the image, `STUDIO_ASSISTANT=1` and an Anthropic or Microsoft Foundry API key
   from a Secret; who pays and per-user limits are open).
 - Entra ID / SSO and per-user SingleStore JWT logins.

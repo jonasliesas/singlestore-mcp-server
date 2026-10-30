@@ -4,9 +4,10 @@
     STUDIO_NOTEBOOK_GROUP   members may use notebooks (and so Studio as well)
     STUDIO_ALLOWED_USERS    an extra allow-list of SAS user ids (with no group set: the only list, as before)
 
-Both groups empty: as before (everyone who can sign in, or STUDIO_ALLOWED_USERS; notebooks = STUDIO_NOTEBOOKS).
-Notebooks also need the server-wide switch STUDIO_NOTEBOOKS=1 (off in step 1: no notebook isolation yet), so the
-notebook group narrows who gets them; it never turns them on by itself.
+Both groups empty: everyone who can sign in may use Studio (or only STUDIO_ALLOWED_USERS when that is set).
+Notebooks need the server-wide switch STUDIO_NOTEBOOKS=local and then go only to members of the notebook group - or,
+with no groups set, to the users in STUDIO_ALLOWED_USERS (nobody when that is empty: local notebooks have no
+isolation between users, so they are never on for "everyone").
 
 The groups come from ``/identities/users/@currentUser/memberships`` (paged with ``start``/``limit``; the Viya
 identities service's own collection format: ``items``, ``count``, ``links``), with the user's own access token -
@@ -101,8 +102,10 @@ def decide(user: str, rules: Rules, groups: list[dict[str, str]] | None) -> Acce
     if not rules.needs_groups:
         app = not rules.allowed_users or listed
         via = "STUDIO_ALLOWED_USERS" if rules.allowed_users else "everyone who can sign in"
-        return Access(app=app, app_via=via, notebooks=app and rules.notebooks,
-                      notebooks_via="STUDIO_NOTEBOOKS" if rules.notebooks else "off on this server",
+        nb = app and rules.notebooks and listed
+        nb_via = ("off on this server" if not rules.notebooks else "STUDIO_ALLOWED_USERS" if nb
+                  else "only for STUDIO_ALLOWED_USERS")
+        return Access(app=app, app_via=via, notebooks=nb, notebooks_via=nb_via,
                       reason="" if app else f"{user} isn't allowed to use this Studio. Ask the Studio admin.")
     if groups is None:
         return Access(app=False, app_via="group check failed", notebooks=False, notebooks_via="group check failed",
@@ -122,8 +125,8 @@ def decide(user: str, rules: Rules, groups: list[dict[str, str]] | None) -> Acce
         nb, nb_via = False, "off on this server"
     elif rules.notebook_group:
         nb, nb_via = in_nb, f"group {rules.notebook_group}" if in_nb else f"not in {rules.notebook_group}"
-    else:
-        nb, nb_via = app, "STUDIO_NOTEBOOKS"
+    else:  # groups for the app only: notebooks for the extra list
+        nb, nb_via = listed, "STUDIO_ALLOWED_USERS" if listed else "only for STUDIO_ALLOWED_USERS"
     groups_text = " or ".join(g for g in (rules.users_group, rules.notebook_group) if g)
     return Access(app=app, app_via=app_via, notebooks=app and nb, notebooks_via=nb_via,
                   reason="" if app else f"{user} isn't in the SAS group {groups_text} that may use this Studio. "

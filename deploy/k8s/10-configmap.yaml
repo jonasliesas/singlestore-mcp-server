@@ -23,7 +23,7 @@ data:
   # SAS user ids (as SAS Logon / identities know them), comma-separated.
   STUDIO_ADMINS: "<sas-user-id>"
   # Who may use Studio / notebooks: SAS groups the Viya admin creates in SAS Environment Manager (ADMIN-GUIDE §8).
-  # Empty: every SAS user who can sign in. Notebooks also need STUDIO_NOTEBOOKS=1 (not in step 1).
+  # Empty: every SAS user who can sign in. Notebooks also need STUDIO_NOTEBOOKS=local.
   STUDIO_USERS_GROUP: "SpeedyStoreStudioUsers"
   STUDIO_NOTEBOOK_GROUP: "SpeedyStoreStudioNotebooks"
   # Extra SAS user ids allowed besides the groups' members (comma-separated); without groups: the only list.
@@ -36,8 +36,11 @@ data:
   STUDIO_DEFAULT_S2_HOST: "<singlestore-host-or-service>"
   STUDIO_DEFAULT_S2_PORT: "3306"
   STUDIO_DEFAULT_S2_DATABASE: ""
-  # Step 1 of the pilot: notebooks and Ask Claude off.
-  STUDIO_NOTEBOOKS: "0"
+  # Notebooks: off | local. local = kernels in each notebook user's own Studio process, for members of
+  # SpeedyStoreStudioNotebooks only. Local notebooks: no isolation between users' kernels - test use with a few
+  # trusted users only; the kernel gateway (step 2a) replaces this. On for the first test deploy (Jonas + one colleague).
+  STUDIO_NOTEBOOKS: "local"
+  # Ask Claude: off.
   STUDIO_ASSISTANT: "0"
   STUDIO_METRICS: "1"
   # The Ingress sets X-Forwarded-For; the pod accepts traffic from the ingress controller only (NetworkPolicy).

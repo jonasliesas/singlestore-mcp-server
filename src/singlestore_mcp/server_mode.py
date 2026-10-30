@@ -97,6 +97,10 @@ def user() -> str | None:
     return _state["user"]
 
 
+class FeatureOff(PermissionError):
+    """A feature that is off for this user or server (notebooks, package installs): the app shows the message."""
+
+
 NOTEBOOKS_OFF = "Notebooks are off on this server (SAS SpeedyStore Studio server pilot)."
 ASSISTANT_OFF = "Ask Claude is off on this server (SAS SpeedyStore Studio server pilot)."
 SIGN_IN_OFF = ("This sign-in opens a browser on the machine running Studio, so it isn't available on the server. "

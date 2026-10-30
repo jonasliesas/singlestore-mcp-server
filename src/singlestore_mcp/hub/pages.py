@@ -99,7 +99,7 @@ def _access(r: dict[str, Any]) -> str:
 
 
 def admin(rows: list[dict[str, Any]], sessions: list[dict[str, Any]], events: list[dict[str, Any]], csrf: str,
-          limits: dict[str, Any]) -> str:
+          limits: dict[str, Any], warning: str | None = None) -> str:
     studio_rows = "".join(
         f"<tr><td><code>{escape(r['user'])}</code></td><td>{escape(str(r.get('pid') or ''))}</td><td>{escape(r['state'])}</td>"
         f"<td>{_ago(r.get('started'))}</td><td>{_ago(r.get('last_activity'))}</td><td>{_mb(r.get('rss'))}</td>{_access(r)}"
@@ -114,7 +114,8 @@ def admin(rows: list[dict[str, Any]], sessions: list[dict[str, Any]], events: li
         f"<tr><td>{escape(e.get('ts', ''))}</td><td>{escape(e.get('event', ''))}</td><td><code>{escape(str(e.get('user') or ''))}</code></td>"
         f"<td>{escape(', '.join(f'{k}={v}' for k, v in e.items() if k not in ('ts', 'event', 'user')))}</td></tr>" for e in events)
     lim = ", ".join(f"{k}: {v}" for k, v in limits.items())
-    return page("Admin", f"""<div class="card">{_brand()}<h1>Admin</h1><p>{escape(lim)}</p>
+    warn = f'<p class="err"><strong>{escape(warning[:1].upper() + warning[1:])}.</strong></p>' if warning else ""
+    return page("Admin", f"""<div class="card">{_brand()}<h1>Admin</h1><p>{escape(lim)}</p>{warn}
 <div class="row"><a class="btn ghost" href="/account">Account</a><a class="btn ghost" href="/admin">Refresh</a></div>
 <h2>Studios</h2><table><tr><th>User</th><th>PID</th><th>State</th><th>Started</th><th>Last use</th><th>Memory</th><th>Studio access</th><th>Notebooks</th><th></th></tr>{studio_rows}</table>
 <h2>Signed in</h2><table><tr><th>User</th><th>Name</th><th>Address</th><th>Signed in</th><th>Last request</th><th>Studio access</th><th>Notebooks</th></tr>{session_rows}</table>

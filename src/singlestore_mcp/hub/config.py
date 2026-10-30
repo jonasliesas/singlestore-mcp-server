@@ -67,7 +67,8 @@ class HubConfig:
     users_group: str = ""                 # SAS group whose members may use Studio (empty: no group check)
     notebook_group: str = ""              # SAS group whose members may use notebooks (and Studio)
     trust_forwarded: bool = False        # take the client address from X-Forwarded-For (behind the ingress)
-    notebooks: bool = False
+    notebooks: bool = False               # STUDIO_NOTEBOOKS=local: kernels in each user's Studio process (no isolation)
+    notebook_python: str = ""             # STUDIO_NOTEBOOK_PYTHON: the shared notebook environment's python
     assistant: bool = False
     metrics: bool = True
     default_s2: dict[str, str] = field(default_factory=dict)
@@ -139,6 +140,20 @@ def _master_key(data_dir: Path) -> bytes:
     return path.read_text(encoding="utf-8").strip().encode()
 
 
+NOTEBOOKS_LOCAL_NOTE = ("local notebooks: no isolation between users' kernels - test use with a few trusted users "
+                        "only; the kernel gateway (step 2a) replaces this")
+
+
+def _notebooks_mode() -> bool:
+    """STUDIO_NOTEBOOKS: off (default) | local (each user's Studio runs its kernels itself, as on the desktop)."""
+    raw = _env("STUDIO_NOTEBOOKS").lower()
+    if raw in ("", "off", "0", "false", "no"):
+        return False
+    if raw in ("local", "1", "true", "yes", "on"):
+        return True
+    raise SystemExit("STUDIO_NOTEBOOKS is off or local (kernels in each user's Studio process).")
+
+
 def load() -> HubConfig:
     viya = _env("STUDIO_VIYA_URL").rstrip("/")
     if not viya:
@@ -180,7 +195,8 @@ def load() -> HubConfig:
         users_group=_env("STUDIO_USERS_GROUP"),
         notebook_group=_env("STUDIO_NOTEBOOK_GROUP"),
         trust_forwarded=_flag("STUDIO_TRUST_FORWARDED", False),
-        notebooks=_flag("STUDIO_NOTEBOOKS", False),
+        notebooks=_notebooks_mode(),
+        notebook_python=_env("STUDIO_NOTEBOOK_PYTHON"),
         assistant=_flag("STUDIO_ASSISTANT", False),
         metrics=_flag("STUDIO_METRICS", True),
         default_s2=default_s2,

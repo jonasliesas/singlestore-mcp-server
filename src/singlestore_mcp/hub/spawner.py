@@ -161,18 +161,44 @@ def _win_children(pid: int) -> list[int]:
     return out
 
 
-def rss_bytes(pid: int | None) -> int | None:
-    """Resident memory of a process and (Windows) its direct children, or None."""
+def _linux_children(pid: int) -> list[int]:
+    out: list[int] = []
+    for task in Path(f"/proc/{pid}/task").iterdir():
+        try:
+            out += [int(x) for x in (task / "children").read_text().split()]
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def _children(pid: int) -> list[int]:
+    try:
+        if sys.platform == "win32":
+            return _win_children(pid)
+        if sys.platform.startswith("linux"):
+            return _linux_children(pid)
+    except (OSError, ValueError, AttributeError):
+        pass
+    return []
+
+
+def rss_bytes(pid: int | None, tree: bool = True) -> int | None:
+    """Resident memory of a process and (``tree``) everything it started: on Windows the real interpreter behind a
+    venv's launcher, and a Studio's notebook kernels (bridge + ipykernel). None when the process is gone."""
     if not pid:
         return None
     total = _rss_one(pid)
-    if total is None or sys.platform != "win32":
+    if total is None or not tree:
         return total
-    try:
-        kids = _win_children(pid)
-    except (OSError, ValueError, AttributeError):
-        kids = []
-    return total + sum(_rss_one(k) or 0 for k in kids)
+    seen, todo = {pid}, _children(pid)
+    while todo and len(seen) < 200:
+        child = todo.pop()
+        if child in seen:
+            continue
+        seen.add(child)
+        total += _rss_one(child) or 0
+        todo += _children(child)
+    return total
 
 
 class Spawner:
@@ -219,6 +245,8 @@ class Spawner:
             "SINGLESTORE_MCP_FILE_ROOTS": "",
             "PYTHONUNBUFFERED": "1", "PYTHONDONTWRITEBYTECODE": "1",
         })
+        if self.cfg.notebook_python and self.notebooks_for(user):
+            env["SINGLESTORE_MCP_NOTEBOOK_PYTHON"] = self.cfg.notebook_python  # the shared notebook environment
         if os.environ.get("SINGLESTORE_MCP_SAS_PREWARM"):
             env["SINGLESTORE_MCP_SAS_PREWARM"] = os.environ["SINGLESTORE_MCP_SAS_PREWARM"]
         if self.cfg.assistant:

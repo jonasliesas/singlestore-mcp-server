@@ -42,7 +42,7 @@ from typing import Any
 
 from . import access, oauth, pages
 from .audit import Audit
-from .config import HubConfig
+from .config import NOTEBOOKS_LOCAL_NOTE, HubConfig
 from .sessions import PENDING_TTL_S, RateLimiter, Session, SessionStore
 from .spawner import PUBLIC_BASE, Spawner, Studio, StudioFailed, StudioFull, rss_bytes
 
@@ -434,9 +434,10 @@ def _handler(hub: Hub) -> type[BaseHTTPRequestHandler]:
                      "started": st.started, "last_activity": st.last_activity, "rss": rss_bytes(st.pid)} for st in hub.spawner.running()]
             sess = [{**acc(x.user), "user": x.user, "name": x.name, "ip": x.ip, "created": x.created, "last_seen": x.last_seen} for x in hub.sessions.all()]
             limits = {"users": f"{len(rows)} of {cfg.max_users}", "idle stop": f"{cfg.idle_minutes} min",
-                      "sign-in": cfg.oauth_mode, "notebooks": "on" if cfg.notebooks else "off", "Ask Claude": "on" if cfg.assistant else "off",
+                      "sign-in": cfg.oauth_mode, "notebooks": "local" if cfg.notebooks else "off", "Ask Claude": "on" if cfg.assistant else "off",
                       "users group": cfg.users_group or "none", "notebook group": cfg.notebook_group or "none"}
-            return self._send(200, pages.admin(rows, sess, hub.audit.tail(50), s.csrf, limits))
+            warning = NOTEBOOKS_LOCAL_NOTE if cfg.notebooks else None
+            return self._send(200, pages.admin(rows, sess, hub.audit.tail(50), s.csrf, limits, warning))
 
         def _admin_stop(self) -> None:
             s = self._admin_session()

@@ -31,12 +31,20 @@ browser ──TLS──> Ingress ──> hub (:8800) ── /studio/* ──> St
   folder). An optional default connection (host/port/database, user name = SAS user id, no password) is pre-filled.
 - **Secrets:** no OS keyring on the server. Each user's `secrets.enc` (Fernet) is encrypted with a key derived from
   `STUDIO_MASTER_KEY` and that user's id; the key is handed to the process over stdin and never written to the volume.
-- **Off in step 1:** notebooks (Python kernels) and Ask Claude - hidden in the UI, refused by the server. Browser
+- **Notebooks** (`STUDIO_NOTEBOOKS`): `off` (default) or `local` - the user's own Studio process runs the notebook
+  kernels itself, as on the desktop (no kernel gateway yet), only for users with notebook access (member of
+  `SpeedyStoreStudioNotebooks`, or listed in `STUDIO_ALLOWED_USERS` when no group is set; never "everyone"). The
+  kernels use the shared, read-only notebook environment `STUDIO_NOTEBOOK_PYTHON` (in the image: `/opt/notebook-env`;
+  installing packages from the app is refused), start in the user's own folder (My files), and get the user's own
+  SingleStore / SAS Viya tokens from their Studio (a token service on 127.0.0.1 under a random secret) - never the hub's
+  key, the secrets file's key or anything of other users. The existing limits stay: 8 kernels per Studio, idle kernels
+  stop after 30 min. Interrupt works on Linux (SIGINT). **Local notebooks: no isolation between users' kernels - test use with a few trusted users only; the kernel gateway (step 2a) replaces this.** The admin page says so too.
+- **Off:** Ask Claude - hidden in the UI, refused by the server. Browser
   sign-ins that open a browser on the server (Helios SSO, Entra ID) are refused; use a password or a pasted JWT.
 - **Idle stop:** a Studio with no use (the open pages' 30 s heartbeat doesn't count) for `STUDIO_IDLE_MINUTES` is
   stopped; its page says "Studio stopped" and starts it again on click. Sign-out stops it at once.
 - **Access by SAS group:** members of `STUDIO_USERS_GROUP` (pilot: `SpeedyStoreStudioUsers`) may use Studio, members
-  of `STUDIO_NOTEBOOK_GROUP` (`SpeedyStoreStudioNotebooks`) also notebooks - once `STUDIO_NOTEBOOKS=1` (not in step 1).
+  of `STUDIO_NOTEBOOK_GROUP` (`SpeedyStoreStudioNotebooks`) also notebooks - when `STUDIO_NOTEBOOKS=local`.
   The hub reads the user's groups at sign-in with the user's own token (`/identities/users/@currentUser/memberships`);
   each Studio checks again whenever it renews the Viya token, so leaving the group signs the user out within the token
   lifetime. The notebook flag is per user and enforced by Studio's notebook tools (not only hidden). Identities down:
@@ -71,7 +79,9 @@ browser ──TLS──> Ingress ──> hub (:8800) ── /studio/* ──> St
   `Referrer-Policy: same-origin`, HSTS behind HTTPS.
 - **Known limit:** all Studios run as the same OS user in one container. Isolation between users is the app's
   (routing, own folders, own encryption keys), not the OS's. That is acceptable in step 1 because no user code runs
-  on the server (notebooks and Ask Claude are off); step 2 (notebooks) needs one pod or OS user per Studio.
+  on the server - **except with `STUDIO_NOTEBOOKS=local`**: then the notebook users' Python code runs in the pod as that
+  same OS user and can read other users' folders, kernels' environments (their tokens) and the hub's files. **Local notebooks: no isolation between users' kernels - test use with a few trusted users only; the kernel gateway (step 2a) replaces this.**
+  Step 2a (kernel gateway: one pod / OS user per kernel) removes this.
 
 ### When a Studio crashes or hangs
 
@@ -94,6 +104,10 @@ Working set (RSS):
 | 1 | ~36 MB | ~145 MB | ~145 MB |
 | 3 | ~36 MB | ~145 MB | ~435 MB |
 | 5 | ~36 MB | ~145 MB | ~730 MB |
+
+**Notebook kernels** (`STUDIO_NOTEBOOKS=local`): one idle kernel (bridge + ipykernel with pandas, matplotlib,
+singlestoredb loaded) adds **~210 MB** to its user's Studio (measured: Studio 146 MB, with one kernel 355 MB); data in
+the kernel comes on top. Up to 8 kernels per Studio; idle ones stop after 30 min. The admin page's memory includes them.
 
 The hub stays flat; memory grows ~145 MB per running Studio (on Linux without the Windows venv launcher ~9 MB less).
 These are idle-after-open numbers: query results, the Cluster Monitor sampler (`STUDIO_METRICS`) and long sessions add
@@ -136,7 +150,8 @@ docker run --rm -p 8800:8800 -v studio-data:/data --read-only --tmpfs /tmp \
   -e STUDIO_ADMINS=<sas-user-id> speedystore-studio:pilot
 ```
 
-Python 3.12 slim, the app installed with `uv sync --locked --no-dev` (no notebook environment), uid 10001, read-only
+Python 3.12 slim, the app installed with `uv sync --locked --no-dev`, the notebook environment in `/opt/notebook-env`
+(build arg `INSTALL_NOTEBOOKS=0` leaves it out), `tini` as PID 1 (forwards SIGTERM, reaps orphaned kernels), uid 10001, read-only
 root filesystem (writes only `/data` and `/tmp`), health check on `/healthz`. `--build-arg INSTALL_CLAUDE=1` adds
 Claude Code for a later "Ask Claude" switch. Kubernetes manifests: [k8s/](k8s/).
 
@@ -157,13 +172,15 @@ Claude Code for a later "Ask Claude" switch. Kubernetes manifests: [k8s/](k8s/).
 | `STUDIO_VIYA_COMPUTE_CONTEXT` | SAS Studio compute context | Compute context of the pre-loaded connection |
 | `STUDIO_ADMINS` | none | SAS user ids allowed on `/admin` |
 | `STUDIO_USERS_GROUP` | none | SAS group whose members may use Studio (pilot: `SpeedyStoreStudioUsers`) |
-| `STUDIO_NOTEBOOK_GROUP` | none | SAS group whose members may use notebooks and Studio (pilot: `SpeedyStoreStudioNotebooks`); notebooks also need `STUDIO_NOTEBOOKS=1` |
+| `STUDIO_NOTEBOOK_GROUP` | none | SAS group whose members may use notebooks and Studio (pilot: `SpeedyStoreStudioNotebooks`); notebooks also need `STUDIO_NOTEBOOKS=local` |
 | `STUDIO_ALLOWED_USERS` | everyone who can sign in | SAS user ids allowed to use Studio (with a group set: allowed besides the group's members) |
 | `STUDIO_MAX_USERS` | `20` | Studios running at once (more: "Studio is full") |
 | `STUDIO_IDLE_MINUTES` | `30` | Idle stop |
 | `STUDIO_SESSION_HOURS` | `10` | Sign-in lifetime |
 | `STUDIO_DEFAULT_S2_NAME/HOST/PORT/DATABASE` | none | Pre-filled SingleStore connection (no password) |
-| `STUDIO_NOTEBOOKS` / `STUDIO_ASSISTANT` | `0` / `0` | Step 1: off. Ask Claude also needs Claude Code in the image and `ANTHROPIC_API_KEY` (or `CLAUDE_CODE_USE_FOUNDRY=1` + `ANTHROPIC_FOUNDRY_*`) - passed to Studios only when on |
+| `STUDIO_NOTEBOOKS` | `off` | `off` or `local`: kernels in each notebook user's own Studio process (no isolation between users - a few trusted users only) |
+| `STUDIO_NOTEBOOK_PYTHON` | `/opt/notebook-env/bin/python` in the image | The shared notebook environment's Python (local: your desktop one, `-Notebooks` in the script) |
+| `STUDIO_ASSISTANT` | `0` | Ask Claude also needs Claude Code in the image and `ANTHROPIC_API_KEY` (or `CLAUDE_CODE_USE_FOUNDRY=1` + `ANTHROPIC_FOUNDRY_*`) - passed to Studios only when on |
 | `STUDIO_METRICS` | `1` | Cluster Monitor history sampler in each Studio (N users = N samplers; turn off if that's too much) |
 | `STUDIO_TRUST_FORWARDED` | `0` (`1` in the image) | Take the client address for the audit log from `X-Forwarded-For` |
 | `STUDIO_START_TIMEOUT` | `90` | Seconds a Studio may take to start |

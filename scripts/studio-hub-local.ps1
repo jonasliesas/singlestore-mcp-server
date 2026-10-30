@@ -3,6 +3,12 @@
 #   .\scripts\studio-hub-local.ps1                       # Viya + SingleStore host from your own saved connections
 #   .\scripts\studio-hub-local.ps1 -ViyaUrl https://zeus.example.sas.com -Port 8800
 #   .\scripts\studio-hub-local.ps1 -Check                # only check prerequisites and print the checklist
+#   .\scripts\studio-hub-local.ps1 -Notebooks -NotebookUsers "norjni,<colleague>"   # with local notebooks
+#   .\scripts\studio-hub-local.ps1 -UsersGroup SpeedyStoreStudioUsers -NotebookGroup SpeedyStoreStudioNotebooks
+#
+# -Notebooks: STUDIO_NOTEBOOKS=local with your desktop notebook environment (~\.singlestore-mcp\notebook-env). Without
+# groups only -NotebookUsers (default: -Admins) may then use Studio and notebooks. Local notebooks have no isolation
+# between users' kernels: test use with a few trusted users only (the kernel gateway, step 2a, replaces this).
 #
 # Then open http://127.0.0.1:<port>/ and sign in. Without an own OAuth client in SAS Logon this uses the "paste the
 # code" sign-in with Viya's built-in vscode client. Your password is only typed into SAS Logon.
@@ -14,6 +20,10 @@ param(
     [string]$DataDir = "$HOME\.studio-hub-pilot",
     [string]$Admins = $env:USERNAME,
     [int]$IdleMinutes = 30,
+    [switch]$Notebooks,
+    [string]$NotebookUsers = "",
+    [string]$UsersGroup = "",
+    [string]$NotebookGroup = "",
     [switch]$Check
 )
 $ErrorActionPreference = "Stop"
@@ -72,6 +82,14 @@ else {
     } finally { if ($listener) { $listener.Stop() } }
 }
 
+$nbPython = $null
+if ($Notebooks) {
+    $nbPython = if ($env:STUDIO_NOTEBOOK_PYTHON) { $env:STUDIO_NOTEBOOK_PYTHON } else { Join-Path $home2 "notebook-env\Scripts\python.exe" }
+    if (-not (Test-Path $nbPython)) {
+        Fail "-Notebooks: no notebook environment at $nbPython." "Open a notebook once in your desktop Workspace (it installs the environment), or set STUDIO_NOTEBOOK_PYTHON."
+    }
+}
+
 try { New-Item -ItemType Directory -Force -Path $DataDir | Out-Null } catch { Fail "Can't create the data folder $DataDir." "Give another folder with -DataDir." }
 
 if ($problems.Count) {
@@ -105,6 +123,20 @@ $env:STUDIO_DATA_DIR = $DataDir
 $env:STUDIO_ADMINS = $Admins
 $env:STUDIO_IDLE_MINUTES = "$IdleMinutes"
 if (-not $env:STUDIO_OAUTH_CLIENT_ID) { $env:STUDIO_OAUTH_MODE = "paste" }
+if ($UsersGroup) { $env:STUDIO_USERS_GROUP = $UsersGroup }
+if ($NotebookGroup) { $env:STUDIO_NOTEBOOK_GROUP = $NotebookGroup }
+$nbText = "off"
+if ($Notebooks) {
+    $env:STUDIO_NOTEBOOKS = "local"
+    $env:STUDIO_NOTEBOOK_PYTHON = $nbPython
+    if (-not $NotebookGroup) {
+        if (-not $NotebookUsers) { $NotebookUsers = $Admins }
+        $env:STUDIO_ALLOWED_USERS = $NotebookUsers
+        $nbText = "local, for $NotebookUsers"
+    } else { $nbText = "local, for members of $NotebookGroup" }
+}
+$access = if ($UsersGroup -or $NotebookGroup) { "SAS groups: $(@($UsersGroup, $NotebookGroup) -ne '' -join ', ')" + $(if ($env:STUDIO_ALLOWED_USERS) { " + $($env:STUDIO_ALLOWED_USERS)" } else { "" }) }
+          elseif ($env:STUDIO_ALLOWED_USERS) { "only $($env:STUDIO_ALLOWED_USERS)" } else { "everyone who can sign in to SAS Logon" }
 $flow = if ($env:STUDIO_OAUTH_MODE -eq "paste" -or -not $env:STUDIO_OAUTH_CLIENT_ID) {
     "paste the code - SAS Logon (Viya's built-in 'vscode' client) shows a code after you sign in; paste it into the hub's page"
 } else {
@@ -118,6 +150,9 @@ Write-Host "  Open       $($env:STUDIO_PUBLIC_URL)/   (admin page: $($env:STUDIO
 Write-Host "  Sign-in    $flow"
 Write-Host "  SAS Logon  $ViyaUrl   (your password is typed there only, never into the hub)"
 Write-Host "  Admins     $Admins"
+Write-Host "  Access     $access"
+Write-Host "  Notebooks  $nbText"
+if ($Notebooks) { Write-Host "             local notebooks: no isolation between users' kernels - test use with a few trusted users only" -ForegroundColor Yellow }
 Write-Host "  SingleStore default  $s2"
 Write-Host "  Idle stop  $IdleMinutes min    Secrets key: $key"
 Write-Host "  Logs       hub + audit: this window and $DataDir\hub\audit.jsonl"
