@@ -39,8 +39,11 @@ def workspace(ui, app_url, sas_warm):
               wait_until="domcontentloaded")
     ws = find_frame(page, "SAS SpeedyStore Studio · Workspace", 30)
     sql = find_frame(page, "SQL Editor", 30)
-    assert wait_js(sql, "document.querySelector('.cm-content') && document.body.innerText.includes('Ctrl')", 30)
-    return page, errors, ws, sql
+    assert wait_js(sql, "document.querySelector('.cm-content') && document.querySelector('.sq-tree .sq-row')", 30)
+    tab = sas_warm.ok("sql_editor_tabs")["active"]
+    yield page, errors, ws, sql
+    # Close the SAS tab again: later tests open the active tab and expect SingleStore SQL there.
+    sas_warm.call("sql_editor_tab_close", {"tab_id": tab})
 
 
 def test_sql_editor_run_as_proc_sql(workspace, sas: McpSession) -> None:

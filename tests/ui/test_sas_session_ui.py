@@ -52,7 +52,7 @@ def test_sql_editor_shows_the_sas_session_state(ui, app_url) -> None:
               wait_until="domcontentloaded")
     find_frame(page, "SAS SpeedyStore Studio · Workspace", 30)
     sql = find_frame(page, "SQL Editor", 30)
-    assert wait_js(sql, "document.querySelector('.cm-content') && document.body.innerText.includes('Ctrl')", 30)
+    assert wait_js(sql, "document.querySelector('.cm-content') && document.querySelector('.sq-tree .sq-row')", 30)
     try:
         sql.get_by_label("Run as", exact=True).select_option("procsql")
         assert wait_js(sql, "document.querySelector('.sq-sas-session .s2-sas-session')?.innerText === 'SAS session: starting…'", 10), \

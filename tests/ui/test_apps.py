@@ -44,7 +44,11 @@ def workspace(ui, app_url):
     page, errors = ui
     _open(page, app_url("sql_editor", {"database": DB, "view": "sql"}))
     ws = find_frame(page, "SAS SpeedyStore Studio · Workspace", 30)
-    find_frame(page, "SQL Editor", 30)
+    sql = find_frame(page, "SQL Editor", 30)
+    # The active tab is whatever an earlier test left (SAS UI tests switch theirs to PROC SQL / FedSQL): these
+    # tests run SingleStore SQL.
+    if wait_js(sql, "document.querySelector('.sq-runas')?.value", 30) not in (None, "singlestore"):
+        sql.get_by_label("Run as", exact=True).select_option("singlestore")
     return page, errors, ws
 
 
