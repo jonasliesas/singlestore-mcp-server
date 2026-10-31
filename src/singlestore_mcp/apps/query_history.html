@@ -1618,7 +1618,7 @@ function renderAdvisor() {
         r.new_table ? h("button", { class: "s2-btn ghost", style: { marginTop: "4px" }, title: "Once the copy is built: time the heaviest queries from the history on both tables",
           onclick: () => openCompare(t.table, r.new_table) }, "Compare with new table") : null] : null))
       : h("div", { class: "s2-small s2-faint" }, "No changes suggested for this table."),
-    t.examples.length ? h("details", { class: "qh-more" }, h("summary", {}, "Example queries"),
+    t.examples?.length ? h("details", { class: "qh-more" }, h("summary", {}, "Example queries"),
       t.examples.map((x) => h("div", { style: { margin: "4px 0" } }, h("span", { class: "s2-faint" }, `${x.runs}× · ${secs(x.ms)} `), h("code", { class: "s2-mono" }, x.sql)))) : null));
   fill(advisorEl, head, cmpEl, work,
     d.tables.length ? h("div", { class: "qh-adv-grid" }, cards) : h("div", { class: "s2-empty" }, "No user tables in the analyzed queries."),
@@ -1820,6 +1820,8 @@ await S2.connect({
     reportContext();
     // The tool result carries only the latest queries (it must stay small); load the full list now.
     if (state.data?.partial) refresh();
+    // Likewise the advisor: the tool result has only the most urgent tables; the full result is cached on the server.
+    if (state.advisor.data?.partial && !state.advisor.loading) loadAdvisor(false);
   },
   onToolCancelled() {
     if (!state.data) root.replaceChildren(h("div", { class: "s2-empty" }, "Cancelled."));

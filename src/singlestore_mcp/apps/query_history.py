@@ -1257,8 +1257,21 @@ def query_advisor_report(refresh: bool = False) -> CallToolResult:
     The result includes ``browser_url``: post it as a clickable link right under the app.
     """
     result = query_advisor.advise(refresh=refresh)
-    data = {**_first_slice(collect(), 0), "advisor": result, "tab": "advisor"}
+    data = {**_first_slice(collect(), 0), "advisor": _advisor_slice(result), "tab": "advisor"}
     return tool_result(with_browser_link(query_advisor.summary(result), data, "query_history", {"tab": "advisor"}), data)
+
+
+_ADVISOR_SLICE = 10
+
+
+def _advisor_slice(result: dict[str, Any], keep: int = _ADVISOR_SLICE) -> dict[str, Any]:
+    """The advisor result for the tool result: the first ``keep`` tables (most urgent first) without their example
+    queries, so it stays under Claude's size limit (70 tables were ~130 K characters); ``partial`` tells the app to
+    load the whole (cached) result with query_history_advisor."""
+    tables = result.get("tables") or []
+    if len(tables) <= keep and not any(t.get("examples") for t in tables):
+        return result
+    return {**result, "tables": [{**t, "examples": []} for t in tables[:keep]], "partial": True}
 
 
 # ------------------------------------------------------------------ Claude, in the app

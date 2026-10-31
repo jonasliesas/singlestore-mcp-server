@@ -748,3 +748,16 @@ def test_splash_other_app_and_reduced_motion(browser: Any, app_url) -> None:
         _no_problems(page, errors, "splash (reduced motion)")
     finally:
         ctx.close()
+
+
+def test_query_advisor_report_shows_every_table(ui, app_url, mcp) -> None:
+    """The tool result carries only the most urgent tables (Claude's size limit); the page loads the rest."""
+    page, errors = ui
+    full = mcp.ok("query_history_advisor", {})
+    if len(full.get("tables") or []) <= 10:
+        pytest.skip("the advisor found 10 tables or fewer: nothing is left out of the tool result")
+    _open(page, app_url("query_advisor_report", {}))
+    qh = find_frame(page, "Query History", 30)
+    cards = qh.locator(".qh-adv-table")
+    expect(cards).to_have_count(len(full["tables"]), timeout=60_000)
+    _no_problems(page, errors, "query advisor")
