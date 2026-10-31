@@ -6,6 +6,7 @@ SAS (supported / pushed down as recorded)."""
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from typing import Any
@@ -206,6 +207,21 @@ def test_js_message() -> None:
 VERIFY_SAMPLE = [("UPCASE", "procsql"), ("CATX", "procsql"), ("YEAR", "fedsql"), ("CATX", "fedsql"), ("UPPER", "cas"), ("CATX", "cas")]
 
 
+def _cas_table_in_session(sas: McpSession, sql: str) -> None:
+    """The CAS rows query a SpeedyStore caslib table (CFANS.WORKFORCE_DATA). Nobody keeps it loaded globally on Zeus
+    (since 2026-10-31), so load it into this test's own CAS session - only when it stays live in SingleStore (no CAS
+    memory); otherwise skip rather than copy a table into CAS."""
+    m = re.search(r"\bfrom\s+(\w+)\.(\w+)", sql, re.I)
+    assert m, sql
+    lib, table = m.group(1), m.group(2)
+    info = sas.ok("cas_load_info", {"caslib": lib, "table": table})
+    if info.get("loaded"):
+        return
+    if info.get("mode") != "live":
+        pytest.skip(f"{lib}.{table} isn't loaded in CAS and would be copied into CAS memory to load it")
+    sas.ok("cas_load_table", {"caslib": lib, "table": table}, timeout=600)
+
+
 @pytest.mark.cluster
 @pytest.mark.sas
 @pytest.mark.parametrize("name,dialect", VERIFY_SAMPLE)
@@ -214,6 +230,8 @@ def test_matrix_rows_hold_in_sas(sas: McpSession, name: str, dialect: str) -> No
     want = fn[dialect]
     assert want.get("how") == "verified"
     sql = sas_functions.statement(fn, dialect)
+    if dialect == "cas":
+        _cas_table_in_session(sas, sql)
     r = sas.call("sas_query", {"language": dialect, "sql": sql, "library": "CASUSER" if dialect == "cas" else None,
                                "max_rows": 5, "history": False, "pushdown": True}, timeout=600)
     d = r.data if isinstance(r.data, dict) else {}
