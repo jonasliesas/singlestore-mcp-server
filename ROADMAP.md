@@ -237,6 +237,13 @@ review polish round on branch `claude/polish`).
   browser view) and gateway servers queue 128 (`test_hub.py`).
 
 ## Backlog
+- **Entra login in the server version** (asked 2026-10-31): today Entra / browser-SSO connections are refused in server
+  mode (they sign in on the server's machine). Option 1, no app registration: the device-code flow with the Azure CLI
+  client (Studio shows microsoft.com/devicelogin + a code; refresh token kept encrypted). The SAS tenant accepts
+  starting the flow; the first sign-in try was on a phone and looped (likely Conditional Access: unmanaged device) –
+  **re-test in Edge on the SAS laptop** (`scratchpad devflow_test.py`: sign-in, silent refresh, `current_user()`).
+  If that loops too, device code is blocked: option 2 = the hub signs in with Entra too (app registration by IT,
+  redirect URI `<public url>/entra/callback`). Each colleague still needs a JWT user matching their `upn` exactly.
 **Design review – what's left** (`../studio-design-review.md`; IDs from there)
 - Bigger ideas: a Home / overview start view (1), responsive tables with column priorities (3: L-6 Query text and
   L-7 Security flags off-screen at 1024 px), one design-token layer for font sizes and the remaining hard-coded
