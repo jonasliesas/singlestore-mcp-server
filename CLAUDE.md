@@ -38,7 +38,8 @@ Backlog and agreed designs: [ROADMAP.md](ROADMAP.md). User docs: [README.md](REA
 - Add a test for every bug fixed in a UI app (`tests/ui/test_apps.py`) and every new tool.
 - `perf/perf.py` – timing report; the cluster is ~120 ms+ per round trip, so fewer, pooled and
   parallel queries matter more than anything else. `perf/startup.py` – how fast the Workspace opens
-  (cold and after `restart_server`); run it before and after start-up changes.
+  (cold and after `restart_server`); run it before and after start-up changes. `perf/hub_load.py` – the server
+  pilot's hub under load (simulated users, fake SAS Logon, no cluster); run it after hub / Studio changes.
 
 ## Rules
 - **Cluster is read-only** for Claude except actions the user confirms in the app (e.g. Analyze,

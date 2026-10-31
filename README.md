@@ -2835,6 +2835,12 @@ the previous results file, and p50/p95 changes over 25% are printed as warnings 
 .venv\Scripts\python.exe perf\startup.py         # ~3 min: how fast the Workspace opens, cold and after restart_server
 ```
 
+`perf/hub_load.py` loads the server pilot's hub: N simulated users sign in at once (fake SAS Logon, real Studio
+processes, no cluster), the same calls through the hub and straight to a Studio (what the hub adds), every user
+calling at once at a busy page's pace, a short flat-out burst, one Studio killed under load, and memory. Results go
+to `perf/results/hub-<timestamp>.json`. On Windows, more than ~16 000 connections within two minutes run out of local
+ports (TIME_WAIT; `OSError 10048` in the statuses): that's the test PC, not the hub.
+
 `perf/startup.py` measures the imports, server start → first tool answer → the calls the Workspace and
 its SQL view make on open (time and size of each), `restart_server` → Workspace usable, the Workspace in
 Edge (browser view: page → SQL Editor → schema tree, with every request), and the cluster round trips

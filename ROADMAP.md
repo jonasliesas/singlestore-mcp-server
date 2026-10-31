@@ -229,6 +229,13 @@ review polish round on branch `claude/polish`).
   - Tests: `test_fedsql_subquery.py`, `test_cas_loads.py`, `test_sas_cell.py` (logs recorded on Zeus in
     `tests/data/sas_cell_logs.json`), `test_sas_round_viya.py` (`--sas`), `ui/test_sas_round_ui.py`.
 
+- **Performance check of the weekend branch** (2026-10-31): `perf/perf.py` and `perf/startup.py` on `master` and
+  `claude/weekend` – same within noise (warm latency, concurrency, large results, soak, cold start, restart, browser
+  open); pages ~5% larger (polish, load file). New `perf/hub_load.py` for the hub (numbers in `deploy/README.md`,
+  Sizing). It found the listen backlog: Python's default of 5 made a 6th simultaneous connection wait 0.5 s (Windows) /
+  1 s (Linux) for a TCP retry – p95 530 ms at 5 calls a second for 10 users, now 57 ms. Hub, Studio (also the desktop
+  browser view) and gateway servers queue 128 (`test_hub.py`).
+
 ## Backlog
 **Design review – what's left** (`../studio-design-review.md`; IDs from there)
 - Bigger ideas: a Home / overview start view (1), responsive tables with column priorities (3: L-6 Query text and

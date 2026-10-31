@@ -213,6 +213,23 @@ to them, so plan **~200-300 MB per running Studio**. For `STUDIO_MAX_USERS=20`: 
 values in `k8s/40-deployment.yaml`); raise the limit before raising `STUDIO_MAX_USERS`. Studios stopped by the idle
 stop take nothing. The admin page shows each Studio's memory. Re-measure in the pilot on the cluster.
 
+**Load** (`perf/hub_load.py`, 2026-10-31 on Windows, 12 cores; the last column pinned to 4 cores = the pod's CPU limit;
+tool calls without the cluster, which adds its own ~120 ms+ a round trip):
+
+| | 10 users | 20 users | 20 users, 4 cores |
+|---|---|---|---|
+| all signed in at once → every Studio answers | 5 s | 10 s | 15 s |
+| hub's added time per call / per 1.4 MB page (median) | +5 ms / +11 ms | +6 ms / +17 ms | +3 ms / +6 ms |
+| 5 calls a second per user: median / p95 | 35 / 57 ms | 39 / 77 ms | 53 / 124 ms |
+| flat out (5 s): calls a second, p95 | 450, 39 ms | 745, 37 ms | 555, 51 ms |
+| one Studio killed under load: back after | 3.5 s | 3.9 s | 3.3 s |
+| hub memory / per Studio | 52 / 160 MB | 56 / 159 MB | 64 / 159 MB |
+
+No errors for the other users while one Studio restarts; the restarting user's calls wait for it (slowest ~3.5 s).
+Start-up is CPU-bound (each Studio imports the server): a Monday-morning rush of 20 on 4 cores takes ~15 s.
+Fixed by this test: Python's default listen backlog of 5 made the 6th connection arriving at once wait for a TCP retry
+(0.5 s on Windows, 1 s on Linux): p95 was 530 ms at 5 calls a second; the hub, the Studio and the gateway now queue 128.
+
 ## Run it locally (Windows, this repo)
 
 ```powershell
