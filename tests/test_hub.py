@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import threading
 import time
 import urllib.parse
@@ -861,3 +862,40 @@ def test_studio_notebooks_is_off_local_or_gateway(monkeypatch: pytest.MonkeyPatc
         config._notebooks_mode()
     assert config.HubConfig(viya_url="https://v", notebooks=True).notebooks_mode == "local"  # as before step 2a
     assert config.HubConfig(viya_url="https://v", notebooks_mode="gateway").notebooks
+
+
+# ----------------------------------------------------------------------------- listen backlog
+
+def test_servers_queue_more_than_pythons_five_connections() -> None:
+    """Python's default backlog (5) makes the 6th connection that arrives at once wait for a TCP retry (0.5-1 s)."""
+    from singlestore_mcp.apps.browser_view import _ExclusiveHTTPServer
+    from singlestore_mcp.hub.app import _HubServer
+    from singlestore_mcp.hub.gateway import _Server
+
+    assert min(_HubServer.request_queue_size, _ExclusiveHTTPServer.request_queue_size, _Server.request_queue_size) >= 64
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the 0.5 s SYN retry is Windows' timing")
+def test_many_connections_at_once_reach_the_hub_without_a_retry(hub: Hub) -> None:
+    import http.client
+
+    port = int(hub.cfg.public_url.rsplit(":", 1)[1])
+    go, ms = threading.Event(), []
+
+    def one() -> None:
+        go.wait()
+        t0 = time.perf_counter()
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        conn.request("GET", "/healthz")
+        conn.getresponse().read()
+        conn.close()
+        ms.append((time.perf_counter() - t0) * 1000)
+
+    threads = [threading.Thread(target=one) for _ in range(40)]
+    for t in threads:
+        t.start()
+    time.sleep(0.2)
+    go.set()
+    for t in threads:
+        t.join()
+    assert len(ms) == 40 and max(ms) < 450, sorted(ms)[-5:]

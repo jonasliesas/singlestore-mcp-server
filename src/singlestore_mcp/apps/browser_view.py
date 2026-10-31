@@ -73,6 +73,10 @@ class _ExclusiveHTTPServer(ThreadingHTTPServer):
     answering requests meant for the new one."""
 
     allow_reuse_address = False
+    # Python's default listen backlog is 5: the Workspace opens with ~8 calls at once (more behind the hub, for
+    # several users), and a connection beyond the backlog is retried by the client's TCP after 0.5 s (Windows)
+    # or 1 s (Linux).
+    request_queue_size = 128
 
     def server_bind(self) -> None:
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):

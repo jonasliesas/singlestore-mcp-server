@@ -56,6 +56,13 @@ _FORWARD = ("content-type", "accept", "accept-language", "cache-control", "if-no
 _BACK = ("content-type", "cache-control", "content-disposition", "etag", "last-modified")
 
 
+class _HubServer(ThreadingHTTPServer):
+    daemon_threads = True
+    # Python's default listen backlog is 5: every user's page opens with several calls at once, and a connection
+    # beyond the backlog is retried by the client's TCP only after 1 s (Linux) / 0.5 s (Windows).
+    request_queue_size = 128
+
+
 class Hub:
     def __init__(self, cfg: HubConfig, audit: Audit | None = None) -> None:
         self.cfg = cfg
@@ -87,8 +94,7 @@ class Hub:
     # ------------------------------------------------------------ lifecycle
     def serve(self, block: bool = True) -> int:
         handler = _handler(self)
-        self.httpd = ThreadingHTTPServer((self.cfg.bind, self.cfg.port), handler)
-        self.httpd.daemon_threads = True
+        self.httpd = _HubServer((self.cfg.bind, self.cfg.port), handler)
         if self.broker is not None:
             self.broker.serve()
         self.spawner.start_reaper()

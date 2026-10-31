@@ -365,6 +365,7 @@ class KernelBroker:
 
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
+    request_queue_size = 128  # not Python's 5: a kernel start opens several channels at once (see hub.app._HubServer)
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         """A client that went away (a closed kernel channel, a kernel's token request cut short) is no error."""
