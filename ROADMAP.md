@@ -427,7 +427,7 @@ in step 1, "Ask Claude" off by default (switchable later with an Anthropic / Fou
 
 - **Step 2 – Studio repository** (decided by Jonas 2026-11-02, for the Zeus deploy 2026-11-09; branch
   `claude/repository`): one shared store in SingleStore instead of each Studio's SQLite files.
-  - **Where:** database `speedystore_studio` on the monitored cluster. Written and read only by the service account
+  - **Where:** database `SSSTUDIO` (8 characters, so it also works as a SAS libref; case-sensitive) on the monitored cluster. Written and read only by the service account
     `svc_studio_collector` (PROCESS + SHOW METADATA on `*.*` to collect every user's queries, ALL on the repository;
     password in Windows Credential Manager `speedystore-studio-collector` here, a K8s secret in the pod). No person
     gets PROCESS and users get **no grants on the repository**: their own SingleStore logins can't read it.
