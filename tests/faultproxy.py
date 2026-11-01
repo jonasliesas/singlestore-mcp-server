@@ -17,6 +17,7 @@ Counters: ``accepted`` (connections accepted so far), ``open_count()``.
 
 from __future__ import annotations
 
+import os
 import socket
 import threading
 import time
@@ -62,6 +63,8 @@ class FaultProxy:
         deadline = time.monotonic() + 5
         while True:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            if os.name != "nt":  # Linux: re-listen on the port while its old connections are in TIME_WAIT (on
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # Windows this would share the port)
             try:
                 s.bind((self.host, port))
                 break
@@ -78,6 +81,10 @@ class FaultProxy:
     def _close_listener(self) -> None:
         s, self._listener = self._listener, None
         if s is not None:
+            try:  # Linux: close() alone leaves the port listening while the accept thread waits in accept()
+                s.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass  # Windows: not connected (close() already wakes accept() there)
             try:
                 s.close()
             except OSError:

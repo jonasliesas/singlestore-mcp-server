@@ -39,7 +39,7 @@ import time
 import uuid
 from collections import Counter
 from collections.abc import Callable, Iterator
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 import singlestoredb as s2
@@ -295,7 +295,7 @@ def clean_names(header: list[str]) -> list[str]:
 
 
 def table_name_from(path: str) -> str:
-    stem = Path(path).stem
+    stem = PureWindowsPath(path).stem  # splits on \ and / on every OS (a browser's file name may be either)
     name = re.sub(r"\W+", "_", stem).strip("_").lower()[:60]
     return name or "loaded_file"
 

@@ -70,9 +70,11 @@ class AddressStore(Protocol):
 class _ExclusiveHTTPServer(ThreadingHTTPServer):
     """Owns its port exclusively. Python's default SO_REUSEADDR lets two servers
     bind the same port on Windows, so a stale standalone workspace would keep
-    answering requests meant for the new one."""
+    answering requests meant for the new one. On Linux SO_REUSEADDR only lets a
+    restarted server take its kept port back while old connections are in
+    TIME_WAIT (two listeners still can't share it), so it stays on there."""
 
-    allow_reuse_address = False
+    allow_reuse_address = os.name != "nt"
     # Python's default listen backlog is 5: the Workspace opens with ~8 calls at once (more behind the hub, for
     # several users), and a connection beyond the backlog is retried by the client's TCP after 0.5 s (Windows)
     # or 1 s (Linux).
