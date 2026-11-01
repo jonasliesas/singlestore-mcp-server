@@ -326,9 +326,9 @@ def _indent(sql: str) -> str:
 # On a SingleStore library, PROC FEDSQL pushes ``CREATE TABLE WORK.x AS <select with a subquery>`` down whole –
 # the CREATE TABLE included – and SingleStore answers "Unknown database 'WORK'" (checked on Zeus 2026-10-30 for
 # scalar, IN, EXISTS subqueries in WHERE; ``proc fedsql; create table work.x as …`` fails the same way). The
-# same SELECT as a derived table, ``CREATE TABLE WORK.x AS SELECT * FROM (<select>) AS _s2q``, works: FedSQL
-# sends the whole SELECT (subquery included) to SingleStore as one statement and writes the rows into WORK
-# itself. SingleStore drops an ORDER BY inside a derived table (checked: rows came back unsorted), so a top-level
+# same SELECT as a derived table, ``CREATE TABLE WORK.x AS SELECT * FROM (<select>) AS _s2q``, works and writes
+# the rows into WORK itself; scalar and EXISTS subqueries go to SingleStore whole, IN (select …) runs as a join in
+# SAS with only its WHERE pushed (checked 2026-11-01). SingleStore drops an ORDER BY inside a derived table (checked: rows came back unsorted), so a top-level
 # ORDER BY is repeated outside with the output column names – when it names output columns (or positions); an
 # ORDER BY on expressions can't be repeated, and then the SELECT isn't rewritten (the editor warns before the
 # run). A top-level LIMIT already keeps FedSQL from pushing the CREATE TABLE down (checked), so it isn't touched.
@@ -668,9 +668,13 @@ def _fedsql_verdict(log_text: str, traced: list[dict[str, Any]] | None = None,
                     trace_note: str | None = None) -> dict[str, Any]:
     """The verdict from the FedSQL plan (_method); the SQL text from the driver trace (``traced``) when there is
     one, else a placeholder per pushed subquery."""
-    scans = [x.strip() for x in re.findall(r"SeqScan from ([^\n]+)", log_text)]
-    pushed = [s for s in scans if "{Push Down}" in s]
-    other = [s for s in scans if "{Push Down}" not in s and s.split(".")[0].upper() not in _SAS_LIBS]
+    # "SeqScan with _pushed_ qual from <lib>.<db>.<table>": only that table's WHERE went down; the rest (e.g. an IN
+    # subquery on another table, run as a NestLoop) ran in SAS (checked on Zeus 2026-11-01).
+    scans = [(bool(q), x.strip()) for q, x in re.findall(r"SeqScan (with _pushed_ qual )?from ([^\n]+)", log_text)]
+    pushed = [x for _, x in scans if "{Push Down}" in x]
+    db_scans = [(q, x) for q, x in scans if "{Push Down}" not in x and x.split(".")[0].upper() not in _SAS_LIBS]
+    filtered = [x for q, x in db_scans if q]
+    other = [x for q, x in db_scans if not q]
     if traced:
         sent = traced
         notes = ["SQL text from the SAS/ACCESS driver trace (DRIVER_TRACE=SQL) of the automatic SingleStore library; "
@@ -680,15 +684,20 @@ def _fedsql_verdict(log_text: str, traced: list[dict[str, Any]] | None = None,
                 for i, s in enumerate(pushed)]
         notes = [trace_note or ("From the FedSQL query plan (_method): FedSQL doesn't write the SQL it sends to the SAS "
                                 "log; the driver trace that does is only on the automatic SingleStore library.")]
-    if not pushed and not other:
+    if not pushed and not filtered and not other:
         if traced:
             verdict = "pulled" if all(_is_pass_all(s["sql"]) for s in traced) else "full"
             return {"verdict": verdict, "sent": sent, "notes": notes}
         return {"verdict": "none", "sent": [], "notes": ["No database table in the FedSQL query plan (or nothing ran)."]}
-    if pushed and not other:
+    if pushed and not filtered and not other:
         verdict = "full"
-    elif pushed:
+    elif pushed or filtered:
         verdict = "partly"
+        if filtered:
+            notes.append("Only the WHERE went down for " + ", ".join(filtered)
+                         + "; the rest (an IN subquery's match, a join) ran in SAS.")
+        if other:
+            notes.append("Read in full into SAS: " + ", ".join(other))
     else:
         verdict = "pulled"
         notes.append("Each table was read into SAS: " + ", ".join(other))

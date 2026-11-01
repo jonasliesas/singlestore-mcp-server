@@ -1160,13 +1160,13 @@ function reshardResult(db, x) {
   return h("div", { class: "sk" }, stats,
     h("div", { class: `sk-notes ${x.level}` }, x.notes.map((n) => h("p", {}, n)),
       h("div", { class: "row" }, h("button", { class: "s2-btn", title: x.sql, onclick: () => checkInEditor(db, x.sql) }, "Query in SQL Editor"),
-        h("button", { class: "s2-btn", title: "Write a SQL script that copies the table into a new table with this shard key and swaps the names, for a DBA to review and run (nothing runs here)",
-          onclick: () => loadReshardScript(db, x.table) }, "Copy to a new table with this shard key…"))),
+        h("button", { class: "s2-btn", title: "Builds a script that copies the table to a new one with this shard key, then swaps the names. Studio doesn't run it: a DBA reviews and runs it.",
+          onclick: () => loadReshardScript(db, x.table) }, "Change shard key…"))),
     table,
     reshardScriptBox(db, x.table));
 }
 
-// "Copy to a new table with this shard key…": a SQL script (CREATE TABLE <t>__reshard from SHOW CREATE TABLE with only
+// "Change shard key…": a SQL script (CREATE TABLE <t>__reshard from SHOW CREATE TABLE with only
 // the SHARD KEY changed, INSERT … SELECT, checks, rename swap, commented-out DROP), never run here. The same Copy SQL /
 // Open in SQL Editor / Save as .sql… as the Security view's script basket (shared.js).
 async function loadReshardScript(db, table) {
@@ -1197,7 +1197,7 @@ async function reshardScriptAction(db, table, what) {
 function reshardScriptBox(db, table) {
   const sc = reshardState(db, table).script;
   if (!sc) return null;
-  const head = h("div", { class: "row" }, h("h3", {}, "Copy to a new table with this shard key"), h("span", { class: "s2-spacer" }),
+  const head = h("div", { class: "row" }, h("h3", {}, "Change shard key: script"), h("span", { class: "s2-spacer" }),
     h("button", { class: "s2-btn ghost", title: "Close the script", "aria-label": "Close the reshard script",
       onclick: () => { reshardState(db, table).script = null; renderRight(); } }, "✕"));
   if (sc.status === "loading") return h("div", { class: "sk-script" }, head, h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Reading SHOW CREATE TABLE, pipelines, views and grants…"));

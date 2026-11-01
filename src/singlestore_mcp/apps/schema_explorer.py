@@ -871,7 +871,7 @@ def schema_explorer_reshard(database: str, table: str, columns: list[str], sampl
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=_READ_ONLY)
 def schema_explorer_reshard_script(database: str, table: str, columns: list[str], simulation: dict | None = None) -> CallToolResult:
-    """"Copy to a new table with this shard key": a SQL script for a DBA (nothing runs). CREATE TABLE <t>__reshard
+    """"Change shard key…": a SQL script for a DBA (nothing runs). CREATE TABLE <t>__reshard
     from the real SHOW CREATE TABLE with only the SHARD KEY replaced, INSERT … SELECT, a row-count and skew check, the
     rename swap and a commented-out DROP of the old table, with warnings filled in for this table (size, pipelines,
     views, grants, duration). Read-only (logic and docs in ``..reshard``).

@@ -619,9 +619,12 @@ with a **subquery** in `WHERE` / `HAVING` (`x > (select avg(x) …)`, `in (selec
 `exists (…)`) fails in plain PROC FEDSQL as `CREATE TABLE … AS`: FedSQL pushes the
 whole statement, CREATE TABLE included, to SingleStore → *Unknown database 'WORK'*.
 The editor runs such a SELECT as a derived table instead – `create table WORK._S2R…
-as select * from (<your select>) as _s2q` – which FedSQL sends to SingleStore whole
-(subquery included, one statement in the driver trace) and writes into WORK itself
-(checked on Zeus for scalar, IN and EXISTS subqueries); a top-level `ORDER BY` is
+as select * from (<your select>) as _s2q` – which runs and writes into WORK itself.
+Scalar and `EXISTS` subqueries then go to SingleStore whole (one statement), but
+FedSQL runs `IN (select …)` as a join in SAS, even on the same table: only the
+subquery's `WHERE` goes down (checked on Zeus 2026-11-01 in SingleStore's plan
+cache). Write it as `EXISTS`, or run it as PROC SQL, which passes it down whole;
+the Pushdown tab says so. A top-level `ORDER BY` is
 repeated outside (SingleStore drops it inside a derived table), and the Pushdown
 tab says so. When the `ORDER BY` can't be repeated (an expression, a column that
 isn't selected) the **Check the query** bar says so before the run, with the
@@ -1223,7 +1226,7 @@ pipeline's batch history and error log.
   up; every row is still read, but fewer are moved and grouped). **Query in SQL
   Editor** shows the query. Backend: `schema_explorer_reshard(database, table,
   columns, sample_rows?)` (app-only, read-only).
-- **Copy to a new table with this shard key…** (next to a simulation result)
+- **Change shard key…** (next to a simulation result)
   writes a SQL script for a DBA and **never runs it**: the same **Copy SQL**,
   **Open in SQL Editor** and **Save as .sql…** as the Security view's script
   basket. A shard key can't be changed in place on 9.0 (*Shard keys*: "cannot

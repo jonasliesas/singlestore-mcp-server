@@ -27,7 +27,7 @@ review polish round on branch `claude/polish`).
   aborts / rolls back and removes a new empty table; a network break is never re-sent ("may or may not"); row count
   checked; history entries. Off in server mode. Code: `apps/load_file.py`, `apps/vendor/s2-load-file.js`.
 - **Reshard script** (2026-10-30, branch `claude/reshard-dropview`): Schema Explorer Distribution tab, next to a
-  simulation result, "Copy to a new table with this shard key…" – a SQL script that never runs (Copy / Open in SQL
+  simulation result, "Change shard key…" – a SQL script that never runs (Copy / Open in SQL
   Editor / Save as .sql, the Security basket's code now shared in `shared.js`): CREATE TABLE `<t>__reshard` from the
   real SHOW CREATE TABLE with only the SHARD KEY replaced, INSERT … SELECT (+ AGGREGATOR SYNC AUTO_INCREMENT), row-count
   and skew checks, the two-step rename swap, `-- DROP TABLE <t>__old`; warnings filled in (size ×2, pipelines with
@@ -213,8 +213,9 @@ review polish round on branch `claude/polish`).
     run in SingleStore"; a **standard connector caslib** (SASDPSTD) copies it (TableLocation CAS, AllocatedMemory
     130 KB; WHERE / columns apply) – "Copied into CAS memory".
   - **FedSQL SELECT with a subquery** on a SingleStore library: runs as `select * from (<select>) as _s2q` in the
-    CREATE TABLE (checked on Zeus: FedSQL then sends the whole SELECT, subquery included, as one statement and writes WORK
-    itself; scalar / IN / EXISTS subqueries; the inner ORDER BY is dropped by SingleStore, so a top-level ORDER BY is
+    CREATE TABLE (checked on Zeus: it runs and writes WORK itself; scalar and EXISTS subqueries go down whole as one
+    statement, IN (select …) runs as a join in SAS with only its WHERE pushed - corrected in the 0.11 test, the
+    Pushdown tab now says "partly" and suggests EXISTS or PROC SQL; the inner ORDER BY is dropped by SingleStore, so a top-level ORDER BY is
     repeated outside with the output names); the Pushdown tab says so; when the ORDER BY can't be repeated (an
     expression) the pre-run **Check the query** bar warns with the derived-table join rewrite (`sas_fedsql_check`). A
     top-level LIMIT already avoids the failure (FedSQL then doesn't push the CREATE TABLE) and is left alone.

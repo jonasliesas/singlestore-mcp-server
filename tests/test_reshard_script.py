@@ -1,4 +1,4 @@
-"""Offline: the Schema Explorer's reshard script ("Copy to a new table with this shard key…") from recorded
+"""Offline: the Schema Explorer's reshard script ("Change shard key…") from recorded
 SHOW CREATE TABLE text (9.0.40) - columnstore and rowstore tables, keys from the PRIMARY KEY, AUTO_INCREMENT, computed
 columns, names that need backquotes - and the warnings filled in from the cluster facts. Nothing runs."""
 

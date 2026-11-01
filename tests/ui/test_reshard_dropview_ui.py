@@ -1,4 +1,4 @@
-"""UI: the Schema Explorer's "Copy to a new table with this shard key…" (a reshard script next to a simulation result:
+"""UI: the Schema Explorer's "Change shard key…" (a reshard script next to a simulation result:
 shown, saved as .sql, nothing runs) and the Security view's "Drop view…" for a column view (listed in the "Grant
 columns (view)" form, previewed with the grants that go, run after the typed name).
 
@@ -32,7 +32,7 @@ def test_schema_explorer_reshard_script(ui: Any, app_url: Any, cluster: McpSessi
     cols.get_by_label(re.compile(r"^\s*Make(\s|$)")).check()
     cols.get_by_label(re.compile(r"^\s*Model(\s|$)")).check()
     region.get_by_role("button", name="Simulate", exact=True).click()
-    copy_btn = region.get_by_role("button", name="Copy to a new table with this shard key…")
+    copy_btn = region.get_by_role("button", name="Change shard key…")
     copy_btn.wait_for(timeout=60_000)  # offered next to the simulation result only
     copy_btn.click()
     box = se.get_by_role("region", name="Reshard script")

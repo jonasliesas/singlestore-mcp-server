@@ -645,15 +645,22 @@ def run_sas(language: str, sql: str, library: str | None, options: dict[str, Any
                 table_rows=cap, connection=_conn_name(connection),
                 elapsed_ms=round((time.perf_counter() - started) * 1000, 1))
     if wrapped.get("derived"):
-        data["derived"] = DERIVED_NOTE
+        whole = (data.get("pushdown") or {}).get("verdict") == "full"
+        data["derived"] = DERIVED_NOTE if whole else DERIVED_SPLIT_NOTE
         if data.get("pushdown"):
-            data["pushdown"]["notes"] = [DERIVED_NOTE, *data["pushdown"].get("notes", [])]
+            data["pushdown"]["notes"] = [data["derived"], *data["pushdown"].get("notes", [])]
     return data
 
 
 DERIVED_NOTE = ("The SELECT has a subquery: it ran as SELECT * FROM (…) AS _s2q, so FedSQL sends it to SingleStore as one "
                 "statement and writes the rows into WORK itself (pushed down whole with the CREATE TABLE, SingleStore "
                 "would answer \"Unknown database 'WORK'\").")
+# FedSQL pushes scalar and EXISTS subqueries down whole, but runs IN (select …) as a join in SAS, even on the same
+# table (checked on Zeus 2026-11-01); PROC SQL passed the same IN query down whole.
+DERIVED_SPLIT_NOTE = ("The SELECT has a subquery: it ran as SELECT * FROM (…) AS _s2q (pushed down with the CREATE TABLE, "
+                      "SingleStore would answer \"Unknown database 'WORK'\"), but FedSQL didn't send it as one "
+                      "statement: it runs IN (select …) as a join in SAS. Written as EXISTS (select 1 … where "
+                      "<inner>.col = <outer>.col), or run as PROC SQL, it goes down whole.")
 
 
 @apps.tool(resource_uri=EDITOR_URI, visibility=APP_ONLY, annotations=READ_ONLY)

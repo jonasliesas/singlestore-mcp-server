@@ -1,7 +1,7 @@
 """Reshard script: copy a table to a new table with another shard key - written out as SQL for a DBA, never run.
 
-The Schema Explorer's Distribution tab offers it next to a reshard simulation result ("Copy to a new table with this
-shard key…"). ``build_script`` is pure (the facts come in as arguments), so it is tested offline from recorded
+The Schema Explorer's Distribution tab offers it next to a reshard simulation result ("Change shard key…").
+``build_script`` is pure (the facts come in as arguments), so it is tested offline from recorded
 SHOW CREATE TABLE text; ``reshard_script`` reads those facts from the cluster (read-only, one parallel batch).
 
 Checked in the SingleStore 9.0 docs (and tried on 9.0.40 with zz_test_ tables in the ``test`` database):

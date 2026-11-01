@@ -149,6 +149,26 @@ def test_fedsql_verdicts() -> None:
     assert s.pushdown_verdict("fedsql", FEDSQL_PUSHED + FEDSQL_PULLED)["verdict"] == "partly"
 
 
+# Zeus 2026-11-01: class where Name in (select Name from classfit where Sex = 'F'). FedSQL ran the IN as a join in
+# SAS: class read whole, classfit read with its WHERE pushed down (MV_PLANCACHE showed exactly those two SELECTs).
+FEDSQL_IN_SUBQUERY = """Methods:
+Number of Joins Performed is : 1
+        NestLoop (IN)
+          SeqScan from S2SASH.sashelp.class
+          Material
+            SeqScan with _pushed_ qual from S2SASH.sashelp.classfit
+"""
+
+
+def test_fedsql_in_subquery_is_partly_pushed_down() -> None:
+    """Regression (0.11 test): this showed "pulled into SAS", missing that classfit's WHERE went down."""
+    v = s.pushdown_verdict("fedsql", FEDSQL_IN_SUBQUERY)
+    assert v["verdict"] == "partly"
+    notes = " ".join(v["notes"])
+    assert "Only the WHERE went down for S2SASH.sashelp.classfit" in notes
+    assert "Read in full into SAS: S2SASH.sashelp.class" in notes
+
+
 @pytest.mark.parametrize("text,expect", [
     ("select 1; select 2", ["select 1", "select 2"]),
     ("select ';' from x; select 2;", ["select ';' from x", "select 2"]),
