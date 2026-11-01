@@ -3137,6 +3137,9 @@ await S2.connect({
     try {
       const data = S2.resultData(result);
       state.databases = data.databases ?? [];
+      // The Workspace hands each SQL Editor its own first result: opened while the connection failed (or before
+      // there was one), that has no databases, so ask again now.
+      if (data.connection_error) await refreshDatabases({ force: true });
       // A database given on open: load its schema while the draft is restored (chooseDatabase reuses it).
       if (data.database && state.databases.includes(data.database)) loadSchema(data.database);
       let restoredDb = null;

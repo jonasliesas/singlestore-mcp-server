@@ -3,6 +3,7 @@ test server's browser view. Read-only on the cluster (a DELETE is typed but only
 
 from __future__ import annotations
 
+import json
 import re
 import time
 import urllib.parse
@@ -145,6 +146,28 @@ def test_sql_editor_select_ticked_columns(workspace) -> None:
     assert "rows" not in (sql.locator(".sq-results").inner_text() if sql.locator(".sq-results").count() else ""), \
         "inserting the SELECT must not run it"
     _no_problems(page, errors, "SQL editor column picking")
+
+
+def test_sql_editor_tree_loads_after_opening_without_a_connection(ui, app_url) -> None:
+    """Regression (server pilot, 0.11 test): the Workspace opened before the user's first SingleStore connection was
+    saved, so its sql_editor result had no databases and a connection error. Schema Explorer worked once the
+    connection was saved, but the SQL Editor - handed that same first result - showed "Loading…" for ever. It now
+    asks for the database list again."""
+    page, errors = ui
+
+    def route(r: Any) -> None:
+        if (json.loads(r.request.post_data or "{}").get("name") or "") != "sql_editor":
+            r.continue_()
+            return
+        body = r.fetch().json()  # the real result, emptied the way a failing connection leaves it
+        body["structuredContent"].update(databases=[], connection_error="no connection yet", view="sql")
+        r.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+    page.route("**/call", route)
+    _open(page, app_url("sql_editor", {"view": "sql"}))
+    sql = find_frame(page, "SQL Editor", 30)
+    expect(sql.locator(f'.sq-row:not(.tbl):has(span.name:text-is("{DB}"))').first).to_be_visible(timeout=20_000)
+    errors.drain()
 
 
 def test_sql_editor_save_as_filter_keeps_focus(workspace) -> None:
