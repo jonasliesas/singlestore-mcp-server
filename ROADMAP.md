@@ -425,6 +425,25 @@ in step 1, "Ask Claude" off by default (switchable later with an Anthropic / Fou
   (`_shared_environment`, `_server_kernel_env`, `_kernel_cwd`, `kernel_tokens`) - done as `notebook_kernel._gateway()` /
   `_new_kernel` / `_gateway_prelude` and `kernel_tokens.RELAY_CLIENT`.
 
+- **Step 2 – Studio repository** (decided by Jonas 2026-11-02, for the Zeus deploy 2026-11-09; branch
+  `claude/repository`): one shared store in SingleStore instead of each Studio's SQLite files.
+  - **Where:** database `speedystore_studio` on the monitored cluster. Written and read only by the service account
+    `svc_studio_collector` (PROCESS + SHOW METADATA on `*.*` to collect every user's queries, ALL on the repository;
+    password in Windows Credential Manager `speedystore-studio-collector` here, a K8s secret in the pod). No person
+    gets PROCESS and users get **no grants on the repository**: their own SingleStore logins can't read it.
+  - **One collector in the hub pod** samples metrics, syncs MV_TRACE_EVENTS and snapshots the plan cache once for all
+    users (server-mode Studios turn their own samplers off). Repository down (it lives in the cluster it watches):
+    the collector buffers in SQLite on the pod volume and flushes when the cluster is back. The desktop keeps SQLite.
+  - **Who sees what:** new SAS group `SpeedyStoreStudioMonitor` (checked by the hub at sign-in and token renewal like
+    the other two): members see every user's queries and SQL text; others only the queries of the SingleStore user
+    in their own connection. Metrics, pipelines and cluster health: everyone. Studios get the data from the
+    collector (filtered by the hub-confirmed groups), never from the repository directly.
+  - **Alerts:** each user's own settings and state; Studio admins see everyone's. **Workloads:** shared by all users.
+  - **Retention:** raw metrics 30 days (coarse 1 year), query runs 90 days, plan-cache samples 30 days.
+  - Steps: SQL for the database / user (Jonas runs it: the permission grant was blocked for Claude), `repository.py`
+    (SQLite / SingleStore back ends behind the stores' API), collector + buffer, Studios read through the collector,
+    tests (`zz_test_` database), deploy (env, secret, ADMIN-GUIDE step), `hub_load` with the repository, 0.11.1.
+
 ## Known small issues
 - Network breaks: a query whose connection goes silent *without* a route change or sleep (e.g. a firewall that drops
   packets mid-query) still waits for the TCP keepalive (~25 s) before it's retried; a SAS job POST on a kept-alive
