@@ -311,6 +311,28 @@ def test_fedsql_pushdown_find_in_query_history(workspace, sas: McpSession) -> No
     assert not errs, errs
 
 
+def test_singlestore_log_tab(workspace, sas: McpSession) -> None:
+    """The SingleStore log tab (after Log): what the cluster ran during a SAS run, from MV_PLANCACHE - asked for
+    in the 0.11 test, as the SAS side (FedSQL's plan, libraries without a trace) didn't show what SingleStore got."""
+    page, errors, ws, sql = workspace
+    auto = sas.ok("sas_libraries").get("auto_libname") or {}
+    if not auto.get("assigned"):
+        pytest.skip(f"No automatic SingleStore library: {auto.get('note') or auto.get('error')}")
+    tables = sas.ok("sas_tables", {"library": auto["libref"]})["tables"]
+    if not tables:
+        pytest.skip("the automatic library has no tables")
+    alias = f"zz_s2log_{int(time.time())}"  # the plan cache keeps aliases (literals become ^): this run's own statement
+    sql.get_by_label("Run as", exact=True).select_option("procsql")
+    _set_sql(sql, f'select count(*) as {alias} from {auto["libref"]}."{tables[0]["name"]}"n;')
+    assert wait_js(sql, "document.querySelector('.sq-sasview button[data-view=\"s2log\"]')", 120), text(sql)[-600:]
+    sql.locator('.sq-sasview button[data-view="s2log"]').click()
+    assert wait_js(sql, f"[...document.querySelectorAll('[data-s2log] pre')].some((e) => e.textContent.includes('{alias}'))", 30),         "statement not in the SingleStore log: " + text(sql)[-800:]
+    entry = sql.locator("[data-s2log]", has_text=alias).first
+    assert re.search(r"1 row\(s\)", entry.inner_text()), entry.inner_text()
+    errs = [e for e in errors.drain() if "favicon" not in e]
+    assert not errs, errs
+
+
 def test_function_check_before_a_sas_run(workspace, sas: McpSession) -> None:
     """The SAS function matrix's pre-run check: a function that stops pushdown on a SingleStore library (CATX in
     PROC SQL) and one the dialect hasn't got (CATX in FedSQL) get "Check the functions" before anything runs."""

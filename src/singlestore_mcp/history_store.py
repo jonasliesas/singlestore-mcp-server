@@ -538,11 +538,19 @@ def _ts(v: Any) -> str | None:
     return v.isoformat(sep=" ") if hasattr(v, "isoformat") else str(v)
 
 
-def read_plancache() -> list[dict[str, Any]]:
+def read_plancache(executed_between: tuple[float, float] | None = None) -> list[dict[str, Any]]:
     """The aggregators' plans for user statements, from MV_PLANCACHE (one round trip).
 
     This server's own statements all read information_schema, and the plan cache strips the comments that mark
-    them elsewhere, so plans reading information_schema are left out (as are driver pings like SELECT @@…)."""
+    them elsewhere, so plans reading information_schema are left out (as are driver pings like SELECT @@…).
+    ``executed_between``: only plans last run in this window (epoch seconds on this machine; the cluster's clock
+    offset is taken out in the query, LAST_EXECUTED has whole seconds, so the window gets 2 s either side)."""
+    window, params = "", ["%information_schema%", "%@@%", "%binary_serialization_internal%"]
+    if executed_between:
+        now = time.time()
+        window = (" AND UNIX_TIMESTAMP(p.LAST_EXECUTED) BETWEEN %s + (UNIX_TIMESTAMP() - %s) - 2"
+                  " AND %s + (UNIX_TIMESTAMP() - %s) + 2")
+        params += [executed_between[0], now, executed_between[1], now]
     rows = db.execute(
         f"{_MARKER} SELECT p.NODE_ID, p.PLAN_ID, p.DATABASE_NAME, LEFT(p.QUERY_TEXT, {_PLAN_TEXT_CHARS}) AS q,"
         " LENGTH(p.QUERY_TEXT) AS qlen, p.COMMITS, p.ROLLBACKS, p.ROWCOUNT, p.EXECUTION_TIME, p.AVERAGE_EXEC_TIME,"
@@ -552,8 +560,8 @@ def read_plancache() -> list[dict[str, Any]]:
         " FROM information_schema.MV_PLANCACHE p"
         " WHERE p.IS_PROFILE = 0 AND p.NODE_ID IN (SELECT ID FROM information_schema.MV_NODES WHERE TYPE IN ('MA', 'CA'))"
         " AND (p.DATABASE_NAME IS NULL OR p.DATABASE_NAME <> 'information_schema')"
-        " AND p.QUERY_TEXT NOT LIKE %s AND p.QUERY_TEXT NOT LIKE %s AND p.QUERY_TEXT NOT LIKE %s",
-        ("%information_schema%", "%@@%", "%binary_serialization_internal%"),
+        " AND p.QUERY_TEXT NOT LIKE %s AND p.QUERY_TEXT NOT LIKE %s AND p.QUERY_TEXT NOT LIKE %s" + window,
+        tuple(params),
     )[1]
     out = []
     for r in rows:

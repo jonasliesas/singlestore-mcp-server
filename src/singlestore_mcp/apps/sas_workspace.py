@@ -636,14 +636,15 @@ def run_sas(language: str, sql: str, library: str | None, options: dict[str, Any
                            table=sas_sql.result_table(tab_id))
     plain = wrapped["kind"] == "sas"
     compute, cas = _sessions(connection)
-    started = time.perf_counter()
+    started, started_at = time.perf_counter(), time.time()
     if language == "cas" and not plain:
         data = _run_cas(cas, wrapped, library, max_rows, pushdown, run)
     else:
         data = _run_compute(compute, wrapped, language if not plain else "procsql", max_rows, pushdown, run)
     data.update(language=language, plain_sas=plain, sql=sql, library=library, code=wrapped["code"], max_rows=max_rows,
                 table_rows=cap, connection=_conn_name(connection),
-                elapsed_ms=round((time.perf_counter() - started) * 1000, 1))
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
+                started_at=started_at, ended_at=time.time())  # for the SingleStore log (sas_singlestore_log)
     if wrapped.get("derived"):
         whole = (data.get("pushdown") or {}).get("verdict") == "full"
         data["derived"] = DERIVED_NOTE if whole else DERIVED_SPLIT_NOTE
@@ -973,6 +974,33 @@ def sas_classify(language: str, statements: list[str], library: str | None = Non
         if check:
             writes.append({"index": i, "reason": check["reason"], "shared": check["shared"]})
     return tool_result(f"{len(writes)} of {len(statements)} statement(s) need confirmation", {"writes": writes})
+
+
+@apps.tool(resource_uri=EDITOR_URI, visibility=APP_ONLY, annotations=READ_ONLY)
+def sas_singlestore_log(started_at: float, ended_at: float) -> CallToolResult:
+    """The SingleStore side of a SAS run: the statements the cluster's aggregators ran between ``started_at`` and
+    ``ended_at`` (the run's epoch seconds), from MV_PLANCACHE - what SAS (PROC SQL, FedSQL, DATA step, CAS) really
+    sent, whatever library it used. The plan cache keeps totals per plan, so rows and ms are per run on average;
+    literals show as ^; another session's identical statement in the same seconds would show too."""
+    from .. import history_store
+
+    if ended_at < started_at or ended_at - started_at > 6 * 3600:
+        raise ValueError("started_at / ended_at: the run's start and end (epoch seconds)")
+    plans = history_store.read_plancache(executed_between=(started_at, ended_at))
+    by_stmt: dict[str, list[dict[str, Any]]] = {}
+    for p in plans:  # one plan per aggregator: one entry per statement
+        by_stmt.setdefault(p["stmt"], []).append(p)
+    statements = []
+    for group in by_stmt.values():
+        runs = sum(p["runs"] for p in group) or 1
+        last = max(group, key=lambda p: p["last_executed"] or "")
+        statements.append({"sql": last["text"], "truncated": last["text_len"] > len(last["text"]),
+                           "database": last["database"], "last_executed": last["last_executed"], "runs": runs,
+                           "avg_rows": round(sum(p["rows"] for p in group) / runs, 1),
+                           "avg_ms": round(sum(p["exec_ms"] for p in group) / runs, 1),
+                           "failed": sum(p["failed"] for p in group), "tables": last["tables"]})
+    statements.sort(key=lambda x: x["last_executed"] or "")
+    return tool_result(f"{len(statements)} statement(s) on SingleStore during the run", {"statements": statements})
 
 
 @apps.tool(resource_uri=EDITOR_URI, visibility=APP_ONLY, annotations=READ_ONLY)

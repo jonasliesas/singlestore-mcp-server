@@ -499,8 +499,14 @@ the same SQL can be tried SingleStore-native and through SAS side by side.
   *Viya: active (…)* follows the active connection. The pin is saved with the
   tab; switching the active connection elsewhere doesn't touch a pinned tab.
 - The result pane has **Result**, **Log** (the generated SAS code with
-  **Copy code**, then the SAS log with errors, warnings and notes in colour)
-  and **Pushdown** tabs. Colour badges show the language everywhere: S2 blue,
+  **Copy code**, then the SAS log with errors, warnings and notes in colour),
+  **SingleStore log** and **Pushdown** tabs. **SingleStore log** shows what the
+  cluster really ran during the run, read from its plan cache (MV_PLANCACHE on
+  the aggregators) when the tab opens: each statement with rows and ms (per run
+  on average: the plan cache keeps totals per plan), whatever SAS library, PROC
+  or caslib sent it – also for libraries without a SAS trace. Literals show as
+  `^`, and another session's identical statement in the same seconds would show
+  too (`sas_singlestore_log`). Colour badges show the language everywhere: S2 blue,
   PROC SQL / FedSQL orange, CAS indigo, SAS (plain code) teal, also in the run
   history; the Run button names the engine (*Run in SAS Compute · Zeus*, see
   [Where code runs](#singlestore-workspace)). The badge in the editor's corner is gone (it covered the first line).

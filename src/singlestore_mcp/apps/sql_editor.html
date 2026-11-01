@@ -236,7 +236,7 @@ const state = {
   sasRun: null,                  // the SAS run going on now: {id, info (sas_run_status), stopping}
   treeSrc: "s2",                 // what the tree lists: "s2" (SingleStore) | "sas" (SAS libraries) | "cas" (caslibs)
   langAsk: null,                 // {lang, what, fn}: a tree click wants another language and the tab has text
-  sasView: "result",             // SAS results pane: "result" | "log" | "pushdown"
+  sasView: "result",             // SAS results pane: "result" | "log" | "s2log" | "pushdown"
   hint: null,                    // {message, suggest, sql, database}: the SQL looks like another language
   origin: null,                 // {workload, statement_id, statement_name}: the workload statement this tab was opened from
 };
@@ -2025,6 +2025,7 @@ function sasStatusParts(r, cur, tabs) {
 const sasTabs = (r) => [["result", r.has_result_set ? `Result (${fmt.number(r.total_rows ?? r.row_count)})` : r.listing ? "Output" : "Result"],
   ["log", ["Log", r.errors ? h("span", { class: "count", style: { background: "var(--s2-err)", marginLeft: "4px" } }, String(r.errors))
     : r.warnings ? h("span", { class: "count", style: { background: "var(--s2-warn)", marginLeft: "4px" } }, String(r.warnings)) : null]],
+  ...(r.started_at ? [["s2log", "SingleStore log"]] : []),
   ...(r.pushdown ? [["pushdown", ["Pushdown ", verdictBadge(r.pushdown.verdict)]]] : [])];
 function renderSasStatus(r) {
   if (state.result !== r || state.running || state.confirm || state.hint || state.langAsk) return;
@@ -2036,12 +2037,14 @@ function renderSasResult(r) {
   const tabs = [["result", r.has_result_set ? `Result (${fmt.number(r.row_count)})` : r.listing ? "Output" : "Result"],
     ["log", ["Log", r.errors ? h("span", { class: "count", style: { background: "var(--s2-err)", marginLeft: "4px" } }, String(r.errors))
       : r.warnings ? h("span", { class: "count", style: { background: "var(--s2-warn)", marginLeft: "4px" } }, String(r.warnings)) : null]],
+    ...(r.started_at ? [["s2log", "SingleStore log"]] : []),
     ...(r.pushdown ? [["pushdown", ["Pushdown ", verdictBadge(r.pushdown.verdict)]]] : [])];
   tabs[0] = sasTabs(r)[0];
   const cur = tabs.some(([id]) => id === state.sasView) ? state.sasView : "result";
   statusEl.replaceChildren(...sasStatusParts(r, cur, tabs));
   grid = null;
   if (cur === "log") { outEl.replaceChildren(...sasLogView(r)); return; }
+  if (cur === "s2log") { outEl.replaceChildren(...s2LogView(r)); return; }
   if (cur === "pushdown") { outEl.replaceChildren(...pushdownView(r)); return; }
   if (r.stopped) { outEl.replaceChildren(h("div", { class: "sq-placeholder" }, "Stopped: the SAS job was cancelled. The Log tab has the SAS log up to there", r.note ? ` (${r.note})` : "", ".")); return; }
   if (r.error) { outEl.replaceChildren(S2.errorBox(new Error(r.error)), h("div", { class: "sq-placeholder" }, "The Log tab has the SAS log and the code that ran.")); return; }
@@ -2089,6 +2092,41 @@ function pushdownView(r) {
   out.push(h("div", { class: "sq-placeholder", style: { paddingTop: 0 } },
     "Read from ", r.language === "cas" ? "the FedSQL plan CAS writes with method=true" : r.language === "fedsql" ? "the FedSQL query plan (_method)" : "sastrace=',,,d' and sql_ip_trace",
     " in the SAS log (Log tab)."));
+  return out;
+}
+// The SingleStore side of a SAS run: what the cluster's aggregators ran during it (MV_PLANCACHE), read when the
+// tab is first opened and kept with the result.
+function s2LogView(r) {
+  const log = r.s2log;
+  if (!log) {
+    r.s2log = { loading: true };
+    S2.callTool("sas_singlestore_log", { started_at: r.started_at, ended_at: r.ended_at })
+      .then((d) => { r.s2log = d; }, (e) => { r.s2log = { error: cleanError(e).message }; })
+      .finally(() => { if (state.result === r && state.sasView === "s2log") renderResults(); });
+    return [h("div", { class: "sq-placeholder" }, "Reading SingleStore's plan cache…")];
+  }
+  if (log.loading) return [h("div", { class: "sq-placeholder" }, "Reading SingleStore's plan cache…")];
+  if (log.error) return [S2.errorBox(new Error(`Couldn't read SingleStore's plan cache: ${log.error}`))];
+  const out = [];
+  if (!log.statements.length) {
+    out.push(h("div", { class: "sq-placeholder" }, "SingleStore ran no statements for this run (no SingleStore library in it, or the rows came from SAS or CAS memory)."));
+  } else {
+    out.push(h("div", { class: "sq-placeholder", style: { padding: "8px 10px 6px" } }, `What SingleStore ran during this run (${log.statements.length}):`));
+    for (const s of log.statements) {
+      out.push(h("div", { class: "sq-sent", "data-s2log": "" }, h("pre", {}, s.sql + (s.truncated ? " …" : "")),
+        h("div", { class: "bar" },
+          h("span", {}, `${fmt.number(s.avg_rows, 1)} row(s) · ${fmt.number(s.avg_ms, 1)} ms`),
+          s.runs > 1 ? h("span", { title: "The plan cache keeps totals per plan: rows and ms are per run on average" }, `· ${fmt.number(s.runs)} runs of this plan`) : null,
+          s.failed ? h("span", { style: { color: "var(--s2-err)" } }, `· ${fmt.number(s.failed)} failed`) : null,
+          s.database ? h("span", {}, `· ${s.database}`) : null,
+          h("span", {}, `· ${String(s.last_executed ?? "").slice(11, 19)}`),
+          h("span", { class: "s2-spacer" }),
+          h("button", { class: "s2-btn ghost", onclick: () => S2.copy(s.sql) }, "Copy"))));
+    }
+  }
+  out.push(h("div", { class: "sq-placeholder", style: { paddingTop: 0 } },
+    "From SingleStore's plan cache (MV_PLANCACHE) on the aggregators: statements last run during this run, whatever SAS library or caslib sent them. ",
+    "Literals show as ^ (SingleStore parameterizes them); times have whole seconds, so another session's identical statement in the same seconds would show too."));
   return out;
 }
 async function findInHistory(s, btn) {
