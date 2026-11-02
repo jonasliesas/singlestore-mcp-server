@@ -147,7 +147,9 @@ const state = {
   // Data of the Disk / Bottomless / IO tabs (their own tools, only called while the tab is open).
   extra: { disk: { data: null, error: null, loading: false, at: 0 }, bottomless: { data: null, error: null, loading: false, at: 0 },
     io: { data: null, error: null, loading: false, at: 0 }, health: { data: null, error: null, loading: false, at: 0 },
-    history: { data: null, error: null, loading: false, at: 0 }, backups: { data: null, error: null, loading: false, at: 0 } },
+    history: { data: null, error: null, loading: false, at: 0 }, backups: { data: null, error: null, loading: false, at: 0 },
+    memory: { data: null, error: null, loading: false, at: 0 } },
+  memOwn: true,         // Memory tab: list Studio's own statements too
   hist: { range: "1h", group: "all", hidden: new Set() },
   healthEvents: "problems",
   backupWarnDays: 7,
@@ -503,7 +505,7 @@ function askAbout(q) {
 
 // ---------------------------------------------------------------- Disk, Bottomless and IO tabs
 // Each has its own app tool, only called while the tab is open, so the overview refresh stays light.
-const TAB_TOOLS = { disk: "cluster_monitor_disk", bottomless: "cluster_monitor_bottomless", io: "cluster_monitor_io",
+const TAB_TOOLS = { disk: "cluster_monitor_disk", bottomless: "cluster_monitor_bottomless", io: "cluster_monitor_io", memory: "cluster_monitor_memory",
   health: "cluster_monitor_health", history: "cluster_monitor_history", backups: "cluster_monitor_backups" };
 const DISK_REFRESH_MS = 60000;  // directory sizes are measured by walking the directories: once a minute is plenty
 // Tabs whose data changes slowly are refreshed less often than the overview (none of them run on open).
@@ -651,6 +653,125 @@ function diskTab(d, names) {
     h("div", { class: "cm-nodes" }, aggs.map((n) => diskNodeCard(n, names[n.id] ?? n.host, nodeIndex[n.id] ?? 0, true))),
     x.bottomless_cache_in_use ? null : h("div", { class: "s2-small s2-faint", style: { marginTop: "8px" } },
       "The blob cache only holds data of bottomless (unlimited storage) databases; with none on this cluster it stays empty. Its limit is maximum_blob_cache_size_mb per node.")];
+}
+
+// ---------------------------------------------------------------- Memory tab
+// Where each node's memory goes (Total_server_memory, which max_memory limits), the tables that hold it, the
+// statements that use it, resource pools, and advice. Refreshed with the overview while the tab is open.
+const MEM_GROUPS = {
+  table: ["var(--series-1)", "Rowstore tables: rows, indexes and variable-length data (Alloc_table_memory). Limited by max_table_memory."],
+  query: ["var(--series-2)", "Sorts, hash tables and results of running queries (Alloc_query_execution and friends): about 0 when nothing runs."],
+  cached: ["var(--s2-border)", "Memory queries or tables gave back that SingleStore keeps for reuse (Buffer_manager_cached_memory): counts in the total, up to 25% of max_memory, and shrinks near the limit."],
+  connections: ["var(--series-3)", "Per-connection buffers and thread stacks (1 MB per thread)."],
+  code: ["var(--series-4)", "Compiled query plans in memory (plan cache, code units)."],
+  txn: ["var(--series-5)", "Open transactions and replication to the replicas."],
+  columnstore: ["var(--series-6)", "Columnstore caches, ingest and pipelines."],
+  malloc: ["var(--series-7)", "Memory the C runtime manages (Malloc_active_memory): normally 1-2 GB."],
+  other: ["var(--s2-text-3)", "The rest of Total_server_memory the counters above don't name."],
+};
+const memAdviceCount = () => (state.extra.memory.data?.advice ?? []).filter((a) => a.level !== "info").length;
+const pctBadge = (pct, warn, err) => pct == null ? null
+  : h("span", { class: `s2-badge ${pct >= err ? "err" : pct >= warn ? "warn" : "plain"}` }, `${pct.toFixed(pct < 10 ? 1 : 0)}%`);
+
+function memNodeCard(n, name, index) {
+  const parts = n.groups.map((g) => ({ label: g.label, bytes: g.bytes, color: (MEM_GROUPS[g.key] ?? [])[0], title: (MEM_GROUPS[g.key] ?? [])[1] }));
+  const host = n.cgroup_total_b || n.host_total_b;
+  return h("div", { class: "s2-card cm-node" },
+    h("div", { class: "cm-node-head" },
+      h("span", { class: "cm-key", style: { background: nodeColor(index) } }),
+      h("span", { class: "cm-node-name", title: n.host }, name),
+      h("span", { class: `s2-badge plain ${n.type === "LEAF" ? "" : "info"}` }, n.type),
+      h("span", { class: "s2-spacer" }),
+      h("strong", { class: "cm-total", title: "Total_server_memory of max_memory (queries fail with error 1712 at the limit)" },
+        `${fmt.bytes(n.total_b)} of ${bytesOrDash(n.max_b)}`), pctBadge(n.pct, 85, 95)),
+    h("div", { class: "cm-node-meta" }, "Where this node's memory goes"),
+    stackBar(parts, n.max_b || n.total_b, `${name} memory by use`),
+    legendRows(parts.filter((p) => p.bytes > 0), n.max_b || n.total_b),
+    h("div", { class: "cm-kv" },
+      h("div", { title: "Alloc_table_memory of max_table_memory: at the limit INSERT, UPDATE and LOAD DATA fail (error 1720)" },
+        h("span", {}, "Rowstore tables of max_table_memory"),
+        h("strong", {}, `${fmt.bytes(n.table_b)} of ${bytesOrDash(n.table_max_b)} `, pctBadge(n.table_pct, 80, 95))),
+      n.table_parts.length ? h("div", { title: n.table_parts.map((p) => `${p.label}: ${fmt.bytes(p.bytes)}`).join("\n") },
+        h("span", {}, "of which"), h("strong", { class: "s2-small" }, n.table_parts.slice().sort((a, b) => b.bytes - a.bytes).slice(0, 3)
+          .map((p) => `${p.label} ${fmt.bytes(p.bytes)}`).join(" · "))) : null,
+      h("div", { title: "Resident size of the SingleStore process as Linux sees it, of the host (or container) memory" },
+        h("span", {}, "Process resident / host"), h("strong", {}, `${bytesOrDash(n.resident_b)} / ${bytesOrDash(host)}`))));
+}
+
+function memStatements(x) {
+  const rows = x.statements.filter((s) => state.memOwn || !s.own);
+  const recent = x.recent_s != null;
+  return h("div", { class: "s2-table-wrap cm-q-wrap" }, h("table", { class: "s2-table cm-q" },
+    h("thead", {}, h("tr", {},
+      h("th", {}, "Statement"), h("th", {}, "Database"),
+      h("th", { class: "num", title: recent ? `Average memory in use over the last ${x.recent_s} s (all nodes)` : "Shown from the second refresh on" }, "Now"),
+      h("th", { class: "num", title: "Average memory while it ran (all nodes together)" }, "While running"),
+      h("th", { class: "num", title: "Memory x time since its plan was loaded (MEMORY_BS): what used most memory overall" }, "Memory x time"),
+      h("th", { class: "num", title: "Written to disk because memory ran short (DISK_SPILLING_B)" }, "Spilled"))),
+    h("tbody", {}, rows.length ? rows.slice(0, 40).map((s) => h("tr", {},
+      h("td", { class: "sql", title: s.sql }, s.own ? h("span", { class: "s2-badge plain", style: { marginRight: "4px" }, title: "Studio's own housekeeping" }, "Studio") : null,
+        s.sql || s.label),
+      h("td", {}, s.database ?? "–"),
+      h("td", { class: "num" }, s.recent_b != null ? bytesOrDash(s.recent_b) : "–"),
+      h("td", { class: "num" }, bytesOrDash(s.avg_b)),
+      h("td", { class: "num" }, `${fmt.bytes(s.mem_bs)}·s`),
+      h("td", { class: "num" }, s.spill_b ? fmt.bytes(s.spill_b) : "–")))
+      : h("tr", {}, h("td", { colspan: "6", class: "s2-muted" }, "No statements with memory use in the plan cache.")))));
+}
+
+function memTables(x) {
+  return h("div", { class: "s2-table-wrap cm-q-wrap" }, h("table", { class: "s2-table cm-q" },
+    h("thead", {}, h("tr", {}, ["Table", "Storage", "Memory", "Replicas", "Rows", "Bytes / row"].map((c, i) => h("th", { class: i > 1 ? "num" : "" }, c)))),
+    h("tbody", {}, x.tables.slice(0, 50).map((t) => h("tr", {},
+      h("td", { class: "s2-mono" }, `${t.database}.${t.table}`),
+      h("td", {}, t.rowstore ? h("span", { class: "s2-badge info plain", title: "All rows live in memory" }, "rowstore") : String(t.storage ?? "").toLowerCase()),
+      h("td", { class: "num" }, fmt.bytes(t.bytes)),
+      h("td", { class: "num" }, t.replica_bytes ? fmt.bytes(t.replica_bytes) : "–"),
+      h("td", { class: "num" }, fmt.number(t.rows)),
+      h("td", { class: "num" }, t.bytes_per_row != null ? fmt.bytes(t.bytes_per_row) : "–"))))));
+}
+
+function memoryTab(d, names) {
+  const slot = state.extra.memory;
+  const x = slot.data;
+  const head = h("div", { class: "cm-section", style: { marginTop: 0 } },
+    h("h2", {}, "Memory"),
+    h("span", { class: "s2-faint s2-small" }, x ? `read in ${x.seconds} s · refreshed every ${REFRESH_MS / 1000} s` : ""),
+    h("span", { class: "s2-spacer" }),
+    h("button", { class: "s2-btn", disabled: slot.loading, onclick: () => refreshTab(true) }, slot.loading ? h("span", { class: "s2-spinner" }) : null, "Refresh"));
+  if (!x) return [head, tabStatus(slot, "Memory") ?? h("div", { class: "s2-empty" }, h("span", { class: "s2-spinner" }), " Reading memory use per node…")];
+  const nodeIndex = Object.fromEntries(d.nodes.map((n, i) => [n.id, i]));
+  const leaves = x.nodes.filter((n) => n.type === "LEAF"), aggs = x.nodes.filter((n) => n.type !== "LEAF");
+  const lvl = { err: "err", warn: "warn", info: "info" };
+  const ownCount = x.statements.filter((s) => s.own).length;
+  return [head, tabStatus(slot, "Memory refresh"),
+    x.advice.length ? h("div", { class: "s2-card", style: { padding: "8px 12px", marginBottom: "10px" } },
+      h("div", { class: "cm-top-h" }, "Worth a look"),
+      x.advice.map((a) => h("div", { class: "s2-small", style: { margin: "4px 0", display: "flex", gap: "6px", alignItems: "baseline" } },
+        h("span", { class: `s2-badge ${lvl[a.level] ?? "plain"}` }, a.level === "err" ? "Critical" : a.level === "warn" ? "Warning" : "Tip"), a.text)))
+      : h("div", { class: "s2-small s2-muted", style: { marginBottom: "8px" } }, "Nothing stands out: every node is well below max_memory and max_table_memory."),
+    h("div", { class: "cm-section" }, h("h2", {}, `Leaves (${leaves.length})`)),
+    h("div", { class: "cm-nodes cm-wide" }, leaves.map((n) => memNodeCard(n, names[n.id] ?? n.host, nodeIndex[n.id] ?? 0))),
+    h("div", { class: "cm-section" }, h("h2", {}, `Aggregators (${aggs.length})`)),
+    h("div", { class: "cm-nodes cm-wide" }, aggs.map((n) => memNodeCard(n, names[n.id] ?? n.host, nodeIndex[n.id] ?? 0))),
+    h("div", { class: "cm-section" }, h("h2", {}, "Statements using memory"),
+      h("span", { class: "s2-faint s2-small" }, "From the plan cache's activity counters (MV_QUERY_ACTIVITIES_EXTENDED_CUMULATIVE), all nodes together."),
+      h("span", { class: "s2-spacer" }),
+      ownCount ? h("label", { class: "s2-small", title: "Studio's own housekeeping queries (trace, monitors)" },
+        h("input", { type: "checkbox", checked: state.memOwn, onchange: (e) => { state.memOwn = e.target.checked; render(); } }), ` Show Studio's own (${ownCount})`) : null),
+    memStatements(x),
+    h("div", { class: "cm-section" }, h("h2", {}, `Tables in memory (${fmt.number(x.table_count)})`),
+      h("span", { class: "s2-faint s2-small" }, "TABLE_STATISTICS: rowstore tables live in memory in full; columnstore tables only keep their newest rows (the in-memory segment).")),
+    memTables(x),
+    x.databases.length ? h("div", { class: "s2-small s2-muted", style: { marginTop: "6px" } }, "By database: ",
+      x.databases.slice(0, 8).map((db) => `${db.database} ${fmt.bytes(db.bytes + db.replica_bytes)}`).join(" · ")) : null,
+    x.pools.length ? [h("div", { class: "cm-section" }, h("h2", {}, "Resource pools")),
+      h("div", { class: "s2-table-wrap" }, h("table", { class: "s2-table cm-q" },
+        h("thead", {}, h("tr", {}, ["Pool", "Memory in use", "Memory limit", "Per query", "Running", "Queued"].map((c, i) => h("th", { class: i ? "num" : "" }, c)))),
+        h("tbody", {}, x.pools.map((p) => h("tr", {},
+          h("td", {}, p.pool), h("td", { class: "num" }, fmt.bytes(p.bytes)),
+          h("td", { class: "num" }, p.memory_pct != null ? `${p.memory_pct}%` : "–"), h("td", { class: "num" }, p.query_memory_pct != null ? `${p.query_memory_pct}%` : "–"),
+          h("td", { class: "num" }, fmt.number(p.running)), h("td", { class: "num" }, fmt.number(p.queued)))))))] : null];
 }
 
 const BL_COLS = [["UPLOADED_BYTES", "Upload"], ["BLOB_CACHE_DOWNLOADED_BYTES", "Fetch"], ["BLOB_CACHE_EVICTED_BYTES", "Evict"]];
@@ -1093,7 +1214,7 @@ function render() {
       S2.fullscreenButton()),
     state.error ? h("div", { class: "s2-error", style: { marginBottom: "10px" } }, `Refresh failed: ${state.error.message}`) : null,
     tabs(d),
-    ...(state.tab === "queries" ? queriesTab(d, names) : state.tab === "disk" ? diskTab(d, names)
+    ...(state.tab === "queries" ? queriesTab(d, names) : state.tab === "memory" ? memoryTab(d, names) : state.tab === "disk" ? diskTab(d, names)
       : state.tab === "bottomless" ? bottomlessTab(d, names) : state.tab === "io" ? ioTab(d, names)
       : state.tab === "health" ? healthTab(d, names) : state.tab === "history" ? historyTab(d)
       : state.tab === "backups" ? backupsTab() : [
@@ -1115,6 +1236,7 @@ function tabs(d) {
     tab("overview", "Overview"),
     tab("health", "Health", healthCount(), healthCount() > 0),
     tab("queries", "Queries", d.queries.length, d.queries.length > 0),
+    tab("memory", "Memory", memAdviceCount() || null, memAdviceCount() > 0),
     tab("disk", "Disk"),
     tab("bottomless", "Bottomless"),
     tab("io", "IO"),

@@ -481,3 +481,35 @@ def test_trend_rules_have_days(tmp_path, monkeypatch) -> None:
     assert st["rules"]["disk_trend"]["days"] == 30 and st["rules"]["memory_trend"] == {**alerts.DEFAULT_RULES["memory_trend"], "days": 1, "enabled": False}
     monkeypatch.setattr(alerts, "_state", {})  # read back from the file
     assert alerts.state()["rules"]["disk_trend"]["days"] == 30
+
+
+def test_memory_analysis_groups_and_advice() -> None:
+    from singlestore_mcp.apps import cluster_memory as cmem
+
+    assert cmem.mb_value("11.672 (+0.219) MB") == 11.672 * 1024 * 1024 and cmem.mb_value("") is None
+    gb = 1024
+    raw = {
+        "nodes": [{"ID": 2, "IP_ADDR": "leaf-0.svc-x", "TYPE": "LEAF", "STATE": "online", "MAX_MEMORY_MB": 10 * gb,
+                   "MAX_TABLE_MEMORY_MB": 9 * gb, "MEMORY_USED_MB": 9.7 * gb, "TABLE_MEMORY_USED_MB": 8.8 * gb,
+                   "HOST_TOTAL_B": 10.5 * gb ** 3 * 1024, "HOST_USED_B": None, "CGROUP_TOTAL_B": None, "MEMSQL_B": None}],
+        "status": [{"NODE_ID": 2, "VARIABLE_NAME": k, "VARIABLE_VALUE": f"{v} MB"} for k, v in {
+            "Total_server_memory": 9.7 * gb, "Alloc_table_memory": 8.8 * gb, "Buffer_manager_cached_memory": 300,
+            "Alloc_query_execution": 100, "Malloc_active_memory": 200, "Alloc_deleted_version": 1.5 * gb}.items()],
+        "tables": [{"DATABASE_NAME": "d", "TABLE_NAME": "big", "STORAGE_TYPE": "INMEMORY_ROWSTORE", "PARTITION_TYPE": "Master",
+                    "mem": 6 * gb ** 3 * 1024, "n_rows": 1000, "parts": 8},
+                   {"DATABASE_NAME": "d", "TABLE_NAME": "big", "STORAGE_TYPE": "INMEMORY_ROWSTORE", "PARTITION_TYPE": "Replica",
+                    "mem": 6 * gb ** 3 * 1024, "n_rows": 1000, "parts": 8}],
+        "activities": [{"act": "Select_t_abc", "q": "select * from t", "db": "d", "mem_bs": 4e10, "el_ms": 10_000,
+                        "spill_b": 5e8, "last": None}],
+        "pools": [], "pool_limits": [],
+    }
+    d = cmem.analyse(raw)
+    n = d["nodes"][0]
+    assert n["pct"] == 97.0 and n["table_pct"] > 95
+    groups = {g["key"]: g["bytes"] for g in n["groups"]}
+    assert groups["table"] == 8.8 * gb * 1024 * 1024 and groups["other"] >= 0
+    texts = " ".join(a["text"] for a in d["advice"])
+    for part in ("error 1712", "error 1720", "deleted rows", "rowstore table", "while it runs", "spilled"):
+        assert part in texts, (part, texts)
+    t = d["tables"][0]
+    assert t["rows"] == 1000 and t["replica_bytes"] == t["bytes"], "replicas apart, rows counted once"

@@ -861,5 +861,5 @@ def cluster_monitor_remote_stats() -> CallToolResult:
     return tool_result(f"Remote storage of {len(dbs)} bottomless database(s)", {"databases": dbs})
 
 
-# Health, History and Backups tabs (their own app tools, only called while their tab is open).
-from . import cluster_ops  # noqa: E402,F401
+# Memory, Health, History and Backups tabs (their own app tools, only called while their tab is open).
+from . import cluster_memory, cluster_ops  # noqa: E402,F401

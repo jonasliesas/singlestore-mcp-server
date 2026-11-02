@@ -76,3 +76,20 @@ def test_cluster_monitor_health_history_backups_tabs(ui, app_url) -> None:
     assert not b, f"error banner shown: {b}"
     e = errors.drain()
     assert not e, f"console errors: {e}"
+
+
+def test_cluster_monitor_memory_tab(ui, app_url) -> None:
+    page, errors = ui
+    page.goto(app_url("cluster_monitor", {}), wait_until="domcontentloaded")
+    f = app_frame(page, 30)
+    assert wait_js(f, "document.querySelectorAll('.cm-node').length > 0", 30), text(f)[:300]
+    f.get_by_role("tab", name="Memory").click()
+    assert wait_js(f, "/Where this node's memory goes/.test(document.body.innerText)", 30), "Memory tab: " + text(f)[:400]
+    body = text(f)
+    for part in ("Leaves (", "Aggregators (", "Statements using memory", "Tables in memory (", "Rowstore tables of max_table_memory"):
+        assert part in body, f"Memory tab is missing {part!r}"
+    # Every node card has a stacked bar with a legend.
+    assert f.evaluate("[...document.querySelectorAll('.cm-node')].every((c) => c.querySelector('.cm-stack') && c.querySelector('.cm-part'))")
+    assert not banners(page), banners(page)
+    e = errors.drain()
+    assert not e, f"console errors: {e}"
