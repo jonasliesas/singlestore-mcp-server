@@ -112,6 +112,12 @@ def apply_seed(seed: dict[str, Any]) -> dict[str, Any]:
     from . import connections, sas_viya
 
     done: dict[str, Any] = {}
+    if "collector" in seed:  # the Studio repository (None: the hub's collector isn't running)
+        from . import remote
+
+        c = seed["collector"] or {}
+        remote.configure(c.get("url"), c.get("token"), c.get("source"))
+        done["collector"] = remote.configured()
     viya = seed.get("viya") or {}
     if isinstance(seed.get("access"), dict):  # the user's notebook flag + group rules (from the hub's sign-in check)
         apply_access(seed["access"], str(viya.get("name") or ""))

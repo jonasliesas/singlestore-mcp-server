@@ -268,13 +268,7 @@ def epoch(t: Any) -> float:
 
 def stored_calls(since: str | None = None) -> list[dict[str, Any]]:
     """EP calls kept in the local history store (traced runs; the store has no start time, so start = end − ms)."""
-    conn = history_store.connect()
-    try:
-        cond, params = ("AND finished >= ?", [since]) if since else ("", [])
-        rows = conn.execute(f"SELECT finished, ms, rows, ok, database, user, sample, stmt, shape FROM runs"
-                            f" WHERE source = ? AND origin = 'SAS EP' {cond}", (history_store.source_id(), *params)).fetchall()
-    finally:
-        conn.close()
+    rows = history_store.origin_runs("SAS EP", since)
     out = []
     for r in rows:
         if _METADATA.match(r["sample"] or ""):
@@ -909,12 +903,7 @@ def overview(since: str | None = None, live: list[dict[str, Any]] | None = None)
     the fast ones). ``since``: cluster time "YYYY-MM-DD HH:MM:SS"."""
     cut = epoch(since) if since else 0.0
     calls = merge_calls([c for c in live or [] if c["end"] >= cut], stored_calls(since))
-    src = history_store.source_id()
-    conn = history_store.connect()
-    try:
-        plans = history_store._plan_executions(conn, src, since)
-    finally:
-        conn.close()
+    plans = history_store.plan_executions(since)
     ok = [c for c in calls if c["ok"]]
     pl = calls_plateau(calls)
     groups: dict[tuple[str, str, str], dict[str, Any]] = {}

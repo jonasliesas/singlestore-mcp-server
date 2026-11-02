@@ -66,6 +66,7 @@ class HubConfig:
     allowed_users: tuple[str, ...] = ()  # empty: every SAS user who can sign in (with a group set: an extra list)
     users_group: str = ""                 # SAS group whose members may use Studio (empty: no group check)
     notebook_group: str = ""              # SAS group whose members may use notebooks (and Studio)
+    monitor_group: str = ""               # SAS group whose members see every user's queries (Studio repository)
     trust_forwarded: bool = False        # take the client address from X-Forwarded-For (behind the ingress)
     notebooks: bool = False               # STUDIO_NOTEBOOKS=local or gateway (notebooks_mode says which)
     notebooks_mode: str = "off"           # off | local (kernels in each user's Studio) | gateway (Enterprise Gateway)
@@ -84,6 +85,15 @@ class HubConfig:
     metrics: bool = True
     default_s2: dict[str, str] = field(default_factory=dict)
     python: str = ""                      # Python that runs the Studio processes (default: this one)
+    # The Studio repository (``collector``): on when the service account's password is set (a Secret).
+    repository_db: str = "SSSTUDIO"
+    collector_user: str = "svc_studio_collector"
+    collector_password: str = field(default="", repr=False)
+    collector_s2: dict[str, str] = field(default_factory=dict)   # host, port, ssl_disabled, ssl_ca (default: default_s2)
+
+    @property
+    def collector(self) -> bool:
+        return bool(self.collector_password and self.collector_s2.get("host"))
 
     def __post_init__(self) -> None:
         # HubConfig(notebooks=True) without a mode: local notebooks, as before step 2a.
@@ -121,7 +131,7 @@ class HubConfig:
         from .access import Rules
 
         return Rules(users_group=self.users_group, notebook_group=self.notebook_group, allowed_users=self.allowed_users,
-                     notebooks=self.notebooks)
+                     notebooks=self.notebooks, monitor_group=self.monitor_group)
 
     @property
     def gateway(self) -> bool:
@@ -225,6 +235,7 @@ def load() -> HubConfig:
         allowed_users=_csv("STUDIO_ALLOWED_USERS"),
         users_group=_env("STUDIO_USERS_GROUP"),
         notebook_group=_env("STUDIO_NOTEBOOK_GROUP"),
+        monitor_group=_env("STUDIO_MONITOR_GROUP"),
         trust_forwarded=_flag("STUDIO_TRUST_FORWARDED", False),
         notebooks=nb_mode != "off",
         notebooks_mode=nb_mode,
@@ -243,7 +254,17 @@ def load() -> HubConfig:
         metrics=_flag("STUDIO_METRICS", True),
         default_s2=default_s2,
         python=_env("STUDIO_PYTHON"),
+        repository_db=_env("STUDIO_REPOSITORY_DB") or "SSSTUDIO",
+        collector_user=_env("STUDIO_COLLECTOR_USER") or "svc_studio_collector",
+        collector_password=_env("STUDIO_COLLECTOR_PASSWORD"),
+        collector_s2={k: v for k, v in {
+            "host": _env("STUDIO_COLLECTOR_HOST") or default_s2.get("host", ""),
+            "port": _env("STUDIO_COLLECTOR_PORT") or default_s2.get("port", "") or "3306",
+            "ssl_disabled": _env("STUDIO_COLLECTOR_SSL_DISABLED"), "ssl_ca": _env("STUDIO_COLLECTOR_SSL_CA"),
+        }.items() if v},
     )
+    if cfg.repository_db and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", cfg.repository_db):
+        raise SystemExit("STUDIO_REPOSITORY_DB is a database name (letters, digits and _).")
     if cfg.oauth_mode == "redirect" and cfg.client_id == "vscode":
         raise SystemExit("STUDIO_OAUTH_MODE=redirect needs the hub's own SAS Logon client (STUDIO_OAUTH_CLIENT_ID).")
     if cfg.gateway and (not cfg.gateway_url or len(cfg.gateway_token) < 32):

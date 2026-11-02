@@ -81,10 +81,23 @@ class Hub:
                                                        relay_url=cfg.relay_url, verify=cfg.gateway_verify),
                                        self.audit, allowed=self._kernel_access, folder=safe_name)
             self.spawner.broker = self.broker
+        self.collector = None
+        if cfg.collector:
+            from .collector import CollectorProcess
+
+            self.collector = CollectorProcess(cfg, self.audit)
+            self.spawner.collector = self.collector
+            self.collector.on_ready = self._collector_ready
         self.login_limit = RateLimiter(cfg.login_rate, 60.0)
         self.httpd: ThreadingHTTPServer | None = None
         self._close_lock = threading.Lock()
         self._closed = False
+
+    def _collector_ready(self) -> None:
+        """The collector (re)started: running Studios get its address (it has a new port)."""
+        for st in self.spawner.running():
+            if st.ready.is_set() and st.port and not st.stopping:
+                self.spawner.push_seed(st, {"collector": self.spawner.collector_seed(st.user)})
 
     def _kernel_access(self, user: str) -> bool:
         """Gateway kernels only for users whose sign-in check (or a later re-check) gave notebooks."""
@@ -97,6 +110,9 @@ class Hub:
         self.httpd = _HubServer((self.cfg.bind, self.cfg.port), handler)
         if self.broker is not None:
             self.broker.serve()
+        if self.collector is not None:
+            self.collector.start()
+            self.collector.wait_ready(20)  # Studios started before it is up keep their own store until a reseed
         self.spawner.start_reaper()
         port = self.httpd.server_address[1]
         self.audit.record("hub_start", port=port, mode=self.cfg.oauth_mode, viya=self.cfg.viya_url,
@@ -125,6 +141,8 @@ class Hub:
             self.spawner.stop_all()
             if self.broker is not None:
                 self.broker.close()
+            if self.collector is not None:
+                self.collector.stop()
             if httpd is not None:
                 httpd.server_close()
                 self.audit.record("hub_stop")
@@ -136,7 +154,7 @@ class Hub:
         STUDIO_NOTEBOOKS. The identities service down: access refused (a new sign-in waits until it answers)."""
         rules = self.cfg.rules
         groups: list[dict[str, str]] | None = []
-        if rules.needs_groups:
+        if rules.wants_groups:
             try:
                 groups = access.fetch_groups(lambda path: oauth.get(self.cfg, path, access_token), user)
             except (access.GroupCheckFailed, oauth.SignInError):
@@ -154,12 +172,18 @@ class Hub:
             return
         new = access.Access(app=bool(report.get("app")), app_via=str(report.get("app_via") or "")[:120],
                             notebooks=bool(report.get("notebooks")) and old.notebooks,
-                            notebooks_via=str(report.get("notebooks_via") or "")[:120])
-        if (old.app, old.notebooks) == (new.app, new.notebooks):
+                            notebooks_via=str(report.get("notebooks_via") or "")[:120],
+                            monitor=bool(report.get("monitor")) and old.monitor,
+                            monitor_via=str(report.get("monitor_via") or "")[:120])
+        if (old.app, old.notebooks, old.monitor) == (new.app, new.notebooks, new.monitor):
             return
         self.spawner.access[st.user] = new
         self.audit.record("access_changed", user=st.user, app=new.app, app_via=new.app_via, notebooks=new.notebooks,
-                          notebooks_via=new.notebooks_via)
+                          notebooks_via=new.notebooks_via, monitor=new.monitor)
+        if old.monitor and not new.monitor and self.collector is not None and new.app:
+            # Out of the monitor group: a new repository token that shows only their own queries.
+            threading.Thread(target=self.spawner.push_seed, args=(st, {"collector": self.spawner.collector_seed(st.user)}),
+                             daemon=True).start()
         if self.broker is not None and old.notebooks and not new.notebooks:  # gateway kernels stop with the access
             threading.Thread(target=self.broker.forget_studio, args=(st.user, "notebook access removed"), daemon=True).start()
         if not new.app:
@@ -177,8 +201,32 @@ class Hub:
         # StudioFull when max_users run already (an admin may start one more, to reach /admin)
         self.spawner.ensure(who["id"], tokens, ip=ip, admin=self.cfg.is_admin(who["id"]))
         session = self.sessions.create(who["id"], who["name"], ip)
-        self.audit.record("login", user=who["id"], ip=ip, mode=self.cfg.oauth_mode, app_via=acc.app_via, notebooks=acc.notebooks)
+        self.audit.record("login", user=who["id"], ip=ip, mode=self.cfg.oauth_mode, app_via=acc.app_via, notebooks=acc.notebooks,
+                          monitor=acc.monitor)
         return session
+
+
+def repository_summary(hub: Hub) -> str:
+    """One line for the admin page: the Studio repository's state."""
+    if hub.collector is None:
+        return "off (each Studio keeps its own history; set STUDIO_COLLECTOR_PASSWORD)"
+    st = hub.collector.status()
+    if not st.get("running"):
+        return f"{hub.cfg.repository_db}: collector not running - {st.get('error') or 'starting'}"
+    repo = st.get("repository") or {}
+    parts = [f"{hub.cfg.repository_db} on {st.get('source')}"]
+    if repo.get("last_flush"):
+        parts.append(f"last write {time.strftime('%H:%M:%S', time.localtime(repo['last_flush']))}")
+    if repo.get("pending"):
+        parts.append(f"{repo['pending']} rows waiting for the cluster")
+    m = st.get("metrics") or {}
+    if m.get("last_sample"):
+        parts.append(f"last sample {time.strftime('%H:%M:%S', time.localtime(m['last_sample']))}")
+    for err in (repo.get("last_error"), st.get("last_error"), m.get("last_error"), st.get("error")):
+        if err:
+            parts.append(f"error: {err}")
+            break
+    return " · ".join(parts)
 
 
 def _handler(hub: Hub) -> type[BaseHTTPRequestHandler]:
@@ -463,7 +511,8 @@ def _handler(hub: Hub) -> type[BaseHTTPRequestHandler]:
             sess = [{**acc(x.user), "user": x.user, "name": x.name, "ip": x.ip, "created": x.created, "last_seen": x.last_seen} for x in hub.sessions.all()]
             limits = {"users": f"{len(rows)} of {cfg.max_users}", "idle stop": f"{cfg.idle_minutes} min",
                       "sign-in": cfg.oauth_mode, "notebooks": cfg.notebooks_mode, "Ask Claude": "on" if cfg.assistant else "off",
-                      "users group": cfg.users_group or "none", "notebook group": cfg.notebook_group or "none"}
+                      "users group": cfg.users_group or "none", "notebook group": cfg.notebook_group or "none",
+                      "monitor group": cfg.monitor_group or "none", "repository": repository_summary(hub)}
             warning = NOTEBOOKS_LOCAL_NOTE if cfg.notebooks_mode == "local" else None
             kernels = None
             if hub.broker is not None:

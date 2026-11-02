@@ -211,6 +211,7 @@ class Spawner:
         self.access: dict[str, Access] = {}   # per user, from the hub's sign-in check (SAS groups)
         self.on_access: Any = None            # hub callback(user, report): a Studio re-checked the user's groups
         self.broker: Any = None               # hub.gateway.KernelBroker (STUDIO_NOTEBOOKS=gateway)
+        self.collector: Any = None            # hub.collector.CollectorProcess (the Studio repository)
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._reaper: threading.Thread | None = None
@@ -283,10 +284,18 @@ class Spawner:
         # after each Viya token renewal.
         rules = self.cfg.rules
         out["access"] = {"notebooks": self.notebooks_for(user), "viya_url": self.cfg.viya_url,
-                         "rules": rules.to_json() if rules.needs_groups else None}
+                         "rules": rules.to_json() if rules.wants_groups else None}
         if self.cfg.default_s2.get("host"):
             out["singlestore"] = {**self.cfg.default_s2, "user": user}
+        if self.collector is not None:
+            out["collector"] = self.collector_seed(user)
         return out
+
+    def collector_seed(self, user: str) -> dict[str, Any] | None:
+        """The Studio repository for this user: the collector's address and a token with what they may see (None:
+        the collector isn't running, the Studio keeps its own store)."""
+        a = self.access.get(user)
+        return self.collector.seed_for(user, monitor=bool(a and a.monitor), admin=self.cfg.is_admin(user))
 
     # ------------------------------------------------------------ processes
     def get(self, user: str) -> Studio | None:
@@ -417,9 +426,13 @@ class Spawner:
 
     def _reseed(self, st: Studio, tokens: dict[str, Any]) -> None:
         """A running Studio gets the user's fresh SAS sign-in (they signed in again)."""
+        self.push_seed(st, self.seed(st.user, tokens))
+
+    def push_seed(self, st: Studio, seed: dict[str, Any]) -> None:
+        """Hand a running Studio new settings (``studio_server.apply_seed``)."""
         try:
             self.wait_ready(st)
-            body = json.dumps(self.seed(st.user, tokens)).encode()
+            body = json.dumps(seed).encode()
             origin = f"http://127.0.0.1:{st.port}"
             req = urllib.request.Request(f"{origin}{st.upstream('hub/seed')}", data=body, method="POST",
                                          headers={"Content-Type": "application/json", "Origin": origin})

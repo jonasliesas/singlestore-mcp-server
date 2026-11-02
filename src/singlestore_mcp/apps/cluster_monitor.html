@@ -977,7 +977,7 @@ function historyTab(d) {
   const head = h("div", { class: "cm-section", style: { marginTop: 0 } },
     h("h2", {}, "History"),
     h("span", { class: "s2-faint s2-small" }, st ? (st.enabled
-      ? `sampled every ${st.interval_s} s while the server runs · kept ${st.retention_days} days (older than 24 h: 10-minute averages)${st.last_sample ? ` · last sample ${fmt.relTime(st.last_sample)}` : ""}`
+      ? `sampled every ${st.interval_s} s while the server runs · kept ${st.retention_days} days (older than ${(st.raw_days || 1) === 1 ? "24 h" : `${st.raw_days} days`}: 10-minute averages)${st.last_sample ? ` · last sample ${fmt.relTime(st.last_sample)}` : ""}`
       : "sampling is off (SINGLESTORE_MCP_METRICS=0): only data stored earlier is shown") : ""),
     h("span", { class: "s2-spacer" }),
     seg("Time range", HIST_RANGES, hs.range, (k) => { hs.range = k; refreshTab(true); render(); }),

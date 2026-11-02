@@ -2,6 +2,7 @@
 
     STUDIO_USERS_GROUP      members may use Studio
     STUDIO_NOTEBOOK_GROUP   members may use notebooks (and so Studio as well)
+    STUDIO_MONITOR_GROUP    members see every user's queries in the Studio repository (others: their own)
     STUDIO_ALLOWED_USERS    an extra allow-list of SAS user ids (with no group set: the only list, as before)
 
 Both groups empty: everyone who can sign in may use Studio (or only STUDIO_ALLOWED_USERS when that is set).
@@ -40,11 +41,18 @@ class Rules:
     users_group: str = ""
     notebook_group: str = ""
     allowed_users: tuple[str, ...] = ()
+    monitor_group: str = ""          # STUDIO_MONITOR_GROUP: may see every user's queries (not an access group)
     notebooks: bool = False          # STUDIO_NOTEBOOKS: the server-wide switch
 
     @property
     def needs_groups(self) -> bool:
+        """The groups decide who may use Studio (or notebooks)."""
         return bool(self.users_group or self.notebook_group)
+
+    @property
+    def wants_groups(self) -> bool:
+        """The user's groups are read at sign-in (and at each re-check): for access, or for the monitor group."""
+        return self.needs_groups or bool(self.monitor_group)
 
     def to_json(self) -> dict[str, Any]:
         return {**asdict(self), "allowed_users": list(self.allowed_users)}
@@ -52,7 +60,8 @@ class Rules:
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> Rules:
         return cls(users_group=str(d.get("users_group") or ""), notebook_group=str(d.get("notebook_group") or ""),
-                   allowed_users=tuple(d.get("allowed_users") or ()), notebooks=bool(d.get("notebooks")))
+                   allowed_users=tuple(d.get("allowed_users") or ()), notebooks=bool(d.get("notebooks")),
+                   monitor_group=str(d.get("monitor_group") or ""))
 
 
 @dataclass
@@ -62,6 +71,8 @@ class Access:
     notebooks: bool
     notebooks_via: str
     reason: str = ""        # why app access was refused (safe to show)
+    monitor: bool = False   # sees every user's queries in the Studio repository (STUDIO_MONITOR_GROUP)
+    monitor_via: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -95,6 +106,16 @@ def _member(groups: list[dict[str, str]], group: str) -> bool:
     return bool(g) and any(g in (x["id"].lower(), x["name"].lower()) for x in groups)
 
 
+def _monitor(rules: Rules, groups: list[dict[str, str]] | None) -> tuple[bool, str]:
+    if not rules.monitor_group:
+        return False, "no monitor group"
+    if groups is None:
+        return False, "group check failed"
+    if _member(groups, rules.monitor_group):
+        return True, f"group {rules.monitor_group}"
+    return False, f"not in {rules.monitor_group}"
+
+
 def decide(user: str, rules: Rules, groups: list[dict[str, str]] | None) -> Access:
     """App and notebook access for ``user``. ``groups``: their memberships, or None when the check failed (only
     asked for when a group is configured)."""
@@ -105,7 +126,8 @@ def decide(user: str, rules: Rules, groups: list[dict[str, str]] | None) -> Acce
         nb = app and rules.notebooks and listed
         nb_via = ("off on this server" if not rules.notebooks else "STUDIO_ALLOWED_USERS" if nb
                   else "only for STUDIO_ALLOWED_USERS")
-        return Access(app=app, app_via=via, notebooks=nb, notebooks_via=nb_via,
+        mon, mon_via = _monitor(rules, groups)
+        return Access(app=app, app_via=via, notebooks=nb, notebooks_via=nb_via, monitor=app and mon, monitor_via=mon_via,
                       reason="" if app else f"{user} isn't allowed to use this Studio. Ask the Studio admin.")
     if groups is None:
         return Access(app=False, app_via="group check failed", notebooks=False, notebooks_via="group check failed",
@@ -128,6 +150,7 @@ def decide(user: str, rules: Rules, groups: list[dict[str, str]] | None) -> Acce
     else:  # groups for the app only: notebooks for the extra list
         nb, nb_via = listed, "STUDIO_ALLOWED_USERS" if listed else "only for STUDIO_ALLOWED_USERS"
     groups_text = " or ".join(g for g in (rules.users_group, rules.notebook_group) if g)
-    return Access(app=app, app_via=app_via, notebooks=app and nb, notebooks_via=nb_via,
+    mon, mon_via = _monitor(rules, groups)
+    return Access(app=app, app_via=app_via, notebooks=app and nb, notebooks_via=nb_via, monitor=app and mon, monitor_via=mon_via,
                   reason="" if app else f"{user} isn't in the SAS group {groups_text} that may use this Studio. "
                                         "Ask the Studio admin to add you.")

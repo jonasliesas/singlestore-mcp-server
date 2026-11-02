@@ -1026,12 +1026,7 @@ def sas_history_lookup(sql: str, database: str | None = None) -> CallToolResult:
     except Exception as exc:  # noqa: BLE001 - cluster unreachable: say so, the history may still know it
         found["plan_cache_error"] = str(exc)[:200]
     try:
-        conn = history_store.connect()
-        try:
-            row = conn.execute("SELECT COUNT(*) AS n FROM runs WHERE stmt IN (?, ?)", (key, key_any)).fetchone()
-            found["history"] = int(row["n"] or 0)
-        finally:
-            conn.close()
+        found["history"] = history_store.count_runs([key, key_any])
     except Exception:  # noqa: BLE001
         pass
     found["found"] = bool(found["plan_cache"] or found["history"])

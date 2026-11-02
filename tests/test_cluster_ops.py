@@ -117,7 +117,7 @@ def test_settings_and_off_switch(monkeypatch) -> None:
     assert s["enabled"] and s["interval_s"] == 60 and s["retention_days"] == 7
     monkeypatch.setenv("SINGLESTORE_MCP_METRICS_INTERVAL", "1")
     monkeypatch.setenv("SINGLESTORE_MCP_METRICS_RETENTION_DAYS", "500")
-    assert ms.settings()["interval_s"] == 15 and ms.settings()["retention_days"] == 90
+    assert ms.settings()["interval_s"] == 15 and ms.settings()["retention_days"] == 400
     monkeypatch.setenv("SINGLESTORE_MCP_METRICS_INTERVAL", "junk")
     assert ms.settings()["interval_s"] == 60
     for off in ("0", "off", "False", "no"):

@@ -13,8 +13,9 @@ running queries and connections in SQLite, for the Cluster Monitor's History tab
 - Stored in ``~/.singlestore-mcp/metrics.db`` (``SINGLESTORE_MCP_HOME``), keyed by cluster (host:port of the
   active connection, as the query history). Two server processes (Claude's and the desktop Workspace) share
   the file: a process skips its sample when the other one already sampled the same cluster in this interval.
-- Retention ``SINGLESTORE_MCP_METRICS_RETENTION_DAYS`` (default 7, 1-90). Raw samples are kept for 24 h;
-  older ones are folded into 10-minute rows (averages weighted by sample count, peaks for CPU and queue).
+- Retention ``SINGLESTORE_MCP_METRICS_RETENTION_DAYS`` (default 7, 1-400). Raw samples are kept for
+  ``SINGLESTORE_MCP_METRICS_RAW_DAYS`` (default 1, 1-90); older ones are folded into 10-minute rows (averages
+  weighted by sample count, peaks for CPU and queue). The server version's collector keeps 30 days raw, 1 year coarse.
 
 Read-only on the cluster.
 """
@@ -29,12 +30,14 @@ from typing import Any
 
 from .db import db
 from .paths import data_dir
+from .remote import LOCAL
 
 MARKER = "/* s2-metrics */"
 COARSE_S = 600            # older samples are folded into 10-minute rows
 RAW_KEEP_S = 86400        # raw samples are kept for 24 h
 _COMPACT_EVERY_S = 3600
 BASELINE_DELAY_S = 8      # the Cluster Monitor's CPU baseline is taken this long after start (see _loop)
+BASELINE_REFRESH_S = 240  # with the collector (server mode): how often the baseline is refreshed instead of sampling
 _OFF = ("0", "false", "no", "off")
 
 _lock = threading.Lock()
@@ -63,7 +66,8 @@ def settings() -> dict[str, Any]:
     return {
         "enabled": os.environ.get("SINGLESTORE_MCP_METRICS", "1").strip().lower() not in _OFF,
         "interval_s": _env_int("SINGLESTORE_MCP_METRICS_INTERVAL", 60, 15, 300),
-        "retention_days": _env_int("SINGLESTORE_MCP_METRICS_RETENTION_DAYS", 7, 1, 90),
+        "retention_days": _env_int("SINGLESTORE_MCP_METRICS_RETENTION_DAYS", 7, 1, 400),
+        "raw_days": _env_int("SINGLESTORE_MCP_METRICS_RAW_DAYS", 1, 1, 90),
         "delay_s": _env_int("SINGLESTORE_MCP_METRICS_DELAY", 20, 0, 3600),
     }
 
@@ -232,6 +236,11 @@ def trends(conn: sqlite3.Connection, source: str, now: float, window_s: int = TR
 
 def current_trends(window_s: int = TREND_WINDOW_S) -> list[dict[str, Any]]:
     """``trends`` of the active cluster from metrics.db (no cluster query)."""
+    from . import remote
+
+    r = remote.call("metrics_trends", window_s=window_s)
+    if r is not LOCAL:
+        return r
     source = _source()
     conn = connect()
     try:
@@ -299,6 +308,11 @@ def _source() -> str:
 
 def sample_once(force: bool = False) -> dict[str, Any]:
     """Take one sample and store it (unless another process sampled this cluster less than an interval ago)."""
+    from . import remote
+
+    r = remote.call("metrics_sample")
+    if r is not LOCAL:
+        return r
     cfg = settings()
     interval = cfg["interval_s"]
     started = time.time()
@@ -314,7 +328,7 @@ def sample_once(force: bool = False) -> dict[str, Any]:
         rows = _collect()
         n = write(conn, source, t, interval, rows)
         if force or started - _last_compact.get(source, 0) > _COMPACT_EVERY_S:
-            compact(conn, started, cfg["retention_days"])
+            compact(conn, started, cfg["retention_days"], raw_keep_s=cfg["raw_days"] * 86400)
             _last_compact[source] = started
     finally:
         conn.close()
@@ -325,6 +339,11 @@ def sample_once(force: bool = False) -> dict[str, Any]:
 
 def history(range_key: str = "1h") -> dict[str, Any]:
     """Stored history of the active cluster for a range ("1h", "24h", "7d"). Local SQLite only: no cluster query."""
+    from . import remote
+
+    r = remote.call("metrics_history", range_key=range_key)
+    if r is not LOCAL:
+        return r
     range_s = RANGES.get(range_key, 3600)
     source = _source()
     conn = connect()
@@ -363,6 +382,13 @@ def _loop() -> None:
     _prime_baseline()
     if _stop.wait(cfg["delay_s"] - early):  # let the server start first
         return
+    from . import remote
+
+    while remote.active() and not _stop.is_set():
+        # The collector samples for everyone: only keep this process's Cluster Monitor baseline fresh.
+        if _stop.wait(BASELINE_REFRESH_S):
+            return
+        _prime_baseline()
     while not _stop.is_set():
         try:
             if sample_once().get("skipped"):

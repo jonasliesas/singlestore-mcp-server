@@ -24,6 +24,7 @@ from typing import Any
 
 from .db import db
 from .paths import data_dir
+from .remote import LOCAL
 
 # Every statement this server sends for its own bookkeeping starts with a "/* s2-… */" comment;
 # the history views leave those out.
@@ -48,6 +49,19 @@ _OVERLAP_S = 120           # re-read a little before the newest stored event (cl
 
 _lock = threading.Lock()
 _last_sync: dict[str, float] = {}
+
+
+def _remote(name: str, **kwargs: Any) -> Any:
+    """Server mode with the Studio repository: the collector answers (``remote.LOCAL``: no collector, use SQLite)."""
+    from . import remote
+
+    return remote.call(name, **kwargs)
+
+
+def _by_user(user: str | None) -> tuple[str, list[Any]]:
+    """SQL condition (and parameter) for "only this SingleStore user's runs" (the collector, for users outside the
+    monitor group); empty for everyone."""
+    return (" AND LOWER(user) = ?", [user.lower()]) if user else ("", [])
 
 
 # ------------------------------------------------------------------ shapes and origins
@@ -460,6 +474,10 @@ def sync(force: bool = False, min_ms: int = 1000) -> dict[str, Any]:
 
     Keeps every run of at least ``min_ms``, every failed run (the trace keeps those whatever their duration
     when ``Trace_all_failed_executions`` is on) and every SAS EP call the trace kept."""
+    from . import remote
+
+    if remote.active():  # the collector syncs for everyone (and this user's connection may not see every query)
+        return {"skipped": True, "collector": True}
     src = source_id()
     now = time.time()
     with _lock:
@@ -598,6 +616,10 @@ _PLAN_COLUMNS = ("node_id", "plan_id", "database", "first_load", "last_executed"
 
 def save_plans(plans: list[dict[str, Any]], force: bool = False) -> dict[str, Any]:
     """Upsert the plan cache rows into the store (throttled), and every 10 minutes sample their counters."""
+    from . import remote
+
+    if remote.active():  # the collector keeps the plan cache for everyone
+        return {"skipped": True, "collector": True}
     src = source_id()
     now = time.time()
     with _lock:
@@ -646,6 +668,9 @@ def snapshot_plans(force: bool = False) -> list[dict[str, Any]]:
 
 def stored_plans(since: str | None = None, limit: int = 2000) -> list[dict[str, Any]]:
     """Plans kept in the store for the active cluster (also those the cluster has evicted since), newest first."""
+    r = _remote("stored_plans", since=since, limit=limit)
+    if r is not LOCAL:
+        return r
     src = source_id()
     conn = connect()
     try:
@@ -664,6 +689,9 @@ def stored_plans(since: str | None = None, limit: int = 2000) -> list[dict[str, 
 
 
 def stored_plan(plan_key: str) -> dict[str, Any] | None:
+    r = _remote("stored_plan", plan_key=plan_key)
+    if r is not LOCAL:
+        return r
     src = source_id()
     conn = connect()
     try:
@@ -694,31 +722,35 @@ def _p95(values: list[int]) -> int:
     return values[min(len(values) - 1, int(round(0.95 * (len(values) - 1))))]
 
 
-def _buckets(conn: sqlite3.Connection, src: str, since: str, fmt: str) -> list[dict[str, Any]]:
+def _buckets(conn: sqlite3.Connection, src: str, since: str, fmt: str, user: str | None = None) -> list[dict[str, Any]]:
     per: dict[str, list[tuple[int, int]]] = {}
-    for r in conn.execute("SELECT finished, ms, ok FROM runs WHERE source = ? AND finished >= ? ORDER BY finished",
-                          (src, since)):
+    who, who_params = _by_user(user)
+    for r in conn.execute(f"SELECT finished, ms, ok FROM runs WHERE source = ? AND finished >= ?{who} ORDER BY finished",
+                          (src, since, *who_params)):
         per.setdefault(r["finished"][:fmt], []).append((r["ms"], r["ok"]))
     return [{"t": k, "queries": len(v), "total_ms": sum(m for m, _ in v), "failed": sum(1 for _, ok in v if not ok),
              "p95_ms": _p95([m for m, _ in v])} for k, v in sorted(per.items())]
 
 
-def bucket_runs(bucket: str, failed_only: bool = False, limit: int = 500) -> dict[str, Any]:
-    """The stored runs of one Trends bar: a day ("YYYY-MM-DD") or an hour ("YYYY-MM-DD HH"), slowest first."""
-    import re
-
+def bucket_runs(bucket: str, failed_only: bool = False, limit: int = 500, user: str | None = None) -> dict[str, Any]:
+    """The stored runs of one Trends bar: a day ("YYYY-MM-DD") or an hour ("YYYY-MM-DD HH"), slowest first.
+    ``user``: only that SingleStore user's runs."""
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}( \d{2})?", bucket or ""):
         raise ValueError("bucket must be YYYY-MM-DD or YYYY-MM-DD HH")
+    r = _remote("bucket_runs", bucket=bucket, failed_only=failed_only, limit=limit)
+    if r is not LOCAL:
+        return r
     src = source_id()
+    who, who_params = _by_user(user)
     conn = connect()
     try:
-        cond = " AND ok = 0" if failed_only else ""
+        cond = (" AND ok = 0" if failed_only else "") + who
         total = conn.execute(f"SELECT COUNT(*) FROM runs WHERE source = ? AND finished LIKE ?{cond}",
-                             (src, bucket + "%")).fetchone()[0]
+                             (src, bucket + "%", *who_params)).fetchone()[0]
         rows = conn.execute(
             "SELECT event_key, finished, ms, user, database, ok, error_code, category, rows, sample, origin, shape"
             f" FROM runs WHERE source = ? AND finished LIKE ?{cond} ORDER BY ms DESC LIMIT ?",
-            (src, bucket + "%", max(1, min(2000, int(limit))))).fetchall()
+            (src, bucket + "%", *who_params, max(1, min(2000, int(limit))))).fetchall()
     finally:
         conn.close()
     return {"bucket": bucket, "failed_only": failed_only, "total": total,
@@ -743,10 +775,18 @@ def _kept(r: sqlite3.Row) -> dict[str, Any]:
             "plan_id": r["plan_id"], "stmt": r["stmt"]}
 
 
-def kept_runs(before: str | None, since: str | None = None, min_ms: int = 1000, limit: int = 5000) -> list[dict[str, Any]]:
+def kept_runs(before: str | None, since: str | None = None, min_ms: int = 1000, limit: int = 5000,
+              user: str | None = None) -> list[dict[str, Any]]:
     """Stored runs the cluster's query history no longer has: finished before ``before`` (its oldest event; None:
-    the trace is empty, so every stored run), from ``since`` on, at least ``min_ms``; newest first."""
+    the trace is empty, so every stored run), from ``since`` on, at least ``min_ms``; newest first.
+    ``user``: only that SingleStore user's runs."""
+    r = _remote("kept_runs", before=before, since=since, min_ms=min_ms, limit=limit)
+    if r is not LOCAL:
+        return r
     cond, params = ["source = ?", "ms >= ?"], [source_id(), int(min_ms)]
+    if user:
+        cond.append("LOWER(user) = ?")
+        params.append(user.lower())
     if before:
         cond.append("finished < ?")
         params.append(before)
@@ -762,23 +802,32 @@ def kept_runs(before: str | None, since: str | None = None, min_ms: int = 1000, 
     return [_kept(r) for r in rows]
 
 
-def kept_run(event_key: str) -> dict[str, Any] | None:
-    """One stored run by its event key ("node:epoch:id"), or None."""
+def kept_run(event_key: str, user: str | None = None) -> dict[str, Any] | None:
+    """One stored run by its event key ("node:epoch:id"), or None (also when ``user`` is set and didn't run it)."""
+    r = _remote("kept_run", event_key=event_key)
+    if r is not LOCAL:
+        return r
+    who, who_params = _by_user(user)
     conn = connect()
     try:
-        r = conn.execute(f"SELECT {_KEPT_COLUMNS} FROM runs WHERE source = ? AND event_key = ?",
-                         (source_id(), event_key)).fetchone()
+        r = conn.execute(f"SELECT {_KEPT_COLUMNS} FROM runs WHERE source = ? AND event_key = ?{who}",
+                         (source_id(), event_key, *who_params)).fetchone()
     finally:
         conn.close()
     return _kept(r) if r else None
 
 
-def trends(days: int = 30, now: str | None = None) -> dict[str, Any]:
+def trends(days: int = 30, now: str | None = None, user: str | None = None) -> dict[str, Any]:
     """Daily buckets for ``days`` and hourly buckets for the last 48 h, plus shapes that got slower.
 
     ``now`` is the cluster's current time ("YYYY-MM-DD HH:MM:SS"), since stored times are cluster times.
+    ``user``: only that SingleStore user's runs.
     """
+    r = _remote("trends", days=days, now=now)
+    if r is not LOCAL:
+        return r
     src = source_id()
+    who, who_params = _by_user(user)
     days = max(1, min(366, int(days)))
     if now is None:
         now = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -787,28 +836,29 @@ def trends(days: int = 30, now: str | None = None) -> dict[str, Any]:
     conn = connect()
     try:
         info = conn.execute("SELECT COUNT(*) AS n, MIN(finished) AS oldest, MAX(finished) AS newest FROM runs"
-                            " WHERE source = ?", (src,)).fetchone()
-        daily = _buckets(conn, src, at(days * 86400)[:10], 10)
-        hourly = _buckets(conn, src, at(48 * 3600)[:13], 13)
-        slower = _slower(conn, src, at(7 * 86400), at(14 * 86400))
+                            f" WHERE source = ?{who}", (src, *who_params)).fetchone()
+        daily = _buckets(conn, src, at(days * 86400)[:10], 10, user)
+        hourly = _buckets(conn, src, at(48 * 3600)[:13], 13, user)
+        slower = _slower(conn, src, at(7 * 86400), at(14 * 86400), user)
     finally:
         conn.close()
     return {"source": src, "days": days, "now": now, "stored": info["n"], "oldest": info["oldest"],
             "newest": info["newest"], "daily": daily, "hourly": hourly, **slower}
 
 
-def _slower(conn: sqlite3.Connection, src: str, week: str, two_weeks: str) -> dict[str, Any]:
+def _slower(conn: sqlite3.Connection, src: str, week: str, two_weeks: str, user: str | None = None) -> dict[str, Any]:
     """Per shape: median duration in the last 7 days vs the 7 days before."""
     recent: dict[str, list[int]] = {}
     before: dict[str, list[int]] = {}
     samples: dict[str, dict[str, Any]] = {}
+    who, who_params = _by_user(user)
     for r in conn.execute("SELECT shape, finished, ms, sample, database, user, origin FROM runs"
-                          " WHERE source = ? AND finished >= ? AND ok = 1", (src, two_weeks)):
+                          f" WHERE source = ? AND finished >= ? AND ok = 1{who}", (src, two_weeks, *who_params)):
         (recent if r["finished"] >= week else before).setdefault(r["shape"], []).append(r["ms"])
         if r["finished"] >= week or r["shape"] not in samples:
             samples[r["shape"]] = {"sample": r["sample"], "database": r["database"], "user": r["user"], "origin": r["origin"]}
     seen_before = {r[0] for r in conn.execute(
-        "SELECT DISTINCT shape FROM runs WHERE source = ? AND finished < ?", (src, week))}
+        f"SELECT DISTINCT shape FROM runs WHERE source = ? AND finished < ?{who}", (src, week, *who_params))}
     slower, new = [], []
     for shape, ms in recent.items():
         med = statistics.median(ms)
@@ -862,19 +912,25 @@ def _plan_executions(conn: sqlite3.Connection, src: str, since: str | None) -> l
     return out
 
 
-def usage(since: str | None = None, limit: int = 100) -> dict[str, Any]:
+def usage(since: str | None = None, limit: int = 100, user: str | None = None) -> dict[str, Any]:
     """Most used tables and most active users from the store (``since``: cluster time "YYYY-MM-DD HH:MM:SS").
 
     Traced runs (individual statements over the trace threshold, plus failures) carry user, duration and tables;
-    the plan cache adds every execution of every statement, however short, but has no user."""
+    the plan cache adds every execution of every statement, however short, but has no user - so with ``user`` (only
+    that SingleStore user's runs) the plan cache is left out (``plans_hidden``)."""
+    r = _remote("usage", since=since, limit=limit)
+    if r is not LOCAL:
+        return r
     src = source_id()
+    who, who_params = _by_user(user)
     conn = connect()
     try:
         cond, params = ("AND finished >= ?", [since]) if since else ("", [])
         runs = conn.execute(f"SELECT finished, ms, user, database, ok, tables, stmt, origin FROM runs"
-                            f" WHERE source = ? {cond}", (src, *params)).fetchall()
-        plans = _plan_executions(conn, src, since)
-        info = conn.execute("SELECT MIN(finished) AS oldest, COUNT(*) AS n FROM runs WHERE source = ?", (src,)).fetchone()
+                            f" WHERE source = ? {cond}{who}", (src, *params, *who_params)).fetchall()
+        plans = [] if user else _plan_executions(conn, src, since)
+        info = conn.execute(f"SELECT MIN(finished) AS oldest, COUNT(*) AS n FROM runs WHERE source = ?{who}",
+                            (src, *who_params)).fetchone()
         pinfo = conn.execute("SELECT MIN(seen) AS first_seen, COUNT(*) AS n FROM plans WHERE source = ?", (src,)).fetchone()
     finally:
         conn.close()
@@ -958,4 +1014,72 @@ def usage(since: str | None = None, limit: int = 100) -> dict[str, Any]:
             "users": user_list[:limit], "user_count": len(user_list),
             "traced_runs": len(runs), "oldest": info["oldest"], "stored": info["n"],
             "plans": len(plans), "plans_stored": pinfo["n"], "plans_since": pinfo["first_seen"],
-            "plan_execs": sum(p["execs"] for p in plans), "approx": any(p["approx"] for p in plans)}
+            "plan_execs": sum(p["execs"] for p in plans), "approx": any(p["approx"] for p in plans),
+            "plans_hidden": bool(user)}
+
+
+# ------------------------------------------------------------------ for other modules (so the collector can answer them)
+
+def plan_executions(since: str | None = None) -> list[dict[str, Any]]:
+    """``_plan_executions`` of the active cluster: executions per stored plan within the period."""
+    r = _remote("plan_executions", since=since)
+    if r is not LOCAL:
+        return r
+    conn = connect()
+    try:
+        return _plan_executions(conn, source_id(), since)
+    finally:
+        conn.close()
+
+
+def origin_runs(origin_label: str, since: str | None = None, user: str | None = None) -> list[dict[str, Any]]:
+    """Stored runs with this origin (e.g. "SAS EP"), from ``since`` on."""
+    r = _remote("origin_runs", origin_label=origin_label, since=since)
+    if r is not LOCAL:
+        return r
+    cond, params = ("AND finished >= ?", [since]) if since else ("", [])
+    who, who_params = _by_user(user)
+    conn = connect()
+    try:
+        rows = conn.execute(f"SELECT finished, ms, rows, ok, database, user, sample, stmt, shape FROM runs"
+                            f" WHERE source = ? AND origin = ? {cond}{who}",
+                            (source_id(), origin_label, *params, *who_params)).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def count_runs(stmts: list[str], user: str | None = None) -> int:
+    """How many stored runs have one of these statement keys."""
+    stmts = [str(s) for s in stmts][:50]
+    if not stmts:
+        return 0
+    r = _remote("count_runs", stmts=stmts)
+    if r is not LOCAL:
+        return r
+    who, who_params = _by_user(user)
+    conn = connect()
+    try:
+        row = conn.execute(f"SELECT COUNT(*) AS n FROM runs WHERE source = ? AND stmt IN ({', '.join('?' * len(stmts))}){who}",
+                           (source_id(), *stmts, *who_params)).fetchone()
+    finally:
+        conn.close()
+    return int(row["n"] or 0)
+
+
+def prune(runs_days: int, plans_days: int, samples_days: int, now: float | None = None) -> dict[str, int]:
+    """Drop stored runs, plans and plan counter samples older than their retention (the collector, hourly; the
+    desktop keeps everything). Times in the store are cluster times; a few minutes of clock offset don't matter here."""
+    now = time.time() if now is None else now
+    at = lambda days: time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - days * 86400))  # noqa: E731
+    conn = connect()
+    try:
+        out = {
+            "runs": conn.execute("DELETE FROM runs WHERE finished < ?", (at(runs_days),)).rowcount,
+            "plans": conn.execute("DELETE FROM plans WHERE last_executed < ?", (at(plans_days),)).rowcount,
+            "plan_samples": conn.execute("DELETE FROM plan_samples WHERE t < ?", (at(samples_days),)).rowcount,
+        }
+        conn.commit()
+    finally:
+        conn.close()
+    return out
