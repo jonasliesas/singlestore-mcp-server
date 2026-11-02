@@ -140,6 +140,7 @@ class Collector:
         self.key = str(cfg["key"]).encode()
         self.interval_s = int(cfg.get("interval_s") or 60)
         self.retention = cfg.get("retention") or {}
+        self.users_dir = cfg.get("users_dir") or ""   # the users' Studio folders (their alerts, for admins)
         self.source = history_store.source_id()
         p = connections.active()
         self.repo = Repository(connections.connect_kwargs(p), cfg.get("database") or "SSSTUDIO", cfg["home"], self.retention)
@@ -227,6 +228,12 @@ class Collector:
             pass
         self.repo.close()
 
+    def overview(self) -> dict[str, Any]:
+        """For Studio admins in the app: the repository's state and every user's open alerts."""
+        from .alerts import open_alerts_of_users
+
+        return {"repository": self.report(), "alerts": open_alerts_of_users(self.users_dir) if self.users_dir else []}
+
     def report(self) -> dict[str, Any]:
         from . import metrics_store
 
@@ -283,6 +290,12 @@ def _handler(col: Collector) -> type[BaseHTTPRequestHandler]:
                 self._send(200, {"local": True})  # another cluster: the Studio keeps its own store for it
                 return
             col.status["calls"] += 1
+            if req.get("fn") == "admin_overview":
+                if not claims.get("a"):
+                    self._send(403, {"error": "Only Studio admins see the repository's state and everyone's alerts."})
+                    return
+                self._send(200, {"result": col.overview()})
+                return
             try:
                 result = answer(str(req.get("fn") or ""), req.get("args") or {}, claims, req.get("s2_user"))
             except PermissionError as exc:

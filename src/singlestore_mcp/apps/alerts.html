@@ -32,6 +32,14 @@
   .al-rule label { flex: 1; display: flex; gap: 6px; align-items: flex-start; cursor: pointer; line-height: 1.4; }
   .al-rule input[type="number"] { width: 64px; padding: 2px 5px; font-size: var(--s2-fs-xs); }
   .al-note { font-size: 11px; color: var(--s2-text-3); margin-top: 8px; line-height: 1.5; }
+  .al-server { padding: 10px 12px; margin-bottom: 12px; }
+  .al-server h2 { font-size: var(--font-text-md-size, 14px); margin: 0 0 4px; }
+  .al-server .line { font-size: var(--s2-fs-xs); color: var(--s2-text-2); line-height: 1.6; }
+  .al-server details { margin-top: 6px; }
+  .al-server summary { cursor: pointer; font-size: var(--s2-fs-xs); font-weight: var(--font-weight-semibold, 600); }
+  .al-server table { width: 100%; border-collapse: collapse; font-size: var(--s2-fs-xs); margin-top: 6px; }
+  .al-server td, .al-server th { text-align: left; padding: 3px 6px; border-top: 1px solid var(--s2-border-2); vertical-align: top; }
+  .al-server td.d { color: var(--s2-text-2); word-break: break-word; }
 </style>
 </head>
 <body>
@@ -95,6 +103,38 @@ function alertItem(a) {
       link),
     a.sql ? h("details", {}, h("summary", {}, "SQL"), h("pre", { class: "s2-pre" }, a.sql),
       h("button", { class: "s2-btn ghost", onclick: () => S2.copy(a.sql) }, "Copy")) : null);
+}
+
+// Studio admins on the server: the shared Studio repository's state and every user's open alerts (from the collector).
+function serverPanel(sv) {
+  if (!sv) return null;
+  if (sv.error) return h("section", { class: "s2-card al-server" }, h("h2", {}, "Studio server"), h("div", { class: "s2-error" }, sv.error));
+  const r = sv.repository ?? {}, repo = r.repository ?? {}, m = r.metrics ?? {};
+  const err = repo.last_error || r.last_error || m.last_error;
+  const facts = [
+    `${repo.database ?? "?"} on ${r.source ?? "?"}`,
+    repo.last_flush ? `last write ${ago(repo.last_flush)}` : "nothing written yet",
+    repo.pending ? `${fmt.number(repo.pending)} rows waiting for the cluster` : null,
+    repo.skipped ? `${fmt.number(repo.skipped)} rows left out (a value the column can't take)` : null,
+    m.last_sample ? `last metrics sample ${ago(m.last_sample)}` : null,
+    r.last_sync ? `query history copied ${ago(r.last_sync)}` : null,
+  ].filter(Boolean).join(" · ");
+  const rows = sv.alerts ?? [];
+  return h("section", { class: "s2-card al-server" },
+    h("h2", {}, "Studio server (admins)"),
+    h("div", { class: "line" }, h("strong", {}, "Studio repository: "), facts),
+    err ? h("div", { class: "s2-error", style: { marginTop: "6px" } }, err) : null,
+    h("details", { open: rows.length > 0 && rows.length <= 10 },
+      h("summary", {}, `Every user's open alerts (${fmt.number(rows.length)}, last 7 days)`),
+      rows.length ? h("table", {},
+        h("tr", {}, ["User", "Severity", "Alert", "Detail", "Last seen"].map((x) => h("th", {}, x))),
+        rows.map((a) => h("tr", {},
+          h("td", {}, h("code", {}, a.user)),
+          h("td", {}, h("span", { class: `s2-badge ${(SEV[a.severity] ?? ["info"])[0]}` }, (SEV[a.severity] ?? [null, a.severity ?? "Info"])[1])),
+          h("td", {}, a.title ?? a.kind, a.count > 1 ? ` ×${fmt.number(a.count)}` : ""),
+          h("td", { class: "d" }, String(a.detail ?? "").slice(0, 300)),
+          h("td", { title: clock(a.last_seen) }, ago(a.last_seen)))))
+        : h("div", { class: "s2-small s2-muted", style: { marginTop: "4px" } }, "No user has open alerts.")));
 }
 
 function rulesPanel() {
@@ -161,6 +201,7 @@ function render() {
       S2.fullscreenButton()),
     state.error ? h("div", { class: "s2-error", style: { marginBottom: "10px" } }, `Refresh failed: ${state.error.message}`) : null,
     st.last_error ? h("div", { class: "s2-error", style: { marginBottom: "10px" } }, `Last check: ${st.last_error}`) : null,
+    serverPanel(d.server),
     h("div", { class: "al-main" },
       h("div", {},
         h("div", { class: "al-bar" },

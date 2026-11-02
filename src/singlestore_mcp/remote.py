@@ -119,12 +119,30 @@ def view() -> dict[str, Any] | None:
     (``all``: monitor group or Studio admin) or only their SingleStore user's (``user``). None: the local store."""
     if not active():
         return None
+    claims = _claims()
+    see_all = bool(claims.get("m") or claims.get("a"))
+    return {"all": see_all, "user": None if see_all else _signed_in_as()}
+
+
+def _claims() -> dict[str, Any]:
+    """What the hub put in this Studio's token (read only for the UI: the collector checks the signature)."""
     import base64
 
-    body = str(_cfg["token"]).split(".", 1)[0]
+    body = str(_cfg["token"] or "").split(".", 1)[0]
     try:
         claims = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
     except ValueError:
-        claims = {}
-    see_all = bool(claims.get("m") or claims.get("a"))
-    return {"all": see_all, "user": None if see_all else _signed_in_as()}
+        return {}
+    return claims if isinstance(claims, dict) else {}
+
+
+def admin_overview() -> dict[str, Any] | None:
+    """Studio admins on the server: the repository's state and every user's open alerts (None for everyone else,
+    and without a collector). Errors become ``error`` (the Alerts view still shows the user's own alerts)."""
+    if not configured() or not _claims().get("a"):
+        return None
+    try:
+        r = call("admin_overview")
+    except CollectorError as exc:
+        return {"error": str(exc)}
+    return None if r is LOCAL else r

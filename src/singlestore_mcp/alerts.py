@@ -61,6 +61,29 @@ _stop = threading.Event()
 _wake = threading.Event()
 
 
+def open_alerts_of_users(users_dir: Any, days: int = 7, limit: int = 200) -> list[dict[str, Any]]:
+    """Server version: every user's open (unacknowledged) alerts of the last ``days``, newest first, from their
+    Studio folders (``<users_dir>/<user>/state/alerts.json``). Each user's alerts stay their own; Studio admins see
+    them all (the hub's admin page, and the Alerts view through the collector)."""
+    from pathlib import Path
+
+    cut = time.time() - days * 86400
+    out: list[dict[str, Any]] = []
+    base = Path(users_dir)
+    for path in base.glob("*/state/alerts.json") if base.is_dir() else []:
+        try:
+            data = fileio.read_json(path, {})
+        except Exception:  # noqa: BLE001 - a file being written: next refresh
+            continue
+        user = path.parent.parent.name
+        for a in (data.get("alerts") or []) if isinstance(data, dict) else []:
+            if isinstance(a, dict) and not a.get("acked") and (a.get("last_seen") or 0) >= cut:
+                out.append({**{k: a.get(k) for k in ("kind", "severity", "title", "detail", "count", "first_seen",
+                                                     "last_seen", "active", "source")}, "user": user})
+    out.sort(key=lambda a: -(a.get("last_seen") or 0))
+    return out[:limit]
+
+
 def _file():
     return data_dir() / "alerts.json"
 

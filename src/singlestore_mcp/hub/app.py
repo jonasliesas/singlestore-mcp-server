@@ -207,25 +207,10 @@ class Hub:
 
 
 def all_alerts(cfg: HubConfig, days: int = 7, limit: int = 200) -> list[dict[str, Any]]:
-    """Every user's open (unacknowledged) alerts of the last ``days``, newest first, from their Studio folders
-    (each user's alerts stay their own; Studio admins see them all here)."""
-    from .. import fileio
+    """Every user's open (unacknowledged) alerts of the last ``days``, newest first (``alerts.open_alerts_of_users``)."""
+    from ..alerts import open_alerts_of_users
 
-    cut = time.time() - days * 86400
-    out: list[dict[str, Any]] = []
-    base = cfg.users_dir()
-    for state in base.glob("*/state/alerts.json") if base.is_dir() else []:
-        try:
-            data = fileio.read_json(state, {})
-        except Exception:  # noqa: BLE001 - a file being written: next refresh
-            continue
-        user = state.parent.parent.name
-        for a in (data.get("alerts") or []) if isinstance(data, dict) else []:
-            if isinstance(a, dict) and not a.get("acked") and (a.get("last_seen") or 0) >= cut:
-                out.append({**{k: a.get(k) for k in ("kind", "severity", "title", "detail", "count", "last_seen", "active")},
-                            "user": user})
-    out.sort(key=lambda a: -(a.get("last_seen") or 0))
-    return out[:limit]
+    return open_alerts_of_users(cfg.users_dir(), days, limit)
 
 
 def repository_summary(hub: Hub) -> str:

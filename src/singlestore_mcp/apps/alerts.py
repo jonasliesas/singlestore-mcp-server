@@ -12,6 +12,7 @@ from typing import Any
 from mcp.types import CallToolResult, ToolAnnotations
 
 from .. import alerts as checker
+from .. import remote
 from ._core import APP_ONLY, apps, register_app, tool_result, with_browser_link
 
 URI = "ui://singlestore/alerts.html"
@@ -50,9 +51,11 @@ def alerts() -> CallToolResult:
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
 def alerts_data() -> CallToolResult:
-    """Alerts, rules and checker status for the Alerts view (no cluster queries)."""
+    """Alerts, rules and checker status for the Alerts view (no cluster queries). Studio admins on the server also
+    get ``server``: the Studio repository's state and every user's open alerts."""
     checker.start()
     st = checker.state()
+    st["server"] = remote.admin_overview()
     return tool_result(_summary(st), st)
 
 

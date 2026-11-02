@@ -417,3 +417,20 @@ def test_admin_sees_every_users_open_alerts(tmp_path: Path) -> None:
         (d / "alerts.json").write_text(json.dumps({"alerts": alerts}), encoding="utf-8")
     got = all_alerts(cfg)
     assert [(a["user"], a["title"]) for a in got] == [("alice", "Disk 95%")]
+
+
+def test_admins_see_the_server_in_the_alerts_view(served: tuple[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    from singlestore_mcp.apps import alerts as alerts_app
+
+    url, col = served
+    col.overview = lambda: {"repository": {"source": col.source, "repository": {"database": "SSSTUDIO"}},
+                            "alerts": [{"user": "bob", "title": "Disk 95%"}]}
+    remote.configure(url, collector.sign(KEY, "boss", False, True), col.source)
+    assert remote.admin_overview()["alerts"][0]["user"] == "bob"
+    data = alerts_app.alerts_data().structured_content
+    assert data["server"]["repository"]["repository"]["database"] == "SSSTUDIO"
+    remote.configure(url, collector.sign(KEY, "alice", True, False), col.source)  # monitor, not admin
+    assert remote.admin_overview() is None
+    # The collector refuses it too, whatever the Studio believes.
+    monkeypatch.setattr(remote, "_claims", lambda: {"a": True})
+    assert "Only Studio admins" in remote.admin_overview()["error"]

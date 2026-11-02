@@ -60,6 +60,7 @@ class CollectorProcess:
     def _settings(self) -> dict[str, Any]:
         s2 = self.cfg.collector_s2
         return {"key": self.key.decode(), "home": self.home(), "database": self.cfg.repository_db,
+                "users_dir": str(self.cfg.users_dir()),
                 "singlestore": {"host": s2["host"], "port": int(s2.get("port") or 3306), "user": self.cfg.collector_user,
                                 "password": self.cfg.collector_password,
                                 "ssl_disabled": str(s2.get("ssl_disabled", "")).lower() in ("1", "true", "yes", "on"),
