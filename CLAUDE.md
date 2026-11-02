@@ -19,6 +19,12 @@ Backlog and agreed designs: [ROADMAP.md](ROADMAP.md). User docs: [README.md](REA
 - Server pilot: `server_mode.py` (switches: notebooks / assistants / keyring off, hub key for secrets),
   `studio_server.py` (one user's Studio as an HTTP app), `hub/` (SAS Logon sign-in, one Studio process per user,
   proxy, admin, audit). Deploy files in `deploy/`. Keep normal (stdio) behaviour unchanged when server mode is off.
+- Studio repository (server version): `collector.py` (one process next to the hub, service account, samples / syncs
+  for every user and answers the Studios' reads), `repository.py` (write-through of its SQLite stores to the
+  `SSSTUDIO` database, outbox buffer, restore, retention), `remote.py` (a Studio's stores ask the collector;
+  `LOCAL` = no collector, use SQLite), `hub/collector.py` (starts it, signs each Studio's token). A new read
+  function in `history_store` / `metrics_store` that a Studio uses needs the `_remote(...)` hook and an entry in
+  `collector._calls()` (with its filter kind: runs per user, plans for the monitor group, metrics open).
 - `netguard.py` – recovery from network breaks (keepalive, route/sleep watcher, health probes, the Workspace's
   "connection lost" line). New code that opens cluster or Viya connections uses `connections.connect_kwargs` /
   `db.open_connection` / `sas_rest.request`, so it gets the same timeouts; test network faults with

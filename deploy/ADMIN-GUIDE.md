@@ -124,7 +124,9 @@ external load balancer, allow that address, or point `STUDIO_VIYA_URL` at an in-
 ```bash
 kubectl -n speedystore-studio create secret generic studio-secrets \
   --from-literal=STUDIO_MASTER_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')" \
-  --from-literal=STUDIO_OAUTH_CLIENT_SECRET="$CLIENT_SECRET"     # only with the client from step 2
+  --from-literal=STUDIO_OAUTH_CLIENT_SECRET="$CLIENT_SECRET" \
+  --from-literal=STUDIO_COLLECTOR_PASSWORD="$COLLECTOR_PASSWORD"
+# STUDIO_OAUTH_CLIENT_SECRET: only with the client from step 2. STUDIO_COLLECTOR_PASSWORD: the Studio repository (7b).
 kubectl -n speedystore-studio create secret tls studio-tls --cert=<cert.pem> --key=<key.pem>
 ```
 
@@ -141,6 +143,57 @@ kubectl -n speedystore-studio logs deploy/studio-hub | grep '"event": "hub_start
 Studio connects to SingleStore **as each user** with their own database user and password (entered in Studio's
 Connections, stored encrypted in their folder). Colleagues need a SingleStore user with the grants they should have;
 Studio adds no rights. The default connection in the ConfigMap only pre-fills host/port/database (user name = SAS id).
+Give each colleague their **own** SingleStore user rather than a shared admin: the Studio repository shows people
+outside the monitor group the queries of the SingleStore user they sign in as, so a shared login shares that view.
+
+## 7b. Studio repository (`SSSTUDIO`)
+
+One **collector** in the hub pod watches the cluster for everyone: it samples the Cluster Monitor's metrics once a
+minute, copies new query history events (`MV_TRACE_EVENTS`, which forgets) and keeps the plan cache - and stores it
+all in a database on the cluster, so history survives pod restarts and lost volumes, and every Studio shows the same
+history instead of each keeping (and sampling) its own. Users' Studios read it through the collector, never directly.
+
+**Database and service account** (a DBA, once; Studio doesn't create users). The name has 8 characters, so it also
+works as a SAS libref:
+
+```sql
+CREATE DATABASE IF NOT EXISTS SSSTUDIO;
+CREATE USER 'svc_studio_collector'@'%' IDENTIFIED BY '<a long random password>';
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, INDEX, CREATE VIEW, SHOW VIEW ON SSSTUDIO.* TO 'svc_studio_collector'@'%';
+GRANT PROCESS, SHOW METADATA ON *.* TO 'svc_studio_collector'@'%';
+```
+
+`PROCESS` lets the collector see every user's queries (the trace, the plan cache, the process list) - only this
+account gets it, no person does. `ALL PRIVILEGES` on the database doesn't work when the granting admin lacks some
+privileges itself (REFERENCES, EVENT, TRIGGER...): the list above is all the collector needs. Users get **no grants**
+on `SSSTUDIO`: their own logins can't read it. Put the password in the Secret as `STUDIO_COLLECTOR_PASSWORD` (step 6);
+on Zeus it is kept in the owner's Windows Credential Manager (`speedystore-studio-collector` / `svc_studio_collector`).
+
+**Who sees what** - a third SAS group, `SpeedyStoreStudioMonitor` (`STUDIO_MONITOR_GROUP`), checked at sign-in and at
+each token renewal like the other two:
+
+| | Monitor group members, Studio admins | Everyone else |
+|---|---|---|
+| Query history, trends, most used tables / active users | every user's queries | only the queries of the SingleStore user their connection signs in as |
+| Plan cache (statement stats, kept plans) | yes | no (it has no user) |
+| Cluster Monitor history, trend alerts | yes | yes |
+| Alerts | their own; admins: everyone's on `/admin` | their own |
+| Workloads | shared by all users | shared by all users |
+
+A user taken out of the monitor group gets the narrower view within a token lifetime (the Studio is handed a new
+token). Their **live** views (Cluster > Queries, the live query history) still use their own login's rights.
+
+**How it is kept:** the collector writes into SQLite files in `/data/collector` and, every 15 s, the new and changed
+rows into `SSSTUDIO` (tables `runs`, `plans`, `plan_samples`, `metrics`; times are `DATETIME(6)`). The repository lives
+in the cluster it watches, so while the cluster is down the rows wait in the SQLite outbox and go when it is back. A
+collector that starts on an empty volume first copies `SSSTUDIO` back. Retention (hourly, both sides): query runs and
+plans 90 days, plan-cache counter samples 30 days, metrics 30 days per minute and 1 year in 10-minute rows. A row a
+column can't take is left out and counted (admin page) instead of holding up the rest.
+
+**Check it:** the admin page's *repository* line (last write, rows waiting, last sample, errors); the audit log's
+`collector_start` / `collector_exited`; `/data/collector/collector.log`. Without `STUDIO_COLLECTOR_PASSWORD` each
+Studio keeps its own history as on the desktop (the admin page says "off"). The users' default connection
+(`STUDIO_DEFAULT_S2_HOST` / `_PORT`) must name the same host:port as the collector's, or their Studio keeps its own.
 
 ## 8. SAS groups for access
 
@@ -151,6 +204,7 @@ Who may use Studio is decided by two **SAS groups** that the Viya admin creates 
 |---|---|---|
 | `SpeedyStoreStudioUsers` | use Studio | `STUDIO_USERS_GROUP` |
 | `SpeedyStoreStudioNotebooks` | use notebooks (and so Studio), with `STUDIO_NOTEBOOKS=local` or `gateway` | `STUDIO_NOTEBOOK_GROUP` |
+| `SpeedyStoreStudioMonitor` | see every user's queries in the Studio repository (7b) - not an access group | `STUDIO_MONITOR_GROUP` |
 
 Add the colleagues to the groups **directly** (as members, not through another group): whether the identities
 service's membership list includes nested groups isn't documented publicly and hasn't been checked on Zeus yet.
@@ -180,7 +234,10 @@ group (or list) gave it.
 - **A crashed or hung Studio** is started again on the user's next request ("Your Studio is restarting"); one that
   crashes 3 times in 5 minutes waits a few minutes. Its `studio.log` says why.
 - **Upgrade:** new image tag in the Deployment; the pod restarts and everyone signs in again (their folders stay).
-- **Remove a user's data:** delete `/data/users/<sas id>/` (e.g. `kubectl exec` into the pod).
+- **Remove a user's data:** delete `/data/users/<sas id>/` (e.g. `kubectl exec` into the pod). Their queries in the
+  Studio repository are the cluster's history, not their files: they age out with the retention.
+- **Workloads** are shared: `/data/shared/workloads` (all users see, run, change and delete them).
+- **Alerts:** each user's own rules and alerts; the admin page lists everyone's open ones.
 
 ## Notebooks: `STUDIO_NOTEBOOKS=local` (test version)
 

@@ -440,9 +440,17 @@ in step 1, "Ask Claude" off by default (switchable later with an Anthropic / Fou
     collector (filtered by the hub-confirmed groups), never from the repository directly.
   - **Alerts:** each user's own settings and state; Studio admins see everyone's. **Workloads:** shared by all users.
   - **Retention:** raw metrics 30 days (coarse 1 year), query runs 90 days, plan-cache samples 30 days.
-  - Steps: SQL for the database / user (Jonas runs it: the permission grant was blocked for Claude), `repository.py`
-    (SQLite / SingleStore back ends behind the stores' API), collector + buffer, Studios read through the collector,
-    tests (`zz_test_` database), deploy (env, secret, ADMIN-GUIDE step), `hub_load` with the repository, 0.11.1.
+  - **Built (2026-11-02):** database + `svc_studio_collector` on Zeus (Jonas ran the script: named grants, since admin
+    lacks REFERENCES/EVENT/TRIGGER for `ALL`); `collector.py` + `repository.py` (write-through via a SQLite outbox,
+    restore onto an empty folder, retention both sides, bad rows skipped and counted), `remote.py` (Studios read
+    through the collector, own sampler / sync / plan saving off), hub: `STUDIO_MONITOR_GROUP`, `STUDIO_COLLECTOR_*`,
+    collector process with restart and reseed, admin page line + everyone's open alerts; workloads shared
+    (`<data>/shared/workloads`); Query History says "all users" / "only your queries". Tested end to end on Zeus
+    (1669 rows written, restore of 1447 runs / 74 plans in 3 s) and `tests/test_repository.py` (+ a `zz_test_` database).
+    Local pilot: `scripts/studio-hub-local.ps1 -Repository -MonitorGroup SpeedyStoreStudioMonitor`.
+  - Left: Jonas tests the pilot; `perf/hub_load.py` with the repository (needs the cluster: the collector can't be
+    faked yet); 0.11.1. Later: alerts kept in the repository too (now: each user's alerts.json, admins see them on
+    /admin); workloads' runs in the repository; SAS views over `SSSTUDIO` (it is a valid libref).
 
 ## Known small issues
 - Network breaks: a query whose connection goes silent *without* a route change or sleep (e.g. a firewall that drops

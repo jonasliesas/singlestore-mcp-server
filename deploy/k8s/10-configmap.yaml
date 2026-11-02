@@ -26,6 +26,14 @@ data:
   # Empty: every SAS user who can sign in. Notebooks also need STUDIO_NOTEBOOKS=local.
   STUDIO_USERS_GROUP: "SpeedyStoreStudioUsers"
   STUDIO_NOTEBOOK_GROUP: "SpeedyStoreStudioNotebooks"
+  # Members see every user's queries in the Studio repository (others only their own SingleStore user's). Not an
+  # access group: members also need one of the two groups above.
+  STUDIO_MONITOR_GROUP: "SpeedyStoreStudioMonitor"
+  # The Studio repository (ADMIN-GUIDE 7b): one collector in this pod keeps every user's query history, plan cache
+  # and Cluster Monitor history in this database on the STUDIO_DEFAULT_S2_HOST cluster, as STUDIO_COLLECTOR_USER.
+  # On when the Secret has STUDIO_COLLECTOR_PASSWORD. STUDIO_COLLECTOR_HOST / _PORT: another address for the collector.
+  STUDIO_REPOSITORY_DB: "SSSTUDIO"
+  STUDIO_COLLECTOR_USER: "svc_studio_collector"
   # Extra SAS user ids allowed besides the groups' members (comma-separated); without groups: the only list.
   STUDIO_ALLOWED_USERS: ""
   STUDIO_MAX_USERS: "20"

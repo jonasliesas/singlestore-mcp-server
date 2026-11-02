@@ -307,7 +307,13 @@ Claude Code for a later "Ask Claude" switch. Kubernetes manifests: [k8s/](k8s/).
 | `STUDIO_GATEWAY_BIND` / `_PORT` / `_EG` / `_RUNTIME` | `0.0.0.0` / `8888` / `/opt/gateway-env/bin/jupyter-enterprisegateway` / `/tmp/studio-gateway` | gateway pod: where it listens, the Enterprise Gateway program, its runtime folder |
 | `STUDIO_NOTEBOOK_PYTHON` | `/opt/notebook-env/bin/python` in the image | The shared notebook environment's Python (local: your desktop one, `-Notebooks` in the script; gateway: the kernels' Python in the gateway pod) |
 | `STUDIO_ASSISTANT` | `0` | Ask Claude also needs Claude Code in the image and `ANTHROPIC_API_KEY` (or `CLAUDE_CODE_USE_FOUNDRY=1` + `ANTHROPIC_FOUNDRY_*`) - passed to Studios only when on |
-| `STUDIO_METRICS` | `1` | Cluster Monitor history sampler in each Studio (N users = N samplers; turn off if that's too much) |
+| `STUDIO_METRICS` | `1` | Cluster Monitor history sampler in each Studio (N users = N samplers; turn off if that's too much). With the Studio repository the collector samples once for everyone and the Studios don't |
+| `STUDIO_MONITOR_GROUP` | none | SAS group whose members see every user's queries in the Studio repository (pilot: `SpeedyStoreStudioMonitor`) |
+| `STUDIO_COLLECTOR_PASSWORD` | none | **Secret.** The Studio repository's service account; set = repository on (ADMIN-GUIDE 7b) |
+| `STUDIO_COLLECTOR_USER` | `svc_studio_collector` | The service account (PROCESS + SHOW METADATA, rights on the repository database) |
+| `STUDIO_REPOSITORY_DB` | `SSSTUDIO` | The repository database (created by a DBA) |
+| `STUDIO_COLLECTOR_HOST` / `_PORT` | `STUDIO_DEFAULT_S2_HOST` / `_PORT` | Where the collector connects (the users' default connection must name the same host:port to read from it) |
+| `STUDIO_COLLECTOR_SSL_DISABLED` / `_SSL_CA` | TLS on / system CAs | TLS of the collector's connection |
 | `STUDIO_TRUST_FORWARDED` | `0` (`1` in the image) | Take the client address for the audit log from `X-Forwarded-For` |
 | `STUDIO_START_TIMEOUT` | `90` | Seconds a Studio may take to start |
 | `STUDIO_PROXY_TIMEOUT` | `600` | Seconds one Studio call may take (keep the ingress's `proxy-read-timeout` the same) |
