@@ -16,6 +16,8 @@ Sources (SingleStore 9.0 information_schema, checked on 9.0; read-only, one roun
   loaded. Two reads apart give the memory a statement used in between (``_rates``), without the 1 s wait of the
   delta views.
 - MV_RESOURCE_POOL_STATUS + RESOURCE_POOLS: memory per resource pool and its limit.
+- The trend: memory per node over 1 h / 24 h / 7 d and its growth rate, from the stored Cluster Monitor history
+  (``metrics_store``: the local SQLite file, or the Studio repository's collector on the server) - no cluster query.
 
 ``analyse`` turns the raw rows into the tab's data and advice (pure; offline tests).
 """
@@ -29,7 +31,7 @@ from typing import Any
 
 from mcp.types import CallToolResult
 
-from .. import history_store
+from .. import history_store, metrics_store
 from ..db import db
 from ._core import APP_ONLY, apps, tool_result
 from .cluster_monitor import READ_ONLY, URI, _short_host
@@ -257,11 +259,37 @@ def _pools(rows: list[dict[str, Any]], limits: list[dict[str, Any]]) -> list[dic
     return sorted(out, key=lambda p: -p["bytes"])
 
 
-def collect_memory() -> dict[str, Any]:
+def trend(range_key: str = "24h") -> dict[str, Any]:
+    """Memory per node over the range (% of max_memory, from the stored history) and how fast it grew over the last
+    24 h (``metrics_store.trends``: bytes per day and, for a steady climb, days until max_memory)."""
+    try:
+        hist = metrics_store.history(range_key)
+    except Exception as exc:  # noqa: BLE001 - the tab still shows the live figures
+        return {"error": str(exc)[:300], "range": range_key}
+    points = [{"t": p["t"], "mem": p.get("mem") or {}} for p in hist.get("points", [])]
+    try:
+        growth = [{"node_id": n["node_id"], "host": n.get("host"), **{k: n["memory"].get(k) for k in
+                                                                    ("per_day_b", "days_left", "r2", "used_b", "cap_b", "span_s")}}
+                  for n in metrics_store.current_trends() if n.get("memory")]
+    except Exception:  # noqa: BLE001 - growth is a bonus
+        growth = []
+    st = hist.get("status") or {}
+    return {"range": hist.get("range", range_key), "range_s": hist.get("range_s"), "bucket_s": hist.get("bucket_s"),
+            "points": points, "nodes": hist.get("nodes", []), "growth": growth,
+            "status": {k: st.get(k) for k in ("enabled", "interval_s", "last_sample", "retention_days")}}
+
+
+def collect_memory(range_key: str = "24h") -> dict[str, Any]:
     started = time.time()
     raw = _read()
     gap = _rates(raw["activities"], time.time())
     data = analyse(raw, gap)
+    data["trend"] = trend(range_key)
+    for g in data["trend"].get("growth", []):
+        if g.get("days_left") is not None and g["days_left"] <= 14:
+            data["advice"].append({"level": "warn" if g["days_left"] > 3 else "err",
+                                   "text": f"{_short_host(str(g.get('host') or g['node_id']))}: memory climbed steadily over the last day "
+                                           f"(+{_gb(g['per_day_b'])} a day) and reaches max_memory in about {g['days_left']} days at that rate."})
     data["seconds"] = round(time.time() - started, 2)
     return data
 
@@ -275,8 +303,9 @@ def _summary(d: dict[str, Any]) -> str:
 
 
 @apps.tool(resource_uri=URI, visibility=APP_ONLY, annotations=READ_ONLY)
-def cluster_monitor_memory() -> CallToolResult:
-    """Memory per node by use (rowstore tables, queries, cached, connections, plans ...), the tables and statements
-    that use most memory, resource pools and advice, for the Cluster Monitor's Memory tab."""
-    data = collect_memory()
+def cluster_monitor_memory(range: str = "24h") -> CallToolResult:  # noqa: A002 - tool argument name
+    """Memory per node by use (rowstore tables, queries, cached, connections, plans ...), its trend over ``range``
+    ("1h", "24h", "7d"), the tables and statements that use most memory, resource pools and advice, for the Cluster
+    Monitor's Memory tab."""
+    data = collect_memory(range)
     return tool_result(_summary(data), data)

@@ -86,10 +86,16 @@ def test_cluster_monitor_memory_tab(ui, app_url) -> None:
     f.get_by_role("tab", name="Memory").click()
     assert wait_js(f, "/Where this node's memory goes/.test(document.body.innerText)", 30), "Memory tab: " + text(f)[:400]
     body = text(f)
-    for part in ("Leaves (", "Aggregators (", "Statements using memory", "Tables in memory (", "Rowstore tables of max_table_memory"):
+    for part in ("Leaves (", "Aggregators (", "Trend", "Resource pools", "Statements using memory", "Tables in memory (",
+                 "Rowstore tables of max_table_memory"):
         assert part in body, f"Memory tab is missing {part!r}"
     # Every node card has a stacked bar with a legend.
     assert f.evaluate("[...document.querySelectorAll('.cm-node')].every((c) => c.querySelector('.cm-stack') && c.querySelector('.cm-part'))")
+    # The trend chart switches range (a new read with the range).
+    assert f.evaluate("!!document.querySelector('[aria-label=\"Memory per node over time\"] .cm-plot')")
+    f.get_by_role("group", name="Time range").get_by_role("button", name="7 days").click()
+    assert wait_js(f, "[...document.querySelectorAll('[aria-label=\"Time range\"] button')].some((b) => b.innerText === '7 days' && b.getAttribute('aria-pressed') === 'true')"
+                      " && !/Loading the new range/.test(document.body.innerText)", 30), text(f)[-400:]
     assert not banners(page), banners(page)
     e = errors.drain()
     assert not e, f"console errors: {e}"

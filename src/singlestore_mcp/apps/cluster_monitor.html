@@ -150,6 +150,7 @@ const state = {
     history: { data: null, error: null, loading: false, at: 0 }, backups: { data: null, error: null, loading: false, at: 0 },
     memory: { data: null, error: null, loading: false, at: 0 } },
   memOwn: false,        // Memory tab: list Studio's own statements too (off, as in Query History)
+  memTrend: { range: "24h", group: "all", hidden: new Set() },   // Memory tab: the trend chart
   hist: { range: "1h", group: "all", hidden: new Set() },
   healthEvents: "problems",
   backupWarnDays: 7,
@@ -514,6 +515,7 @@ function tabArgs(tab, force) {
   if (tab === "disk") return force ? { force: true } : {};
   if (tab === "history") return { range: state.hist.range, ...(force === "sample" ? { sample_now: true } : {}) };
   if (tab === "backups") return { warn_days: state.backupWarnDays };
+  if (tab === "memory") return { range: state.memTrend.range };
   return {};
 }
 const MBs = (b) => (b == null ? null : b / 1e6);
@@ -543,6 +545,7 @@ async function refreshTab(force = false) {
   }
   // The History range changed while a read was on its way: read the range now selected.
   if (tab === "history" && !slot.error && slot.data && slot.data.range !== state.hist.range) refreshTab(true);
+  if (tab === "memory" && !slot.error && slot.data?.trend && slot.data.trend.range !== state.memTrend.range) refreshTab(true);
 }
 
 function tabStatus(slot, what) {
@@ -698,6 +701,37 @@ function memNodeCard(n, name, index) {
         h("span", {}, "Process resident / host"), h("strong", {}, `${bytesOrDash(n.resident_b)} / ${bytesOrDash(host)}`))));
 }
 
+const memPlot = createPlot("Memory per node over time, % of max_memory");
+
+// Memory per node over time (% of max_memory, from the stored history) and how fast it grew over the last day.
+function memTrend(x, d) {
+  const t = x.trend ?? {}, mt = state.memTrend;
+  const head = h("div", { class: "cm-section" }, h("h2", {}, "Trend"),
+    h("span", { class: "s2-faint s2-small" }, t.status?.enabled === false ? "sampling is off: only data stored earlier is shown"
+      : `% of max_memory per node, from the stored Cluster Monitor history${t.status?.last_sample ? ` · last sample ${fmt.relTime(t.status.last_sample)}` : ""}`),
+    h("span", { class: "s2-spacer" }),
+    seg("Time range", HIST_RANGES, mt.range, (k) => { mt.range = k; refreshTab(true); render(); }),
+    seg("Nodes to show", GROUPS, mt.group, (k) => { mt.group = k; mt.hidden.clear(); render(); }));
+  if (t.error) return [head, h("div", { class: "s2-error" }, `The stored history couldn't be read: ${t.error}`)];
+  const nodes = [...d.nodes, ...(t.nodes ?? []).filter((n) => !d.nodes.some((m) => m.id === n.id))];
+  const now = Date.now() / 1000;
+  const names = shortNames(nodes);
+  const growth = (t.growth ?? []).filter((g) => g.per_day_b != null);
+  return [head,
+    t.range !== mt.range ? h("div", { class: "s2-small s2-faint" }, h("span", { class: "s2-spinner" }), " Loading the new range…") : null,
+    nodeLegend(nodes, mt, render),
+    h("section", { class: "s2-card cm-chart", "aria-label": "Memory per node over time" },
+      setPlot(memPlot, { ...pctFmt, hist: t.points ?? [], series: nodeSeries(nodes, mt, (p, id) => p.mem?.[id] ?? null), what: "Memory",
+        empty: "No samples stored for this range yet (one a minute while a server or the Studio repository's collector runs).",
+        t0: now - (t.range_s ?? 86400), t1: now, gapS: (t.bucket_s ?? 300) * 3, left: 44, right: 140 })),
+    growth.length ? h("div", { class: "s2-small s2-muted", style: { marginTop: "6px", display: "flex", flexWrap: "wrap", gap: "4px 16px" } },
+      h("strong", {}, "Last 24 h:"),
+      growth.map((g) => h("span", { title: g.r2 != null ? `Linear fit R² ${g.r2} over ${fmt.duration(g.span_s ?? 0)}` : "" },
+        `${names[g.node_id] ?? g.host} ${g.per_day_b >= 0 ? "+" : "−"}${fmt.bytes(Math.abs(g.per_day_b))} a day`,
+        g.days_left != null ? h("span", { class: `s2-badge ${g.days_left <= 3 ? "err" : g.days_left <= 14 ? "warn" : "plain"}`, style: { marginLeft: "4px" } },
+          `max_memory in ~${g.days_left} days`) : g.per_day_b > 0 ? " (not a steady climb)" : ""))) : null];
+}
+
 function memStatements(x) {
   const rows = x.statements.filter((s) => state.memOwn || !s.own);
   const recent = x.recent_s != null;
@@ -754,6 +788,7 @@ function memoryTab(d, names) {
     h("div", { class: "cm-nodes cm-wide" }, leaves.map((n) => memNodeCard(n, names[n.id] ?? n.host, nodeIndex[n.id] ?? 0))),
     h("div", { class: "cm-section" }, h("h2", {}, `Aggregators (${aggs.length})`)),
     h("div", { class: "cm-nodes cm-wide" }, aggs.map((n) => memNodeCard(n, names[n.id] ?? n.host, nodeIndex[n.id] ?? 0))),
+    ...memTrend(x, d),
     h("div", { class: "cm-section" }, h("h2", {}, "Statements using memory"),
       h("span", { class: "s2-faint s2-small" }, "From the plan cache's activity counters (MV_QUERY_ACTIVITIES_EXTENDED_CUMULATIVE), all nodes together."),
       h("span", { class: "s2-spacer" }),
@@ -765,13 +800,13 @@ function memoryTab(d, names) {
     memTables(x),
     x.databases.length ? h("div", { class: "s2-small s2-muted", style: { marginTop: "6px" } }, "By database: ",
       x.databases.slice(0, 8).map((db) => `${db.database} ${fmt.bytes(db.bytes + db.replica_bytes)}`).join(" · ")) : null,
-    x.pools.length ? [h("div", { class: "cm-section" }, h("h2", {}, "Resource pools")),
+    ...(x.pools.length ? [h("div", { class: "cm-section" }, h("h2", {}, "Resource pools")),
       h("div", { class: "s2-table-wrap" }, h("table", { class: "s2-table cm-q" },
         h("thead", {}, h("tr", {}, ["Pool", "Memory in use", "Memory limit", "Per query", "Running", "Queued"].map((c, i) => h("th", { class: i ? "num" : "" }, c)))),
         h("tbody", {}, x.pools.map((p) => h("tr", {},
           h("td", {}, p.pool), h("td", { class: "num" }, fmt.bytes(p.bytes)),
           h("td", { class: "num" }, p.memory_pct != null ? `${p.memory_pct}%` : "–"), h("td", { class: "num" }, p.query_memory_pct != null ? `${p.query_memory_pct}%` : "–"),
-          h("td", { class: "num" }, fmt.number(p.running)), h("td", { class: "num" }, fmt.number(p.queued)))))))] : null];
+          h("td", { class: "num" }, fmt.number(p.running)), h("td", { class: "num" }, fmt.number(p.queued)))))))] : [])];
 }
 
 const BL_COLS = [["UPLOADED_BYTES", "Upload"], ["BLOB_CACHE_DOWNLOADED_BYTES", "Fetch"], ["BLOB_CACHE_EVICTED_BYTES", "Evict"]];
