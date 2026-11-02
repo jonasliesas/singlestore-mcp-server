@@ -149,7 +149,7 @@ const state = {
     io: { data: null, error: null, loading: false, at: 0 }, health: { data: null, error: null, loading: false, at: 0 },
     history: { data: null, error: null, loading: false, at: 0 }, backups: { data: null, error: null, loading: false, at: 0 },
     memory: { data: null, error: null, loading: false, at: 0 } },
-  memOwn: true,         // Memory tab: list Studio's own statements too
+  memOwn: false,        // Memory tab: list Studio's own statements too (off, as in Query History)
   hist: { range: "1h", group: "all", hidden: new Set() },
   healthEvents: "problems",
   backupWarnDays: 7,
@@ -684,7 +684,7 @@ function memNodeCard(n, name, index) {
       h("span", { class: "s2-spacer" }),
       h("strong", { class: "cm-total", title: "Total_server_memory of max_memory (queries fail with error 1712 at the limit)" },
         `${fmt.bytes(n.total_b)} of ${bytesOrDash(n.max_b)}`), pctBadge(n.pct, 85, 95)),
-    h("div", { class: "cm-node-meta" }, "Where this node's memory goes"),
+    h("div", { class: "cm-node-meta" }, "Where this node's memory goes (% of max_memory; the empty part is headroom)"),
     stackBar(parts, n.max_b || n.total_b, `${name} memory by use`),
     legendRows(parts.filter((p) => p.bytes > 0), n.max_b || n.total_b),
     h("div", { class: "cm-kv" },
@@ -692,7 +692,7 @@ function memNodeCard(n, name, index) {
         h("span", {}, "Rowstore tables of max_table_memory"),
         h("strong", {}, `${fmt.bytes(n.table_b)} of ${bytesOrDash(n.table_max_b)} `, pctBadge(n.table_pct, 80, 95))),
       n.table_parts.length ? h("div", { title: n.table_parts.map((p) => `${p.label}: ${fmt.bytes(p.bytes)}`).join("\n") },
-        h("span", {}, "of which"), h("strong", { class: "s2-small" }, n.table_parts.slice().sort((a, b) => b.bytes - a.bytes).slice(0, 3)
+        h("span", { style: { whiteSpace: "nowrap" } }, "of which"), h("strong", { class: "s2-small" }, n.table_parts.slice().sort((a, b) => b.bytes - a.bytes).slice(0, 3)
           .map((p) => `${p.label} ${fmt.bytes(p.bytes)}`).join(" · "))) : null,
       h("div", { title: "Resident size of the SingleStore process as Linux sees it, of the host (or container) memory" },
         h("span", {}, "Process resident / host"), h("strong", {}, `${bytesOrDash(n.resident_b)} / ${bytesOrDash(host)}`))));
