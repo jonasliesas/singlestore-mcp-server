@@ -9,7 +9,7 @@ from typing import Any
 
 from mcp.types import CallToolResult, ToolAnnotations
 
-from .. import compare, history_store
+from .. import compare, history_store, remote
 from ..db import db
 from ._core import APP_ONLY, apps, jsonable, tool_result
 from .query_history import URI
@@ -27,7 +27,9 @@ def query_history_trends(days: int = 30) -> CallToolResult:
     now = db.execute(f"{history_store.MARKER_PREFIX}trends */ SELECT NOW() AS t")[1][0]["t"]
     data = history_store.trends(days, now=str(jsonable(now)).replace("T", " "))
     data["sync"] = synced
-    lines = [f"{data['stored']} runs stored locally for {data['source']} (since {data['oldest']})."]
+    data["repository"] = remote.view()
+    where = "in the shared Studio repository" if data["repository"] else "locally"
+    lines = [f"{data['stored']} runs stored {where} for {data['source']} (since {data['oldest']})."]
     for s in data["slower"][:5]:
         lines.append(f"- slower: {s['before_ms'] / 1000:.1f} s -> {s['median_ms'] / 1000:.1f} s ({s['runs']} runs): {s['sample'][:120]}")
     return tool_result("\n".join(lines), data)

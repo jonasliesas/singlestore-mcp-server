@@ -19,7 +19,7 @@ from typing import Any
 
 from mcp.types import CallToolResult, ToolAnnotations
 
-from .. import assistant, history_store, query_advisor, sas_ep
+from .. import assistant, history_store, query_advisor, remote, sas_ep
 from ..db import db, quote_identifier
 from ._core import APP_ONLY, apps, jsonable, jsonable_rows, register_app, tool_result, with_browser_link
 
@@ -128,6 +128,7 @@ def collect(min_ms: int = MIN_RUNTIME_MS, hours: float | None = None, limit: int
                     "newest": jsonable(total.get("newest"))},
         # Older runs the cluster's trace no longer has (restart, ring buffer), from the local copy of the history.
         "kept": {"runs": len(kept["events"]), "oldest": kept["oldest"], "error": kept["error"]},
+        "repository": remote.view(),  # server version: the shared Studio repository (who sees what)
         "utc_offset_min": int(offset[0]["offset_min"]) if offset else 0,
         "enabled_hint": None if total.get("events") else _ENABLE_HINT,
         "trace": trace,

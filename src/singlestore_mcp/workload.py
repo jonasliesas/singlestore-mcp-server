@@ -2,7 +2,8 @@
 
 A *workload* is a name, a default database, settings and a list of statements. Each statement runs N
 times a minute ("fixed rate") or, with pacing "max", as often as the workers can, mixed by the same
-numbers used as weights. Workloads are saved in ``~/.singlestore-mcp/workloads/workloads.json``; every
+numbers used as weights. Workloads are saved in ``~/.singlestore-mcp/workloads/workloads.json``
+(the server version: one folder for every user, ``SINGLESTORE_MCP_WORKLOADS_DIR``, so workloads are shared); every
 run is saved as ``runs/<run id>.json`` with per-statement latency percentiles, throughput, errors and a
 per-second timeline, so two runs (before and after a sort key, an index, a new shard key ...) can be
 compared statement by statement.
@@ -34,6 +35,7 @@ from __future__ import annotations
 import heapq
 import json
 import math
+import os
 import queue
 import random
 import re
@@ -41,6 +43,8 @@ import statistics
 import threading
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -63,12 +67,58 @@ _runs: dict[str, "_Run"] = {}  # live and recently finished runs in this process
 
 # ------------------------------------------------------------------ storage
 
+def _shared() -> Path | None:
+    raw = os.environ.get("SINGLESTORE_MCP_WORKLOADS_DIR", "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def _dir() -> Path:
-    return data_dir("workloads")
+    return _shared() or data_dir("workloads")
 
 
 def _runs_dir() -> Path:
-    return data_dir("workloads", "runs")
+    path = _dir() / "runs"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+@contextmanager
+def _editing() -> Iterator[None]:
+    """Changing workloads.json: this process's lock and, in a shared folder (other users' Studios write it too), a
+    lock file next to it."""
+    with _lock:
+        shared = _shared()
+        if shared is None:
+            yield
+            return
+        path = shared / ".workloads.lock"
+        deadline = time.time() + 10
+        while True:
+            try:
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                break
+            except FileExistsError:
+                try:
+                    if time.time() - path.stat().st_mtime > 30:  # left by a Studio that died while saving
+                        path.unlink()
+                        continue
+                except OSError:
+                    continue
+                if time.time() > deadline:
+                    raise TimeoutError("Another user is saving a workload right now. Try again.") from None
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            os.close(fd)
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
 
 def _load_all() -> dict[str, dict[str, Any]]:
@@ -166,7 +216,7 @@ def save(workload: dict[str, Any], original_name: str | None = None) -> dict[str
             if not compare.read_only(s["sql"]):
                 raise ValueError(f"{s['name']} isn't a read-only SELECT / WITH statement. "
                                  "Turn on \"Allow writes\" for workloads that change data.")
-    with _lock:
+    with _editing():
         all_ = _load_all()
         prev = all_.get(original_name or name) or all_.get(name)
         if original_name and original_name != name and name in all_:
@@ -181,7 +231,7 @@ def save(workload: dict[str, Any], original_name: str | None = None) -> dict[str
 
 
 def delete(name: str, runs_too: bool = False) -> dict[str, Any]:
-    with _lock:
+    with _editing():
         all_ = _load_all()
         if name not in all_:
             raise LookupError(f"No workload named {name!r}.")
@@ -227,7 +277,7 @@ def tag(workload: str, sid: str) -> str:
 # the run, or by the next run / server start if the server stopped in between.
 
 def _restore_file() -> Path:
-    return _dir() / "trace-restore.json"
+    return data_dir("workloads") / "trace-restore.json"  # this Studio's own, also with a shared folder
 
 
 def _trace_status() -> dict[str, Any] | None:
@@ -1004,7 +1054,7 @@ def update_statement(name: str, statement_id: str, sql: str, database: str | Non
     h = parse_hints(sql)
     if not h["sql"]:
         raise ValueError("There's no SQL to put in the workload.")
-    with _lock:
+    with _editing():
         w = _load_all().get(name)
         if not w:
             raise LookupError(f"The workload {name!r} doesn't exist any more (deleted or renamed).")

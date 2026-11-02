@@ -1,7 +1,8 @@
 """One Studio process per signed-in user (``python -m singlestore_mcp.studio_server --stdin-config``).
 
 Each user gets a folder ``<data>/users/<safe id>/`` with
-- ``state/`` - SINGLESTORE_MCP_HOME: connections, encrypted secrets, editor tabs, history, workloads, logs
+- ``state/`` - SINGLESTORE_MCP_HOME: connections, encrypted secrets, editor tabs, history, logs
+  (workloads are shared by every user: ``<data>/shared/workloads``)
 - ``files/`` - HOME: what the file browser shows as the user's own files (SQL folder inside)
 
 The process listens on 127.0.0.1 on a port it picks, under a random path token; both are known only to the hub.
@@ -229,6 +230,11 @@ class Spawner:
                     pass
         return state, files
 
+    def shared_workloads(self) -> Path:
+        path = self.cfg.data_dir / "shared" / "workloads"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     def _env(self, user: str) -> dict[str, str]:
         state, files = self.user_dirs(user)
         keep = ("PATH", "SYSTEMROOT", "SystemRoot", "TEMP", "TMP", "LANG", "LC_ALL", "TZ", "PYTHONPATH", "VIRTUAL_ENV",
@@ -246,6 +252,8 @@ class Spawner:
             "SINGLESTORE_MCP_METRICS": "1" if self.cfg.metrics else "0",
             "SINGLESTORE_MCP_SAS_IMPORT": "0",
             "SINGLESTORE_MCP_FILE_ROOTS": "",
+            # Workloads are shared by every user (their runs too); each Studio keeps its own trace settings.
+            "SINGLESTORE_MCP_WORKLOADS_DIR": str(self.shared_workloads()),
             "PYTHONUNBUFFERED": "1", "PYTHONDONTWRITEBYTECODE": "1",
         })
         if self.cfg.gateway:

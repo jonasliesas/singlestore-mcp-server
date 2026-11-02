@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import json
 import threading
-from contextlib import contextmanager
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from typing import Any
 
 LOCAL = object()   # "no collector for this: use the local store"
@@ -114,6 +114,17 @@ def call(name: str, **kwargs: Any) -> Any:
     return data.get("result")
 
 
-def status() -> dict[str, Any]:
-    """For the apps: is the history from the shared repository (no secrets)."""
-    return {"collector": configured(), "active": active(), "source": _cfg["source"]}
+def view() -> dict[str, Any] | None:
+    """For the apps, when the history comes from the shared repository: whether this user sees every user's queries
+    (``all``: monitor group or Studio admin) or only their SingleStore user's (``user``). None: the local store."""
+    if not active():
+        return None
+    import base64
+
+    body = str(_cfg["token"]).split(".", 1)[0]
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+    except ValueError:
+        claims = {}
+    see_all = bool(claims.get("m") or claims.get("a"))
+    return {"all": see_all, "user": None if see_all else _signed_in_as()}

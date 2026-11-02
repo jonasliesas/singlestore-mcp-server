@@ -5,11 +5,15 @@
 #   .\scripts\studio-hub-local.ps1 -Check                # only check prerequisites and print the checklist
 #   .\scripts\studio-hub-local.ps1 -Notebooks -NotebookUsers "norjni,<colleague>"   # with local notebooks
 #   .\scripts\studio-hub-local.ps1 -UsersGroup SpeedyStoreStudioUsers -NotebookGroup SpeedyStoreStudioNotebooks
+#   .\scripts\studio-hub-local.ps1 -Repository -MonitorGroup SpeedyStoreStudioMonitor   # shared Studio repository (SSSTUDIO)
 #   .\scripts\studio-hub-local.ps1 -Gateway -GatewayVenv C:\path\to\eg-venv -NotebookUsers "norjni"   # kernel gateway (2a)
 #
 # -Notebooks: STUDIO_NOTEBOOKS=local with your desktop notebook environment (~\.singlestore-mcp\notebook-env). Without
 # groups only -NotebookUsers (default: -Admins) may then use Studio and notebooks. Local notebooks have no isolation
 # between users' kernels: test use with a few trusted users only (the kernel gateway, step 2a, replaces this).
+# -Repository: the Studio repository - one collector with the service account svc_studio_collector (its password from
+# Windows Credential Manager, speedystore-studio-collector / svc_studio_collector) keeps every user's history in
+# -RepositoryDb (default SSSTUDIO) on the default SingleStore cluster. -MonitorGroup: members see everyone's queries.
 # -Gateway: STUDIO_NOTEBOOKS=gateway - a local Jupyter Enterprise Gateway (python -m singlestore_mcp.kernel_gateway) from
 # -GatewayVenv (a separate venv: uv venv eg --python 3.11; uv pip install --python eg -r deploy\gateway-constraints.txt)
 # on -GatewayPort, kernels in <DataDir>\kernels, a random gateway token for this run, package installs -PipMode.
@@ -28,6 +32,9 @@ param(
     [string]$NotebookUsers = "",
     [string]$UsersGroup = "",
     [string]$NotebookGroup = "",
+    [switch]$Repository,
+    [string]$RepositoryDb = "SSSTUDIO",
+    [string]$MonitorGroup = "",
     [switch]$Gateway,
     [string]$GatewayVenv = $env:STUDIO_GATEWAY_VENV,
     [int]$GatewayPort = 8888,
@@ -143,6 +150,22 @@ $env:STUDIO_IDLE_MINUTES = "$IdleMinutes"
 if (-not $env:STUDIO_OAUTH_CLIENT_ID) { $env:STUDIO_OAUTH_MODE = "paste" }
 if ($UsersGroup) { $env:STUDIO_USERS_GROUP = $UsersGroup }
 if ($NotebookGroup) { $env:STUDIO_NOTEBOOK_GROUP = $NotebookGroup }
+if ($MonitorGroup) { $env:STUDIO_MONITOR_GROUP = $MonitorGroup }
+$repoText = "off (each Studio keeps its own history)"
+if ($Repository) {
+    if (-not $env:STUDIO_DEFAULT_S2_HOST) { Write-Host "-Repository needs a default SingleStore host: save a SingleStore connection in your desktop Studio first." -ForegroundColor Red; exit 1 }
+    # The service account's password: Windows Credential Manager -> this process's environment only (the hub hands
+    # it to the collector over stdin; the Studios never get it).
+    $pw = & $python -c "import keyring; print(keyring.get_password('speedystore-studio-collector', 'svc_studio_collector') or '')"
+    if (-not $pw) { Write-Host "-Repository: no password for svc_studio_collector in Windows Credential Manager (see deploy\ADMIN-GUIDE.md, Studio repository)." -ForegroundColor Red; exit 1 }
+    else {
+        $env:STUDIO_COLLECTOR_PASSWORD = $pw
+        $env:STUDIO_REPOSITORY_DB = $RepositoryDb
+        $repoText = "$RepositoryDb on $($env:STUDIO_DEFAULT_S2_HOST) (collector log: $DataDir\collector\collector.log)"
+        if ($MonitorGroup) { $repoText += "; everyone's queries for $MonitorGroup" }
+    }
+    Remove-Variable pw
+}
 $nbText = "off"
 if ($Notebooks) {
     $env:STUDIO_NOTEBOOKS = if ($Gateway) { "gateway" } else { "local" }
@@ -179,6 +202,7 @@ Write-Host "  Access     $access"
 Write-Host "  Notebooks  $nbText"
 if ($Notebooks) { Write-Host "             no isolation between users' kernels - test use with a few trusted users only" -ForegroundColor Yellow }
 Write-Host "  SingleStore default  $s2"
+Write-Host "  Repository $repoText"
 Write-Host "  Idle stop  $IdleMinutes min    Secrets key: $key"
 Write-Host "  Logs       hub + audit: this window and $DataDir\hub\audit.jsonl"
 Write-Host "             each user's Studio: $DataDir\users\<sas-user>\state\studio.log"

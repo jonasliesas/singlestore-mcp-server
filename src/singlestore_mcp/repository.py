@@ -56,9 +56,9 @@ _V = "VARCHAR(255)"
 TABLES: tuple[Table, ...] = (
     Table("runs", "query_history.db", ("source", "event_key"), (
         ("source", f"{_V} NOT NULL"), ("event_key", "VARCHAR(80) NOT NULL"), ("finished", "DATETIME(6) NOT NULL"),
-        ("ms", "BIGINT NOT NULL"), ("user", _V), ("database", _V), ("ok", "TINYINT NOT NULL"), ("error_code", "VARCHAR(32)"),
-        ("category", "VARCHAR(64)"), ("rows", "BIGINT"), ("shape", "VARCHAR(16) NOT NULL"), ("sample", "TEXT"),
-        ("origin", _V), ("tables", "TEXT"), ("plan_id", "BIGINT"), ("stmt", "VARCHAR(32)")),
+        ("ms", "BIGINT NOT NULL"), ("user", _V), ("database", _V), ("ok", "TINYINT NOT NULL"), ("error_code", "TEXT"),
+        ("category", "TEXT"), ("rows", "BIGINT"), ("shape", "VARCHAR(16) NOT NULL"), ("sample", "TEXT"),
+        ("origin", "TEXT"), ("tables", "TEXT"), ("plan_id", "BIGINT"), ("stmt", "VARCHAR(32)")),
         sort="finished", times=("finished",)),
     Table("plans", "query_history.db", ("source", "plan_key"), (
         ("source", f"{_V} NOT NULL"), ("plan_key", "VARCHAR(128) NOT NULL"), ("node_id", "INT"), ("plan_id", "BIGINT"),
@@ -66,7 +66,7 @@ TABLES: tuple[Table, ...] = (
         ("failed", "BIGINT"), ("rows", "BIGINT"), ("exec_ms", "DOUBLE"), ("avg_ms", "DOUBLE"), ("cpu_ms", "DOUBLE"),
         ("avg_mem", "DOUBLE"), ("avg_max_mem", "DOUBLE"), ("avg_spill", "DOUBLE"), ("avg_blob_miss", "DOUBLE"),
         ("blob_wait_ms", "DOUBLE"), ("queued_ms", "DOUBLE"), ("warnings", "TEXT"), ("text", "TEXT"), ("text_len", "INT"),
-        ("stmt", "VARCHAR(32)"), ("tables", "TEXT"), ("origin", _V), ("seen", "DATETIME(6)")),
+        ("stmt", "VARCHAR(32)"), ("tables", "TEXT"), ("origin", "TEXT"), ("seen", "DATETIME(6)")),
         sort="last_executed", times=("first_load", "last_executed", "seen")),
     Table("plan_samples", "query_history.db", ("source", "plan_key", "t"), (
         ("source", f"{_V} NOT NULL"), ("plan_key", "VARCHAR(128) NOT NULL"), ("t", "DATETIME(6) NOT NULL"),
@@ -74,12 +74,19 @@ TABLES: tuple[Table, ...] = (
         sort="t", times=("t",)),
     Table("metrics", "metrics.db", ("source", "node_id", "res", "t"), (
         ("source", f"{_V} NOT NULL"), ("node_id", "INT NOT NULL"), ("t", "BIGINT NOT NULL"), ("res", "INT NOT NULL"),
-        ("host", _V), ("type", "VARCHAR(16)"), ("n", "INT NOT NULL"),
+        ("host", _V), ("type", "VARCHAR(32)"), ("n", "INT NOT NULL"),
         *((c, "DOUBLE") for c in ("cpu", "cpu_max", "host_cpu", "mem_b", "mem_max_b", "disk_used_b", "disk_total_b",
                                   "queued", "queued_max", "running", "conns"))),
         sort="t"),
 )
 _BY_NAME = {t.name: t for t in TABLES}
+
+
+def _row_errors() -> tuple[type[BaseException], ...]:
+    """Errors about a row's values (not the connection)."""
+    from singlestoredb import exceptions as e
+
+    return (e.DataError, e.IntegrityError)
 
 
 def _q(name: str) -> str:
@@ -120,7 +127,7 @@ class Repository:
         self.retention = {**DEFAULT_RETENTION, **(retention or {})}
         self._conn: Any = None
         self._lock = threading.Lock()
-        self.status: dict[str, Any] = {"database": database, "last_flush": None, "last_error": None, "sent": 0,
+        self.status: dict[str, Any] = {"database": database, "last_flush": None, "last_error": None, "sent": 0, "skipped": 0,
                                        "pending": None, "restored": None, "last_retain": None}
 
     # ------------------------------------------------------------ SingleStore
@@ -224,11 +231,22 @@ class Repository:
         one = "(" + ", ".join(["%s"] * len(t.names)) + ")"
         update = ", ".join(f"{_q(c)} = VALUES({_q(c)})" for c in t.names if c not in t.pk)
 
+        sql = f"{MARKER} INSERT INTO {_q(t.name)} ({cols}) VALUES {{}} ON DUPLICATE KEY UPDATE {update}"
+
         def run(cur: Any) -> None:
             for i in range(0, len(rows), CHUNK):
                 part = rows[i:i + CHUNK]
-                cur.execute(f"{MARKER} INSERT INTO {_q(t.name)} ({cols}) VALUES {', '.join([one] * len(part))}"
-                            f" ON DUPLICATE KEY UPDATE {update}", [v for r in part for v in r])
+                try:
+                    cur.execute(sql.format(", ".join([one] * len(part))), [v for r in part for v in r])
+                except _row_errors():
+                    # One bad row (a value the column can't take) mustn't hold up the outbox: send the rest one by
+                    # one and count what is left out. Connection errors still raise (the rows stay noted).
+                    for r in part:
+                        try:
+                            cur.execute(sql.format(one), r)
+                        except _row_errors() as exc:
+                            self.status["skipped"] += 1
+                            self.status["last_skipped"] = f"{t.name}: {str(exc)[:200]}"
 
         self._run(run)
 

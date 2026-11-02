@@ -206,6 +206,28 @@ class Hub:
         return session
 
 
+def all_alerts(cfg: HubConfig, days: int = 7, limit: int = 200) -> list[dict[str, Any]]:
+    """Every user's open (unacknowledged) alerts of the last ``days``, newest first, from their Studio folders
+    (each user's alerts stay their own; Studio admins see them all here)."""
+    from .. import fileio
+
+    cut = time.time() - days * 86400
+    out: list[dict[str, Any]] = []
+    base = cfg.users_dir()
+    for state in base.glob("*/state/alerts.json") if base.is_dir() else []:
+        try:
+            data = fileio.read_json(state, {})
+        except Exception:  # noqa: BLE001 - a file being written: next refresh
+            continue
+        user = state.parent.parent.name
+        for a in (data.get("alerts") or []) if isinstance(data, dict) else []:
+            if isinstance(a, dict) and not a.get("acked") and (a.get("last_seen") or 0) >= cut:
+                out.append({**{k: a.get(k) for k in ("kind", "severity", "title", "detail", "count", "last_seen", "active")},
+                            "user": user})
+    out.sort(key=lambda a: -(a.get("last_seen") or 0))
+    return out[:limit]
+
+
 def repository_summary(hub: Hub) -> str:
     """One line for the admin page: the Studio repository's state."""
     if hub.collector is None:
@@ -525,7 +547,8 @@ def _handler(hub: Hub) -> type[BaseHTTPRequestHandler]:
                 kernels = [{"user": k.user, "id": k.id[:8], "purpose": k.purpose, "started": k.created,
                             "last_activity": k.last_activity, "channels": k.channels} for k in hub.broker.kernels()]
                 kernels.append({"gateway": cfg.gateway_url, "healthy": hub.broker.healthy()})
-            return self._send(200, pages.admin(rows, sess, hub.audit.tail(50), s.csrf, limits, warning, kernels))
+            return self._send(200, pages.admin(rows, sess, hub.audit.tail(50), s.csrf, limits, warning, kernels,
+                                               all_alerts(cfg)))
 
         def _admin_stop(self) -> None:
             s = self._admin_session()

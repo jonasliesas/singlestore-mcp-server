@@ -112,8 +112,21 @@ def _kernels(kernels: list[dict[str, Any]] | None) -> str:
             f"<table><tr><th>User</th><th>Kernel</th><th>Use</th><th>Started</th><th>Last activity</th><th>Connected</th></tr>{rows}</table>")
 
 
+def _alerts(alerts: list[dict[str, Any]] | None) -> str:
+    """Every user's open alerts (not acknowledged): each Studio checks with its user's own connection and rules."""
+    if alerts is None:
+        return ""
+    rows = "".join(
+        f"<tr><td><code>{escape(a['user'])}</code></td><td>{escape(str(a.get('severity') or ''))}</td>"
+        f"<td>{escape(str(a.get('title') or a.get('kind') or ''))}</td><td>{escape(str(a.get('detail') or '')[:300])}</td>"
+        f"<td>{escape(str(a.get('count') or 1))}</td><td>{_ago(a.get('last_seen'))}</td></tr>" for a in alerts)         or '<tr><td colspan="6">No open alerts.</td></tr>'
+    return ("<h2>Alerts (every user, not acknowledged)</h2><table><tr><th>User</th><th>Severity</th><th>Alert</th>"
+            f"<th>Detail</th><th>Count</th><th>Last seen</th></tr>{rows}</table>")
+
+
 def admin(rows: list[dict[str, Any]], sessions: list[dict[str, Any]], events: list[dict[str, Any]], csrf: str,
-          limits: dict[str, Any], warning: str | None = None, kernels: list[dict[str, Any]] | None = None) -> str:
+          limits: dict[str, Any], warning: str | None = None, kernels: list[dict[str, Any]] | None = None,
+          alerts: list[dict[str, Any]] | None = None) -> str:
     studio_rows = "".join(
         f"<tr><td><code>{escape(r['user'])}</code></td><td>{escape(str(r.get('pid') or ''))}</td><td>{escape(r['state'])}</td>"
         f"<td>{_ago(r.get('started'))}</td><td>{_ago(r.get('last_activity'))}</td><td>{_mb(r.get('rss'))}</td>{_access(r)}"
@@ -133,5 +146,6 @@ def admin(rows: list[dict[str, Any]], sessions: list[dict[str, Any]], events: li
 <div class="row"><a class="btn ghost" href="/account">Account</a><a class="btn ghost" href="/admin">Refresh</a></div>
 <h2>Studios</h2><table><tr><th>User</th><th>PID</th><th>State</th><th>Started</th><th>Last use</th><th>Memory</th><th>Studio access</th><th>Notebooks</th><th></th></tr>{studio_rows}</table>
 {_kernels(kernels)}
+{_alerts(alerts)}
 <h2>Signed in</h2><table><tr><th>User</th><th>Name</th><th>Address</th><th>Signed in</th><th>Last request</th><th>Studio access</th><th>Notebooks</th></tr>{session_rows}</table>
 <h2>Recent events</h2><table><tr><th>Time (UTC)</th><th>Event</th><th>User</th><th>Details</th></tr>{event_rows}</table></div>""", wide=True)

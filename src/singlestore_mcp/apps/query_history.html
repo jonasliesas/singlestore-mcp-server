@@ -1114,9 +1114,14 @@ function planTable(p) {
 }
 
 // Older runs the cluster's trace no longer has (it restarted, or its ring buffer moved on), listed from the local copy.
-const keptText = (d) => d.kept?.runs
-  ? ` · plus ${fmt.number(d.kept.runs)} older run${d.kept.runs === 1 ? "" : "s"} kept locally (since ${when(d.kept.oldest)})`
-  : "";
+const keptText = (d) => (d.kept?.runs
+  ? ` · plus ${fmt.number(d.kept.runs)} older run${d.kept.runs === 1 ? "" : "s"} kept ${d.repository ? "in the Studio repository" : "locally"} (since ${when(d.kept.oldest)})`
+  : "") + repoScope(d.repository);
+
+// Server version: the history comes from the shared Studio repository. Outside the monitor group it shows only the
+// queries of the SingleStore user this connection signs in as.
+const repoScope = (r) => !r ? "" : r.all ? " · all users' queries (Studio repository)"
+  : ` · only your queries (SingleStore user ${r.user || "unknown"}; the monitor group sees everyone's)`;
 
 // ---------------------------------------------------------------- page
 function render() {
@@ -1529,8 +1534,9 @@ function renderTrends() {
     onkeydown: (ev) => { if (ev.key === "Enter") showShape(s); } }, cols, h("td", { class: "sql", title: s.sample }, s.sample));
   fill(trendsEl, controls,
     h("div", { class: "qh-adv-meta" },
-      d.stored ? `${fmt.number(d.stored)} runs kept locally since ${when(d.oldest)} (queries the cluster traced, ≥ 1 s), for ${d.source}.` : "Nothing stored yet.",
-      " The cluster's history is a ring buffer that forgets; this copy grows each time the history loads and with every Alerts check."),
+      d.stored ? `${fmt.number(d.stored)} runs kept ${d.repository ? "in the shared Studio repository" : "locally"} since ${when(d.oldest)} (queries the cluster traced, ≥ 1 s), for ${d.source}${repoScope(d.repository)}.` : "Nothing stored yet.",
+      d.repository ? " The cluster's history is a ring buffer that forgets; the Studio repository copies it for every user once a minute."
+        : " The cluster's history is a ring buffer that forgets; this copy grows each time the history loads and with every Alerts check."),
     h("div", { class: "qh-tr-grid" },
       trendChart("Queries", per, series, (p) => p.queries, (v) => fmt.number(v), "bar", t.hourly, (p) => pickBucket(p, false), t.picked?.failed ? null : t.picked?.bucket),
       trendChart("Total runtime", per, series, (p) => p.total_ms / 1000, (v) => fmt.duration(v), "bar", t.hourly, (p) => pickBucket(p, false), t.picked?.failed ? null : t.picked?.bucket),

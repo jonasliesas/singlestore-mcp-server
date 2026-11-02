@@ -341,3 +341,79 @@ def test_write_through_and_restore_on_singlestore(home: Path, tmp_path_factory: 
     finally:
         cur.execute(f"DROP DATABASE IF EXISTS `{db}`")
         admin.close()
+
+
+# ------------------------------------------------------------------ the hub's side
+
+def test_hub_settings_for_the_repository(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from singlestore_mcp.hub import config
+
+    for k, v in {"STUDIO_VIYA_URL": "https://viya.example", "STUDIO_MASTER_KEY": "m" * 40, "STUDIO_DATA_DIR": str(tmp_path),
+                 "STUDIO_DEFAULT_S2_HOST": "10.1.2.3", "STUDIO_MONITOR_GROUP": "SpeedyStoreStudioMonitor"}.items():
+        monkeypatch.setenv(k, v)
+    for k in ("STUDIO_COLLECTOR_PASSWORD", "STUDIO_COLLECTOR_HOST", "STUDIO_REPOSITORY_DB"):
+        monkeypatch.delenv(k, raising=False)
+    cfg = config.load()
+    assert not cfg.collector, "no password: no repository"
+    assert cfg.rules.monitor_group == "SpeedyStoreStudioMonitor" and cfg.rules.wants_groups
+    monkeypatch.setenv("STUDIO_COLLECTOR_PASSWORD", "not-a-real-one")
+    cfg = config.load()
+    assert cfg.collector and cfg.repository_db == "SSSTUDIO" and cfg.collector_s2 == {"host": "10.1.2.3", "port": "3306"}
+    assert "not-a-real-one" not in repr(cfg)
+    monkeypatch.setenv("STUDIO_REPOSITORY_DB", "bad name;")
+    with pytest.raises(SystemExit):
+        config.load()
+
+
+def test_studios_get_a_token_with_what_they_may_see(tmp_path: Path) -> None:
+    from singlestore_mcp.hub.audit import Audit
+    from singlestore_mcp.hub.collector import CollectorProcess
+    from singlestore_mcp.hub.config import HubConfig
+    from singlestore_mcp.hub.spawner import Spawner
+
+    cfg = HubConfig(viya_url="https://viya.example", master_key=b"m" * 32, data_dir=tmp_path, admins=("boss",),
+                    collector_password="x", collector_s2={"host": "h"})
+    sp = Spawner(cfg, Audit(tmp_path / "a.jsonl", echo=False))
+    cp = CollectorProcess(cfg, sp.audit)
+    sp.collector = cp
+    assert sp.seed("u", None)["collector"] is None, "collector not running yet"
+    cp.port, cp.source = 4711, "h:3306"
+    sp.access["u"] = access.Access(app=True, app_via="", notebooks=False, notebooks_via="", monitor=True)
+    seed = sp.seed("u", None)["collector"]
+    assert seed["url"] == "http://127.0.0.1:4711" and seed["source"] == "h:3306"
+    assert collector.verify(cp.key, seed["token"]) | {"i": 0} == {"u": "u", "m": True, "a": False, "i": 0}
+    assert collector.verify(cp.key, sp.seed("boss", None)["collector"]["token"])["a"] is True
+    assert collector.verify(cp.key, sp.seed("other", None)["collector"]["token"])["m"] is False
+    env = sp._env("u")
+    assert env["SINGLESTORE_MCP_WORKLOADS_DIR"] == str(tmp_path / "shared" / "workloads")
+    assert "x" not in {env.get("STUDIO_COLLECTOR_PASSWORD"), env.get("SINGLESTORE_PASSWORD")}
+
+
+def test_workloads_are_shared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from singlestore_mcp import workload
+
+    shared = tmp_path / "shared"
+    monkeypatch.setenv("SINGLESTORE_MCP_WORKLOADS_DIR", str(shared))
+    monkeypatch.setenv("SINGLESTORE_MCP_HOME", str(tmp_path / "alice"))
+    workload.save({"name": "zz shared", "statements": [{"sql": "SELECT 1"}]})
+    monkeypatch.setenv("SINGLESTORE_MCP_HOME", str(tmp_path / "bob"))
+    assert [w["name"] for w in workload.list_workloads()] == ["zz shared"]
+    workload.delete("zz shared")
+    assert workload.list_workloads() == [] and not (shared / ".workloads.lock").exists()
+    assert workload._restore_file().parent == tmp_path / "bob" / "workloads", "trace settings stay per Studio"
+
+
+def test_admin_sees_every_users_open_alerts(tmp_path: Path) -> None:
+    from singlestore_mcp.hub.app import all_alerts
+    from singlestore_mcp.hub.config import HubConfig
+
+    cfg = HubConfig(viya_url="https://viya.example", master_key=b"m" * 32, data_dir=tmp_path)
+    now = time.time()
+    for user, alerts in {"alice": [{"kind": "disk", "title": "Disk 95%", "last_seen": now, "acked": None},
+                                   {"kind": "disk", "title": "old", "last_seen": now - 30 * 86400}],
+                         "bob": [{"kind": "failed_query", "title": "Failed", "last_seen": now - 60, "acked": now}]}.items():
+        d = tmp_path / "users" / user / "state"
+        d.mkdir(parents=True)
+        (d / "alerts.json").write_text(json.dumps({"alerts": alerts}), encoding="utf-8")
+    got = all_alerts(cfg)
+    assert [(a["user"], a["title"]) for a in got] == [("alice", "Disk 95%")]
