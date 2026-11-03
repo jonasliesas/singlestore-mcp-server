@@ -1097,7 +1097,7 @@ the exact `jwks_endpoint`, `jwks_username_field` and user the cluster needs.
 |---|---|
 | **Schema Explorer** `schema_explorer(database?, table?)` | Databases (with a bottomless / local icon) → tables with row counts and sizes; per table the columns, DDL (shard / sort keys), a row preview and its **Distribution** (data skew over partitions and leaves); **Check skew** for a whole database. **Ask Claude**, **Query in grid**, **Analyze…** (refresh statistics, with confirmation) and **Load file into table…** (see [Load a file into a table](#load-a-file-into-a-table)). |
 | **Pipeline Monitor** `pipeline_monitor(database?)` | Every pipeline's state, source → table, progress (files loaded / Kafka lag), latest batches and errors. Start / Stop (with confirmation), Test, error details, **Ask Claude**, auto-refresh. |
-| **Cluster Monitor** `cluster_monitor()` | Tabs **Overview** (per node SingleStore CPU against its core limit, memory and disk, beside a 15-minute CPU chart), **Health** (node and partition state, cluster events, license, problems explained), **Queries** (running now, plus every statement that ran in the last 60 s), **Disk**, **Bottomless**, **IO**, **History** (CPU, memory, disk, queue and connections over 1 h / 24 h / 7 d) and **Backups**. Refreshes every 5 s. |
+| **Cluster Monitor** `cluster_monitor()` | Tabs **Overview** (per node SingleStore CPU against its core limit, memory and disk, beside a 15-minute CPU chart), **Health** (node and partition state, cluster events, license, problems explained), **Queries** (running now, plus every statement that ran in the last 60 s), **Memory** (per node by use, its trend, the tables and statements using it, resource pools, advice), **Disk**, **Bottomless**, **IO**, **History** (CPU, memory, disk, queue and connections over 1 h / 24 h / 7 d) and **Backups**. Refreshes every 5 s. |
 | **Security** `security(tab?)` | Users with risk flags, effective privileges with the reason for each, "who can access …", resource pools and the workload manager queue, audit log settings. Changes (users, grants, roles, groups, pools) only in the view, each previewed and confirmed, or written to a SQL script for a DBA. See [Security](#security). |
 | **Config** `cluster_config(search?, changed_only?)` | Every engine variable per node, with the documented default; filter on changed from default / differs between nodes. See [Config](#config). |
 | **Clean up** `cleanup_work_tables()` | Finds the work tables SAS jobs leave behind (`_dm…` Data Management, `_flw…` flow, `SASTMP…` / `_tmp…` temp tables) in every non-system database: rows, size, created, created by, age, last use and dependent views. Select tables, confirm, and they're dropped one at a time, with a dry-run mode and a log. The **🧹 Clean up** button in the Schema Explorer's header. |
@@ -1343,10 +1343,20 @@ pipeline's batch history and error log.
   sample a minute between them. **Sample now** adds one at once. Settings:
   `SINGLESTORE_MCP_METRICS=0` (off), `SINGLESTORE_MCP_METRICS_INTERVAL`
   (seconds, 15–300, default 60), `SINGLESTORE_MCP_METRICS_RETENTION_DAYS`
-  (1–90, default 7). **Export CSV** saves the range shown (one row per point
+  (1–400, default 7). **Export CSV** saves the range shown (one row per point
   and node: time in UTC, node, host and the values the charts show). The
   Alerts view's trend rules (disk full / memory at max_memory within N days)
   read the same store.
+- **Memory**: per node how much of `max_memory` is used and by what (rowstore
+  tables, queries, cached memory, connections, plans and more), with
+  `max_table_memory` and the host's memory beside it; the **trend** per node over
+  **1 hour**, **24 hours** or **7 days** with the growth per day and, for a steady
+  climb, the days left until `max_memory`; the **statements** and **tables** using
+  most memory (Studio's own statements hidden unless you ask for them); **resource
+  pools** with their limits; and advice under "Worth a look" (close to the limits
+  behind errors 1712 and 1720, deleted rows not cleaned up, large rowstore tables,
+  statements that spill, and more). The trend reads the same stored samples as
+  History, so it adds no cluster query.
 - **Backups**: per database the last successful backup, its age, type, size
   and how long it took, the number of backups and failures and the last error;
   the backup history (newest first) and backups running now with their
@@ -2499,6 +2509,12 @@ kernel, tokens from the hub's relay, memory / CPU / count limits, package instal
 .\scripts\studio-hub-local.ps1          # try it on this PC: http://127.0.0.1:8800/
 .\scripts\studio-hub-local.ps1 -Gateway -GatewayVenv <Enterprise Gateway venv>   # with gateway notebooks
 ```
+
+With the **Studio repository** one collector process next to the hub, using its own service account, copies the
+query history and takes the metrics samples for everyone, and keeps them in a SingleStore database (`SSSTUDIO`), so
+they survive a new pod. Users see their own queries, members of `STUDIO_MONITOR_GROUP` and Studio admins see everyone's,
+workloads are shared, and alerts stay each user's own (Studio admins see them all in the Alerts view). While the
+cluster is away, rows wait in a local buffer. Setup: [deploy/ADMIN-GUIDE.md](deploy/ADMIN-GUIDE.md), section 7b.
 
 Container image, Kubernetes manifests and every setting: [deploy/README.md](deploy/README.md); what the Viya and
 Kubernetes admins do (OAuth client in SAS Logon, ingress/TLS, storage, network, secrets):

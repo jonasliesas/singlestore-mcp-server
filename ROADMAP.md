@@ -448,9 +448,11 @@ in step 1, "Ask Claude" off by default (switchable later with an Anthropic / Fou
     (`<data>/shared/workloads`); Query History says "all users" / "only your queries". Tested end to end on Zeus
     (1669 rows written, restore of 1447 runs / 74 plans in 3 s) and `tests/test_repository.py` (+ a `zz_test_` database).
     Local pilot: `scripts/studio-hub-local.ps1 -Repository -MonitorGroup SpeedyStoreStudioMonitor`.
-  - Left: Jonas tests the pilot; `perf/hub_load.py` with the repository (needs the cluster: the collector can't be
-    faked yet); 0.11.1. Later: alerts kept in the repository too (now: each user's alerts.json, admins see them on
-    /admin); workloads' runs in the repository; SAS views over `SSSTUDIO` (it is a valid libref).
+  - Released in 0.11.1 (2026-11-03). `perf/hub_load.py` doesn't cover the collector (it can't be faked yet): the hub
+    alone adds ~9 ms per call with 10 users; the collector used ~130 MB in the local pilot (Windows).
+  - Left, for the Zeus deploy (Jonas 2026-11-03): alerts and workloads kept in the repository (now: each user's
+    alerts.json, admins see them in Alerts and on /admin; workloads in a shared folder). Later: SAS views over
+    `SSSTUDIO` (it is a valid libref).
 
 ## Known small issues
 - Network breaks: a query whose connection goes silent *without* a route change or sleep (e.g. a firewall that drops
