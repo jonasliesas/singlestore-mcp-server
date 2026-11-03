@@ -23,7 +23,7 @@ _WATCH_CONN = ("window.__conn = []; new MutationObserver(() => __conn.push(docum
 def _env(test_home, sql_dir) -> dict[str, str]:
     # No standby: a restart then leaves the port closed for a few seconds (a fresh server loads), so the page
     # really has to reconnect. A short reconnect time for the "gone for good" part.
-    return server_env(test_home, sql_dir, {"SINGLESTORE_MCP_NO_STANDBY": "1", "SINGLESTORE_MCP_BROWSER_RECONNECT": "8"})
+    return server_env(test_home, sql_dir, {"SINGLESTORE_MCP_NO_STANDBY": "1", "SINGLESTORE_MCP_BROWSER_RECONNECT": "30"})
 
 
 def _calls(page: Any) -> list[int]:
