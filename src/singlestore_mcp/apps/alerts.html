@@ -109,8 +109,8 @@ function alertItem(a) {
 function serverPanel(sv) {
   if (!sv) return null;
   if (sv.error) return h("section", { class: "s2-card al-server" }, h("h2", {}, "Studio server"), h("div", { class: "s2-error" }, sv.error));
-  const r = sv.repository ?? {}, repo = r.repository ?? {}, m = r.metrics ?? {};
-  const err = repo.last_error || r.last_error || m.last_error;
+  const r = sv.repository ?? {}, repo = r.repository ?? {}, m = r.metrics ?? {}, files = r.files ?? {};
+  const err = repo.last_error || r.last_error || m.last_error || files.last_error;
   const facts = [
     `${repo.database ?? "?"} on ${r.source ?? "?"}`,
     repo.last_flush ? `last write ${ago(repo.last_flush)}` : "nothing written yet",
@@ -118,6 +118,7 @@ function serverPanel(sv) {
     repo.skipped ? `${fmt.number(repo.skipped)} rows left out (a value the column can't take)` : null,
     m.last_sample ? `last metrics sample ${ago(m.last_sample)}` : null,
     r.last_sync ? `query history copied ${ago(r.last_sync)}` : null,
+    files.last_sync ? `${fmt.number(files.alerts ?? 0)} alerts, ${fmt.number(files.workloads ?? 0)} workloads and ${fmt.number(files.runs ?? 0)} workload runs kept ${ago(files.last_sync)}` : null,
   ].filter(Boolean).join(" · ");
   const rows = sv.alerts ?? [];
   return h("section", { class: "s2-card al-server" },

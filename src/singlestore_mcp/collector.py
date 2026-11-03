@@ -9,6 +9,8 @@ repository database) it
 - copies new query history events (``history_store.sync``) and the plan cache (``snapshot_plans``) once a minute,
 - keeps all of it in SQLite files in its own folder and in the repository database (``repository``: write-through,
   with the SQLite outbox as the buffer while the cluster is down, and a restore onto an empty folder),
+- mirrors each user's alerts and the shared workloads with their runs from their files to the same database, and
+  restores them onto an empty volume (``repository_files``),
 - prunes both sides hourly (query runs and plans 90 days, plan-cache samples 30 days),
 
 and answers the Studios' reads on 127.0.0.1 (``POST /call``, ``remote`` on the Studio side). Each Studio has a token
@@ -18,7 +20,7 @@ SingleStore user their own connection signs in as, and no plan cache (it has no 
 
 Settings come as one JSON line on stdin (never the environment or the command line)::
 
-    {"key": "<token key>", "home": "<folder>", "database": "SSSTUDIO",
+    {"key": "<token key>", "home": "<folder>", "database": "SSSTUDIO", "users_dir": "<folder>", "workloads_dir": "<folder>",
      "singlestore": {"host": "...", "port": 3306, "user": "svc_studio_collector", "password": "...",
                      "ssl_disabled": false, "ssl_ca": null},
      "retention": {"runs_days": 90, ...}, "interval_s": 60}
@@ -136,6 +138,7 @@ class Collector:
     def __init__(self, cfg: dict[str, Any]) -> None:
         from . import connections, history_store
         from .repository import Repository
+        from .repository_files import FileMirror
 
         self.key = str(cfg["key"]).encode()
         self.interval_s = int(cfg.get("interval_s") or 60)
@@ -144,6 +147,7 @@ class Collector:
         self.source = history_store.source_id()
         p = connections.active()
         self.repo = Repository(connections.connect_kwargs(p), cfg.get("database") or "SSSTUDIO", cfg["home"], self.retention)
+        self.files = FileMirror(self.repo, self.users_dir, cfg.get("workloads_dir"))
         self.stop = threading.Event()
         self.status: dict[str, Any] = {"started": round(time.time(), 1), "source": self.source, "last_sync": None,
                                        "last_error": None, "calls": 0, "denied": 0}
@@ -163,6 +167,7 @@ class Collector:
         except Exception as exc:  # noqa: BLE001 - the cluster may be down: collect into SQLite, send later
             self.repo.status["last_error"] = f"{type(exc).__name__}: {str(exc)[:240]}"
         self.repo.install_triggers()
+        self._files()  # before the Studios ask: a new volume gets users' alerts and the workloads back
 
     def _every(self, seconds: float, fn: Any, name: str, first: float = 0.0) -> None:
         def run() -> None:
@@ -195,6 +200,12 @@ class Collector:
         except Exception as exc:  # noqa: BLE001 - again next hour
             self.repo.status["last_error"] = f"retain: {type(exc).__name__}: {str(exc)[:240]}"
 
+    def _files(self) -> None:
+        try:
+            self.files.sync()
+        except Exception:  # noqa: BLE001 - in files.status; the files wait for the next sync
+            pass
+
     def _flush(self) -> None:
         try:
             self.repo.flush()
@@ -209,6 +220,7 @@ class Collector:
         self._every(SYNC_EVERY_S, self._sync, "sync", first=5)
         self._every(FLUSH_EVERY_S, self._flush, "flush", first=FLUSH_EVERY_S)
         self._every(RETAIN_EVERY_S, self._retain, "retain", first=120)
+        self._every(SYNC_EVERY_S, self._files, "files", first=SYNC_EVERY_S)
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), _handler(self))
         self.httpd.daemon_threads = True
         threading.Thread(target=self.httpd.serve_forever, name="collector-http", daemon=True).start()
@@ -226,6 +238,7 @@ class Collector:
             self.repo.flush()
         except Exception:  # noqa: BLE001 - sent by the next collector
             pass
+        self._files()
         self.repo.close()
 
     def overview(self) -> dict[str, Any]:
@@ -238,7 +251,7 @@ class Collector:
         from . import metrics_store
 
         m = metrics_store.status()
-        return {**self.status, "repository": dict(self.repo.status),
+        return {**self.status, "repository": dict(self.repo.status), "files": dict(self.files.status),
                 "metrics": {k: m.get(k) for k in ("running", "last_sample", "last_error", "samples", "interval_s",
                                                   "retention_days", "raw_days")}}
 
@@ -334,6 +347,8 @@ def _setup_env(cfg: dict[str, Any]) -> None:
     cfg["retention"] = r
     os.environ["SINGLESTORE_MCP_METRICS_RAW_DAYS"] = str(r["metrics_raw_days"])
     os.environ["SINGLESTORE_MCP_METRICS_RETENTION_DAYS"] = str(r["metrics_days"])
+    if cfg.get("workloads_dir"):
+        os.environ["SINGLESTORE_MCP_WORKLOADS_DIR"] = str(cfg["workloads_dir"])  # the Studios' folder and lock (restore)
     for k in ("SINGLESTORE_URL", "SINGLESTORE_MCP_SERVER_MODE"):
         os.environ.pop(k, None)
 

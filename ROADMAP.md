@@ -450,9 +450,11 @@ in step 1, "Ask Claude" off by default (switchable later with an Anthropic / Fou
     Local pilot: `scripts/studio-hub-local.ps1 -Repository -MonitorGroup SpeedyStoreStudioMonitor`.
   - Released in 0.11.1 (2026-11-03). `perf/hub_load.py` doesn't cover the collector (it can't be faked yet): the hub
     alone adds ~9 ms per call with 10 users; the collector used ~130 MB in the local pilot (Windows).
-  - Left, for the Zeus deploy (Jonas 2026-11-03): alerts and workloads kept in the repository (now: each user's
-    alerts.json, admins see them in Alerts and on /admin; workloads in a shared folder). Later: SAS views over
-    `SSSTUDIO` (it is a valid libref).
+  - Built (2026-11-03, Jonas: for the Zeus deploy): alerts and workloads with their runs in the repository
+    (`repository_files.py`): the files stay what Studios use, the collector mirrors them once a minute and restores
+    them onto an empty volume. Later: SAS views over `SSSTUDIO` (it is a valid libref).
+  - Known gaps: a collector that starts with the cluster away on an empty volume doesn't restore `runs` / `plans` /
+    `metrics` later (only the files are retried).
 
 ## Known small issues
 - Network breaks: a query whose connection goes silent *without* a route change or sleep (e.g. a firewall that drops

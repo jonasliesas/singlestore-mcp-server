@@ -25,6 +25,8 @@ Backlog and agreed designs: [ROADMAP.md](ROADMAP.md). User docs: [README.md](REA
   `LOCAL` = no collector, use SQLite), `hub/collector.py` (starts it, signs each Studio's token). A new read
   function in `history_store` / `metrics_store` that a Studio uses needs the `_remote(...)` hook and an entry in
   `collector._calls()` (with its filter kind: runs per user, plans for the monitor group, metrics open).
+  `repository_files.py` mirrors users' alerts and the shared workloads from their files to the same database and
+  restores them onto an empty volume (a missing file never deletes).
 - `netguard.py` – recovery from network breaks (keepalive, route/sleep watcher, health probes, the Workspace's
   "connection lost" line). New code that opens cluster or Viya connections uses `connections.connect_kwargs` /
   `db.open_connection` / `sas_rest.request`, so it gets the same timeouts; test network faults with

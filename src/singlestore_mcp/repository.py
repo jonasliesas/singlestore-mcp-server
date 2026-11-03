@@ -14,6 +14,8 @@ a copy of every row in the repository database:
 - **Retention** on both sides (``retain``): query runs and plans 90 days, plan-cache counter samples 30 days, raw
   metrics 30 days and 10-minute metrics 1 year (the SQLite side: ``history_store.prune`` and ``metrics_store``'s
   compaction; deleted SQLite rows aren't sent, so the same cuts run on SingleStore).
+- **Users' files:** alerts and the shared workloads stay in files and are mirrored to the same database
+  (``repository_files``).
 
 Only the service account (``svc_studio_collector``: ALL on the repository, PROCESS + SHOW METADATA to collect) reads or
 writes the repository; users get no grants on it. Column types suit SQL and SAS readers (DATETIME(6) for times,
@@ -31,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 MARKER = "/* s2-repository */"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 CHUNK = 500                # rows per INSERT
 FLUSH_MAX = 20_000         # outbox entries per flush
 
@@ -163,8 +165,10 @@ class Repository:
         return None
 
     def ensure_schema(self) -> None:
+        from .repository_files import FILE_TABLES
+
         def run(cur: Any) -> None:
-            for t in TABLES:
+            for t in (*TABLES, *FILE_TABLES):
                 cur.execute(f"{MARKER} {ddl(t)}")
             cur.execute(f"{MARKER} CREATE TABLE IF NOT EXISTS `_schema` (`k` VARCHAR(32) NOT NULL, `v` VARCHAR(255),"
                         " PRIMARY KEY (`k`))")
@@ -175,6 +179,22 @@ class Repository:
     def close(self) -> None:
         with self._lock:
             self._drop_conn()
+
+    def read_table(self, t: Table) -> list[dict[str, Any]]:
+        def run(cur: Any) -> list[dict[str, Any]]:
+            cur.execute(f"{MARKER} SELECT {', '.join(map(_q, t.names))} FROM {_q(t.name)}")
+            return list(cur.fetchall())
+
+        return self._run(run) or []
+
+    def delete_rows(self, t: Table, keys: list[tuple[Any, ...]]) -> None:
+        where = " AND ".join(f"{_q(c)} = %s" for c in t.pk)
+
+        def run(cur: Any) -> None:
+            for key in keys:
+                cur.execute(f"{MARKER} DELETE FROM {_q(t.name)} WHERE {where}", key)
+
+        self._run(run)
 
     # ------------------------------------------------------------ SQLite side
     def _sqlite(self, file: str) -> sqlite3.Connection:

@@ -177,7 +177,7 @@ each token renewal like the other two:
 | Query history, trends, most used tables / active users | every user's queries | only the queries of the SingleStore user their connection signs in as |
 | Plan cache (statement stats, kept plans) | yes | no (it has no user) |
 | Cluster Monitor history, trend alerts | yes | yes |
-| Alerts | their own; admins: everyone's on `/admin` | their own |
+| Alerts | their own; admins: everyone's, in the Alerts view and on `/admin` | their own |
 | Workloads | shared by all users | shared by all users |
 
 A user taken out of the monitor group gets the narrower view within a token lifetime (the Studio is handed a new
@@ -189,6 +189,14 @@ in the cluster it watches, so while the cluster is down the rows wait in the SQL
 collector that starts on an empty volume first copies `SSSTUDIO` back. Retention (hourly, both sides): query runs and
 plans 90 days, plan-cache counter samples 30 days, metrics 30 days per minute and 1 year in 10-minute rows. A row a
 column can't take is left out and counted (admin page) instead of holding up the rest.
+
+**Alerts and workloads** stay in files on the volume, so Studios work the same with the cluster away, and the collector
+mirrors them to `SSSTUDIO` once a minute (tables `alerts`, `alert_state`, `workloads`, `workload_runs`; each record whole
+in `doc` as JSON, times in UTC). Deleted alerts and workloads are deleted there too; a file that is missing or being
+written deletes nothing. On an empty volume the collector puts them back before Studios start: a user's rules, settings
+and alerts, and the workloads with their runs. Existing files are never overwritten. The stores limit their size (300
+alerts per user, 30 runs per workload), so these tables have no retention. The collector creates the tables itself with
+the grants above.
 
 **Check it:** the admin page's *repository* line (last write, rows waiting, last sample, errors); the audit log's
 `collector_start` / `collector_exited`; `/data/collector/collector.log`. Without `STUDIO_COLLECTOR_PASSWORD` each

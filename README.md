@@ -2513,8 +2513,9 @@ kernel, tokens from the hub's relay, memory / CPU / count limits, package instal
 With the **Studio repository** one collector process next to the hub, using its own service account, copies the
 query history and takes the metrics samples for everyone, and keeps them in a SingleStore database (`SSSTUDIO`), so
 they survive a new pod. Users see their own queries, members of `STUDIO_MONITOR_GROUP` and Studio admins see everyone's,
-workloads are shared, and alerts stay each user's own (Studio admins see them all in the Alerts view). While the
-cluster is away, rows wait in a local buffer. Setup: [deploy/ADMIN-GUIDE.md](deploy/ADMIN-GUIDE.md), section 7b.
+workloads are shared, and alerts stay each user's own (Studio admins see them all in the Alerts view). Alerts and
+workloads with their runs are kept in the same database and come back on a new volume. While the cluster is away, rows
+wait in a local buffer. Setup: [deploy/ADMIN-GUIDE.md](deploy/ADMIN-GUIDE.md), section 7b.
 
 Container image, Kubernetes manifests and every setting: [deploy/README.md](deploy/README.md); what the Viya and
 Kubernetes admins do (OAuth client in SAS Logon, ingress/TLS, storage, network, secrets):
