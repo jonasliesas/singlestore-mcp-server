@@ -362,12 +362,20 @@ in step 1, "Ask Claude" off by default (switchable later with an Anthropic / Fou
   down = new sign-ins refused, running sessions kept. Admin page shows access and which group gave it.
 - **Notebooks `STUDIO_NOTEBOOKS=local` (built, test version):** kernels in the notebook user's own Studio process
   (shared read-only notebook environment, own folder, own tokens via the Studio's kernel token service), for the
-  notebook group only. **No isolation between users' kernels: a few trusted users only** (Jonas + one colleague).
+  notebook group only. **No isolation between users' kernels.** On Zeus from 2026-11-10 for every member of
+  `SpeedyStoreStudioNotebooks` (Jonas 2026-11-07), so that group stays small and trusted until the kernel gateway
+  (step 2a) or a pod per kernel (2b) is in.
 - **Next in step 1:** Jonas signs in against Zeus locally (`scripts/studio-hub-local.ps1 -Notebooks`, from 2026-11-02)
   and with a colleague; check on Zeus whether `/memberships` includes nested groups (until then members are added
-  directly); first image build (no Docker here yet: check the notebook environment and `tini`); re-measure memory on
-  Linux. **Deploy on Zeus the week of 2026-11-09** with Zeus's admin (away the week of
-  11-02; he controls everything there: OAuth client, groups, Kubernetes, registry) – ADMIN-GUIDE as his checklist.
+  directly); re-measure memory on Linux. First image build and run done 2026-11-06 (Docker in WSL Ubuntu on Jonas'
+  PC: hub, Studio, collector, sign-in against Zeus; found the SAS CA requirement). **Deploy on Zeus Tuesday
+  2026-11-10** with Zeus's admin (he controls everything there: OAuth client, groups, Kubernetes, registry) –
+  ADMIN-GUIDE as his checklist, plus the checklist doc https://claude.ai/artifact/NfuDtoauVKqEZ47tFanCVG.
+- **Sign-in on Zeus starts with "Paste the code"** (`STUDIO_OAUTH_MODE=paste`, Viya's built-in `vscode` client;
+  decided by Jonas 2026-11-07). **Later: an own OAuth client** (`redirect`, ADMIN-GUIDE 2): the Viya admin registers
+  `speedystore-studio` with the redirect URI `https://studio.<domain>/oauth/callback` (needs the final DNS name), the
+  secret goes into `studio-secrets`; then switch the ConfigMap and restart. Removes the copy-paste per sign-in;
+  not tested against Zeus yet.
 - **Step 2 – notebooks** (decided by Jonas 2026-10-30: show the full version from the start, harden later). No pod
   per user: Studio stays in the shared pod (it only runs our code); the **kernels** run behind a **Jupyter Enterprise
   Gateway**, and `notebook_kernel.py` gets a "remote" mode (HTTP/WebSocket, one access key per kernel, so a Studio only
