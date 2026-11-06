@@ -62,7 +62,8 @@ spec:
                   name: studio-gateway
                   key: STUDIO_GATEWAY_AUTH_TOKEN
                   optional: true
-            # If SAS Logon's certificate is signed by an internal CA, mount the CA bundle and point Python at it:
+            # SAS Logon's certificate signed by an internal CA (on Zeus: SAS SHA2 Root CA - required there, ADMIN-GUIDE 3):
+            # mount a bundle with the public CAs + the SAS ones and point Python at it:
             # - name: SSL_CERT_FILE
             #   value: /etc/studio-ca/ca.pem
           securityContext:
@@ -110,4 +111,4 @@ spec:
             sizeLimit: 1Gi
         # - name: studio-ca
         #   configMap:
-        #     name: <ca-bundle-configmap>
+        #     name: studio-ca

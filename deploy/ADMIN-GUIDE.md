@@ -96,8 +96,20 @@ are renewed with the refresh token; no client secret). Downside: one extra copy-
   `60-ingress.yaml`). The hub sets `Secure` / `__Host-` cookies and HSTS when `STUDIO_PUBLIC_URL` is `https://`.
 - `kubectl apply -f deploy/k8s/50-service.yaml -f deploy/k8s/60-ingress.yaml` after filling in `ingressClassName` and
   the host. Timeouts of 600 s (long SQL) and a 4 MB body limit are set for ingress-nginx.
-- If SAS Logon uses a certificate from an internal CA that the image doesn't trust, mount the CA bundle and set
-  `SSL_CERT_FILE` (commented lines in `40-deployment.yaml`), or as a last resort `STUDIO_VIYA_VERIFY=0`.
+- **The SAS CA (required on SAS-internal Viya such as Zeus).** SAS Logon's certificate there is signed by *SAS SHA2
+  Issuing CA01/CA02* under *SAS SHA2 Root CA*, which the image (Debian's public CAs) doesn't trust: without it every
+  sign-in fails with `CERTIFICATE_VERIFY_FAILED` (checked in Docker, 2026-11-06). `SSL_CERT_FILE` replaces the default
+  bundle, so give a file with the public CAs **and** the SAS ones (PyPI and other public hosts still need the public
+  CAs), as a ConfigMap, and uncomment the `SSL_CERT_FILE` / `studio-ca` lines in `40-deployment.yaml` (and
+  `81-gateway-deployment.yaml` with the gateway). The hub hands it to every Studio, the collector and the kernels.
+
+  ```bash
+  docker run --rm --entrypoint cat <registry>/speedystore-studio:<version> /etc/ssl/certs/ca-certificates.crt > ca.pem
+  cat sas-sha2-root-ca.pem sas-sha2-issuing-ca01.pem sas-sha2-issuing-ca02.pem >> ca.pem   # PEM files from SAS IT / the Viya deployment's trust bundle
+  kubectl -n speedystore-studio create configmap studio-ca --from-file=ca.pem
+  ```
+
+  `STUDIO_VIYA_VERIFY=0` instead is a last resort for a first test only.
 
 ## 4. Storage
 
