@@ -196,6 +196,32 @@ def test_health_needs_no_sign_in(hub: Hub) -> None:
     assert r.status == 200 and r.json()["ok"] is True
 
 
+def test_a_client_that_goes_away_is_no_error(hub: Hub, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]) -> None:
+    """A health check that timed out while the hub was starting (Docker's 4 s) used to log a 500 and two tracebacks."""
+    import socket
+    import struct
+
+    from singlestore_mcp.hub import pages
+
+    slow = pages.login
+
+    def login(*a: Any, **k: Any) -> str:
+        time.sleep(0.8)
+        return slow(*a, **k) * 50  # big enough not to fit in the socket buffer
+
+    monkeypatch.setattr(pages, "login", login)
+    port = int(hub.cfg.public_url.rsplit(":", 1)[1])
+    for _ in range(3):
+        s = socket.create_connection(("127.0.0.1", port))
+        s.sendall(b"GET /login HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))  # reset, as a client gone
+        s.close()
+    time.sleep(1.5)
+    assert Browser(hub.cfg.public_url).get("/healthz").status == 200
+    err = capfd.readouterr().err
+    assert "Traceback" not in err and "hub: GET" not in err, err[-600:]
+
+
 def test_studio_needs_sign_in(hub: Hub) -> None:
     b = Browser(hub.cfg.public_url)
     assert b.get("/studio/").location == "/login"

@@ -185,6 +185,19 @@ def test_restore_onto_an_empty_volume(dirs: tuple[Path, Path], tmp_path: Path) -
     assert repo.upserts == sent, "what was restored isn't sent back"
 
 
+def test_restore_onto_a_volume_without_a_users_folder(dirs: tuple[Path, Path], tmp_path: Path) -> None:
+    """Before anyone signed in, the hub hasn't made <data>/users yet (found in the Docker test)."""
+    users, shared = dirs
+    _write_alerts(users, "alice", [_alert(1)])
+    repo = FakeRepo(tmp_path)
+    FileMirror(repo, users, shared).sync()
+    fresh = tmp_path / "fresh" / "users"
+    m = FileMirror(repo, fresh, shared)
+    m.sync()
+    assert m.status["last_error"] is None
+    assert (fresh / "alice" / "state" / "alerts.json").is_file()
+
+
 def test_restore_keeps_what_is_there_and_ignores_strange_names(dirs: tuple[Path, Path], tmp_path: Path) -> None:
     users, shared = dirs
     repo = FakeRepo(tmp_path)

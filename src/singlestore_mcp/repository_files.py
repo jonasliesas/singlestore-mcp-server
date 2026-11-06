@@ -116,6 +116,7 @@ class FileMirror:
             path = self.users / user / "state" / "alerts.json"
             if not _USER_FOLDER.match(user) or path.exists():
                 continue
+            self.users.mkdir(mode=0o700, parents=True, exist_ok=True)  # a new volume has no users folder yet
             for folder in (self.users / user, path.parent):
                 folder.mkdir(mode=0o700, exist_ok=True)
             # The list runs oldest to newest, as alerts._record keeps it.

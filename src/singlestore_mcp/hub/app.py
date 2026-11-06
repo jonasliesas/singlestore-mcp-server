@@ -56,11 +56,19 @@ _FORWARD = ("content-type", "accept", "accept-language", "cache-control", "if-no
 _BACK = ("content-type", "cache-control", "content-disposition", "etag", "last-modified")
 
 
+# The browser (or a health check that timed out) went away before the answer: nothing to answer, nothing to log.
+_GONE = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+
+
 class _HubServer(ThreadingHTTPServer):
     daemon_threads = True
     # Python's default listen backlog is 5: every user's page opens with several calls at once, and a connection
     # beyond the backlog is retried by the client's TCP only after 1 s (Linux) / 0.5 s (Windows).
     request_queue_size = 128
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        if not isinstance(sys.exc_info()[1], _GONE):
+            super().handle_error(request, client_address)
 
 
 class Hub:
@@ -385,6 +393,8 @@ def _handler(hub: Hub) -> type[BaseHTTPRequestHandler]:
                 if path == "/admin":
                     return self._admin()
                 return self._send(404, pages.message("Not found", "There's nothing here.", ("Open Studio", "/")))
+            except _GONE:
+                return None
             except Exception as exc:  # noqa: BLE001 - never a stack trace (or a secret) to the browser
                 print(f"hub: GET {path}: {type(exc).__name__}", file=sys.stderr, flush=True)
                 return self._send(500, pages.message("Something went wrong", "The hub couldn't answer. Try again.", ("Start page", "/"), True))
@@ -406,6 +416,8 @@ def _handler(hub: Hub) -> type[BaseHTTPRequestHandler]:
                 if path == "/admin/stop":
                     return self._admin_stop()
                 return self._send(404, pages.message("Not found", "There's nothing here.", ("Open Studio", "/")))
+            except _GONE:
+                return None
             except Exception as exc:  # noqa: BLE001
                 print(f"hub: POST {path}: {type(exc).__name__}", file=sys.stderr, flush=True)
                 return self._send(500, pages.message("Something went wrong", "The hub couldn't answer. Try again.", ("Start page", "/"), True))
