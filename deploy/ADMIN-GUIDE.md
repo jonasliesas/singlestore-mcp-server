@@ -23,9 +23,27 @@ What it needs, in short:
 
 ```bash
 kubectl apply -f deploy/k8s/00-namespace.yaml          # namespace speedystore-studio (Pod Security: restricted)
-docker build -f deploy/Dockerfile -t <registry>/speedystore-studio:<version> .
-docker push <registry>/speedystore-studio:<version>
 ```
+
+The image, either way:
+
+- **Prebuilt (no build machine):** every release tag is built by GitHub Actions (`.github/workflows/image.yml`, with a
+  smoke test) and published as `ghcr.io/jonasliesas/speedystore-studio:<version>`. Copy it into your registry, or let
+  the cluster pull it from ghcr.io directly if it has outbound access:
+
+  ```bash
+  docker pull ghcr.io/jonasliesas/speedystore-studio:<version>
+  docker tag  ghcr.io/jonasliesas/speedystore-studio:<version> <registry>/speedystore-studio:<version>
+  docker push <registry>/speedystore-studio:<version>
+  ```
+
+- **Built yourself** from the tag (needs Docker Hub, `ghcr.io`, PyPI and `deb.debian.org`; ~2 min, ~2 GB):
+
+  ```bash
+  git clone --branch v<version> https://github.com/jonasliesas/singlestore-mcp-server.git && cd singlestore-mcp-server
+  docker build -f deploy/Dockerfile -t <registry>/speedystore-studio:<version> .
+  docker push <registry>/speedystore-studio:<version>
+  ```
 
 - Use the registry the Viya deployment pulls from (or another one the cluster can reach); add an `imagePullSecrets`
   entry in `40-deployment.yaml` if it needs credentials.

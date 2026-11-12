@@ -67,3 +67,5 @@ Backlog and agreed designs: [ROADMAP.md](ROADMAP.md). User docs: [README.md](REA
 3. Commit on a branch (messages end with the Co-Authored-By line).
 4. **The user pushes** – pushes from Claude's environment are blocked; never work around the proxy.
 5. Create the GitHub release (github.com/jonasliesas/singlestore-mcp-server).
+6. The tag push builds the server image (`.github/workflows/image.yml`) to `ghcr.io/jonasliesas/speedystore-studio:<version>`;
+   check it with `gh run list --workflow image.yml`.
